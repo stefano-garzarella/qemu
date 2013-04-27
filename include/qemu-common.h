@@ -487,4 +487,33 @@ size_t buffer_find_nonzero_offset(const void *buf, size_t len);
  */
 int parse_debug_env(const char *name, int max, int initial);
 
+
+#ifndef ND
+#define ND(fd, ...)    /* debugging */
+#define D(format, ...)                                          \
+        do {                                                    \
+                struct timeval __xxts;                          \
+                gettimeofday(&__xxts, NULL);                    \
+                printf("%03d.%06d %s [%d] " format "\n",        \
+                (int)__xxts.tv_sec % 1000, (int)__xxts.tv_usec, \
+                __func__, __LINE__, ##__VA_ARGS__);         \
+        } while (0)
+
+/* rate limited, lps indicates how many per second */
+#define RD(lps, format, ...)                                    \
+        do {                                                    \
+                static int t0, __cnt;                           \
+                struct timeval __xxts;                          \
+                gettimeofday(&__xxts, NULL);                    \
+                if (t0 != __xxts.tv_sec) {                      \
+                        t0 = __xxts.tv_sec;                     \
+                        __cnt = 0;                              \
+                }                                               \
+                if (__cnt++ < lps) {                            \
+                        D(format, ##__VA_ARGS__);               \
+                }                                               \
+        } while (0)
+#endif
+
+
 #endif
