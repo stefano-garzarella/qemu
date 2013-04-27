@@ -136,6 +136,15 @@ typedef struct E1000State_st {
 #define E1000_FLAG_AUTONEG_BIT 0
 #define E1000_FLAG_AUTONEG (1 << E1000_FLAG_AUTONEG_BIT)
     uint32_t compat_flags;
+
+    QEMUTimer *mit_timer;       /* handle for the timer          */
+    uint32_t  mit_timer_on;     /* mitigation timer active       */
+    uint32_t  mit_cause;        /* pending interrupt cause       */
+    uint32_t  mit_on;           /* mitigation enable             */
+    uint32_t  mit_ide;          /* use old tx mitigation regs    */
+
+    /* when the rxq becomes full, disable input until half empty */
+    uint32_t rxbufs, txbufs, rxq_full;
 } E1000State;
 
 #define	defreg(x)	x = (E1000_##x>>2)
@@ -151,6 +160,7 @@ enum {
     defreg(TPR),	defreg(TPT),	defreg(TXDCTL),	defreg(WUFC),
     defreg(RA),		defreg(MTA),	defreg(CRCERRS),defreg(VFTA),
     defreg(VET),
+    defreg(RDTR),       defreg(RADV),   defreg(TADV),   defreg(ITR),
 };
 
 static void
@@ -297,6 +307,11 @@ static void e1000_reset(void *opaque)
     int i;
 
     qemu_del_timer(d->autoneg_timer);
+    qemu_del_timer(d->mit_timer);
+    d->mit_timer_on = 0;
+    d->mit_cause = 0;
+    d->mit_ide = 0;
+    d->mit_on = 0;
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
     memset(d->mac_reg, 0, sizeof d->mac_reg);
@@ -561,6 +576,7 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
     struct e1000_context_desc *xp = (struct e1000_context_desc *)dp;
     struct e1000_tx *tp = &s->tx;
 
+    s->mit_ide |= (txd_lower & E1000_TXD_CMD_IDE); // XXX check
     if (dtype == E1000_TXD_CMD_DEXT) {	// context descriptor
         op = le32_to_cpu(xp->cmd_and_length);
         tp->ipcss = xp->lower_setup.ip_fields.ipcss;
@@ -665,6 +681,74 @@ static uint64_t tx_desc_base(E1000State *s)
     return (bah << 32) + bal;
 }
 
+/* helper function, 0 means the value is not set */
+static inline void
+mit_update_delay(uint32_t *curr, uint32_t value)
+{
+    if (value && (*curr == 0 || value < *curr)) {
+        *curr = value;
+    }
+}
+
+/*
+ * If necessary, rearm the timer and post an interrupt.
+ * Called at the end of tx/rx routines (mit_timer_on == 0),
+ * and when the timer fires (mit_timer_on == 1).
+ * We provide a partial implementation of interrupt mitigation,
+ * emulating only RADV, TADV and ITR (lower 16 bits, 1024ns units for
+ * RADV and TADV, 256ns units for ITR). RDTR is only used to enable RADV;
+ * relative timers based on TIDV and RDTR are not implemented.
+ */
+static void
+mit_rearm_and_int(void *opaque)
+{
+    E1000State *s = opaque;
+    uint32_t mit_delay = 0;
+
+    /*
+     * Clear the flag. It is only set when the callback fires,
+     * and we need to clear it anyways.
+     */
+    s->mit_timer_on = 0;
+    if (s->mit_cause == 0) { /* no events pending, we are done */
+        return;
+    }
+    /*
+     * Compute the next mitigation delay according to pending interrupts
+     * and the current values of RADV (provided RDTR!=0), TADV and ITR.
+     * Then rearm the timer.
+     */
+    if (s->mit_ide && s->mit_cause & (E1000_ICR_TXQE | E1000_ICR_TXDW)) {
+        mit_update_delay(&mit_delay, s->mac_reg[TADV] * 4);
+    }
+    if (s->mac_reg[RDTR] && (s->mit_cause & E1000_ICS_RXT0)) {
+        mit_update_delay(&mit_delay, s->mac_reg[RADV] * 4);
+    }
+    mit_update_delay(&mit_delay, s->mac_reg[ITR]);
+
+    if (mit_delay) {
+        s->mit_timer_on = 1;
+        qemu_mod_timer(s->mit_timer,
+                qemu_get_clock_ns(vm_clock) + mit_delay * 256);
+    }
+
+    set_ics(s, 0, s->mit_cause);
+    s->mit_cause = 0;
+    s->mit_ide = 0;
+}
+
+static void
+mit_set_ics(E1000State *s, uint32_t cause)
+{
+    if (s->mit_on == 0) {
+        set_ics(s, 0, cause);
+        return;
+    }
+    s->mit_cause |= cause;
+    if (!s->mit_timer_on)
+        mit_rearm_and_int(s);
+}
+
 static void
 start_xmit(E1000State *s)
 {
@@ -702,7 +786,7 @@ start_xmit(E1000State *s)
             break;
         }
     }
-    set_ics(s, 0, cause);
+    mit_set_ics(s, cause);
 }
 
 static int
@@ -927,7 +1011,7 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         s->rxbuf_min_shift)
         n |= E1000_ICS_RXDMT0;
 
-    set_ics(s, 0, n);
+    mit_set_ics(s, n);
 
     return size;
 }
@@ -992,6 +1076,12 @@ static void
 set_dlen(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val & 0xfff80;
+    if (index == RDLEN) {
+        s->rxbufs = s->mac_reg[index] / sizeof(struct e1000_rx_desc);
+        s->rxq_full = 0;
+    } else {
+        s->txbufs = s->mac_reg[index] / sizeof(struct e1000_tx_desc);
+    }
 }
 
 static void
@@ -1032,6 +1122,7 @@ static uint32_t (*macreg_readops[])(E1000State *, int) = {
     getreg(RDH),	getreg(RDT),	getreg(VET),	getreg(ICS),
     getreg(TDBAL),	getreg(TDBAH),	getreg(RDBAH),	getreg(RDBAL),
     getreg(TDLEN),	getreg(RDLEN),
+    getreg(RDTR),       getreg(RADV),   getreg(TADV),   getreg(ITR),
 
     [TOTH] = mac_read_clr8,	[TORH] = mac_read_clr8,	[GPRC] = mac_read_clr4,
     [GPTC] = mac_read_clr4,	[TPR] = mac_read_clr4,	[TPT] = mac_read_clr4,
@@ -1048,6 +1139,8 @@ static void (*macreg_writeops[])(E1000State *, int, uint32_t) = {
     putreg(PBA),	putreg(EERD),	putreg(SWSM),	putreg(WUFC),
     putreg(TDBAL),	putreg(TDBAH),	putreg(TXDCTL),	putreg(RDBAH),
     putreg(RDBAL),	putreg(LEDCTL), putreg(VET),
+    [RDTR] = set_16bit, [RADV] = set_16bit,     [TADV] = set_16bit,
+    [ITR] = set_16bit,
     [TDLEN] = set_dlen,	[RDLEN] = set_dlen,	[TCTL] = set_tctl,
     [TDT] = set_tctl,	[MDIC] = set_mdic,	[ICS] = set_ics,
     [TDH] = set_16bit,	[RDH] = set_16bit,	[RDT] = set_rdt,
@@ -1355,6 +1448,10 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 
     d->autoneg_timer = qemu_new_timer_ms(vm_clock, e1000_autoneg_timer, d);
 
+    d->mit_cause = 0;
+    d->mit_timer_on = 0;
+    d->mit_timer = qemu_new_timer_ns(vm_clock, mit_rearm_and_int, d);
+
     return 0;
 }
 
@@ -1368,6 +1465,7 @@ static Property e1000_properties[] = {
     DEFINE_NIC_PROPERTIES(E1000State, conf),
     DEFINE_PROP_BIT("autonegotiation", E1000State,
                     compat_flags, E1000_FLAG_AUTONEG_BIT, true),
+    DEFINE_PROP_UINT32("mit_on", E1000State, mit_on, 5),
     DEFINE_PROP_END_OF_LIST(),
 };
 
