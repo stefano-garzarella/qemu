@@ -728,6 +728,9 @@ static int (* const net_client_init_fun[NET_CLIENT_OPTIONS_KIND_MAX])(
         [NET_CLIENT_OPTIONS_KIND_BRIDGE]    = net_init_bridge,
 #endif
         [NET_CLIENT_OPTIONS_KIND_HUBPORT]   = net_init_hubport,
+#ifdef CONFIG_NETMAP
+        [NET_CLIENT_OPTIONS_KIND_NETMAP]    = net_init_netmap,
+#endif
 };
 
 

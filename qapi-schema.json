@@ -2697,6 +2697,11 @@
   'data': {
     'hubid':     'int32' } }
 
+{ 'type': 'NetdevNetmapOptions',
+  'data': {
+    '*ifname':     'str' } }
+
+
 ##
 # @NetClientOptions
 #
@@ -2714,7 +2719,8 @@
     'vde':      'NetdevVdeOptions',
     'dump':     'NetdevDumpOptions',
     'bridge':   'NetdevBridgeOptions',
-    'hubport':  'NetdevHubPortOptions' } }
+    'hubport':  'NetdevHubPortOptions',
+    'netmap':   'NetdevNetmapOptions' } }
 
 ##
 # @NetLegacy
