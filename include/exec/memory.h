@@ -828,6 +828,23 @@ void address_space_init(AddressSpace *as, MemoryRegion *root);
 void address_space_destroy(AddressSpace *as);
 
 /**
+ * address_space_mappable: return region containing a guest address.
+ *
+ * If the guest physical address is mappable in host virtual memory,
+ * the function returns the containing region for which the
+ * mapping is valid, and the offset to be added to the gpa
+ * to generate a host virtual address.
+ *
+ * @as: #AddressSpace to be accessed
+ * @addr: address within that address space
+ * @lo: pointer to the initial address in the range
+ * @hi: pointer after the final address in the range
+ * @ofs: pointer to the delta between the two addresses
+ */
+int address_space_mappable(AddressSpace *as, hwaddr addr, uint64_t *lo,
+        uint64_t *hi, uint64_t *ofs);
+
+/**
  * address_space_rw: read from or write to an address space.
  *
  * @as: #AddressSpace to be accessed

@@ -35,6 +35,66 @@
 
 #include "e1000_regs.h"
 
+#define MAP_RING        /* map the buffers instead of pci_dma_rw() */
+#define PARAVIRT        /* use paravirtualized driver */
+
+#ifdef PARAVIRT
+/*
+ Support for virtio-like communication.
+ 1. the VMM advertises virtio-like synchronization setting
+    the subvendor id set to 0x1101 (E1000_PARA_SUBDEV)
+
+ 2. the guest allocates the shared command status block (csb) and
+    write its physical address at CSBAL and CSBAH (offsets
+    0x2830 and 0x2834, data is little endian).
+    csb->csb_on enables the mode. If disabled, the device is a
+    regular e1000.
+
+ 3. notifications for tx and rx are exchanged without vm exits
+    if possible. In particular (only mentioning csb mode below):
+
+ TX: host sets host_need_txkick=1 when the I/O thread bh is idle.
+     Guest updates guest_tdt and returns if host_need_txkick == 0,
+     otherwise dues a regular write to the TDT.
+     If the txring runs dry, guest sets guest_need_txkick and retries
+     to recover buffers.
+     Host reacts to writes to the TDT by clearing host_need_txkick
+     and scheduling a thread to do the reads.
+     The thread is kept active until there are packets (with a
+     configurable number of retries). Eventually it sets
+     host_need_txkick=1, does a final check for packets and blocks.
+     An interrupt is generated if guest_need_txkick == 1.
+
+ */
+#define E1000_PARA_SUBDEV 0x1101
+#define E1000_CSBAL       0x02830 /* addresses for the csb */
+#define E1000_CSBAH       0x02834
+struct e1000_csb {
+    /* XXX revise the layout to minimize cache bounces. Usage:
+     * 	gw+	written frequently by the guest
+     * 	gw-	written rarely by the guest
+     * 	hr+	read frequently by the host
+     *  ...
+     */
+    /* these are mostly written by the guest */
+    uint32_t guest_tdt;            /* gw+ hr+ pkt to transmit */
+    uint32_t guest_need_txkick;    /* gw- hr+ ran out of tx bufs, request kick */
+    uint32_t guest_need_rxkick;    /* gw- hr+ ran out of rx pkts, request kick ? */
+    uint32_t guest_csb_on;         /* gw- hr+ enable paravirtual mode */
+    uint32_t guest_rdt;            /* gw+ hr+ rx buffers available */
+    uint32_t pad[11];
+
+    /* these are (mostly) written by the host */
+    uint32_t host_tdh;             /* hw+ gr0 shadow register, mostly unused */
+    uint32_t host_need_txkick;     /* hw- gr+ start the iothread */
+    uint32_t host_txcycles_lim;    /* gw- hr- how much to spin before  sleep.
+				    * set by the guest */
+    uint32_t host_txcycles;        /* gr0 hw- counter, but no need to be exported */
+    uint32_t host_rdh;             /* hw+ gr0 shadow register, mostly unused */
+    uint32_t host_need_rxkick;     /* hw- gr+ ??? */
+};
+#endif /* PARAVIRT */
+
 #define E1000_DEBUG
 
 #ifdef E1000_DEBUG
@@ -82,6 +142,18 @@ enum {
     PHY_ID2_INIT = E1000_DEVID == E1000_DEV_ID_82573L ?		0xcc2 :
                    E1000_DEVID == E1000_DEV_ID_82544GC_COPPER ?	0xc30 :
                    /* default to E1000_DEV_ID_82540EM */	0xc20
+};
+
+/*
+ * map a guest region into a host region
+ * if the pointer is within the region, ofs gives the displacement.
+ * valid = 0 means we should try to map it.
+ */
+struct guest_memreg_map {
+        int      valid;
+        uint64_t lo;
+        uint64_t hi;
+        uint64_t ofs;
 };
 
 typedef struct E1000State_st {
@@ -145,6 +217,20 @@ typedef struct E1000State_st {
 
     /* when the rxq becomes full, disable input until half empty */
     uint32_t rxbufs, txbufs, rxq_full;
+#ifdef MAP_RING
+    /* used for map ring */
+    uint64_t txring_phi, rxring_phi;         /* phisical address */
+    struct e1000_tx_desc *txring;
+    struct e1000_rx_desc *rxring;
+    struct guest_memreg_map mbufs;
+#endif /* MAP_RING */
+
+#ifdef PARAVIRT
+    /* used for the communication block */
+    struct e1000_csb *csb;
+    QEMUBH       *tx_bh;
+    uint32_t     tx_count;          /* written in last round */
+#endif /* PARAVIRT */
 } E1000State;
 
 #define	defreg(x)	x = (E1000_##x>>2)
@@ -161,7 +247,48 @@ enum {
     defreg(RA),		defreg(MTA),	defreg(CRCERRS),defreg(VFTA),
     defreg(VET),
     defreg(RDTR),       defreg(RADV),   defreg(TADV),   defreg(ITR),
+#ifdef PARAVIRT
+    defreg(CSBAL),      defreg(CSBAH),
+#endif /* PARAVIRT */
 };
+
+#ifdef MAP_RING
+/*
+ * try to extract an mbuf region
+ */
+static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
+{
+    struct guest_memreg_map *mb = &s->mbufs;
+    uint64_t a = addr;
+    DMAContext *dma;
+
+    for (;;) {
+        if (mb->valid && a >= mb->lo && a < mb->hi) {
+            return (const uint8_t *)(a + mb->ofs);
+        }
+        dma = pci_dma_context(&s->dev);
+        mb->valid = 1;
+
+        D("mapping %p is unset", (void *)addr);
+        if (dma_has_iommu(dma)) {
+            D("iommu range, cannot set");
+            break;
+        }
+        if (!address_space_mappable(dma->as, addr,
+                  &mb->lo, &mb->hi, &mb->ofs)) {
+            D("not mappable, cannot set");
+            break;
+        }
+        D("segment [%p .. %p] delta %p",
+             (void *)mb->lo, (void *)mb->hi, (void *)mb->ofs);
+
+        D("mapping txring correct %p computed %p",
+            s->txring, (void *)(s->txring_phi + mb->ofs));
+    }
+    mb->hi = mb->lo = 0; /* empty mapping */
+    return NULL;
+}
+#endif /* MAP_RING */
 
 static void
 e1000_link_down(E1000State *s)
@@ -312,6 +439,9 @@ static void e1000_reset(void *opaque)
     d->mit_cause = 0;
     d->mit_ide = 0;
     d->mit_on = 0;
+#ifdef PARAVIRT
+    qemu_bh_cancel(d->tx_bh);
+#endif /* PARAVIRT */
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
     memset(d->mac_reg, 0, sizeof d->mac_reg);
@@ -618,6 +748,25 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
     }
         
     addr = le64_to_cpu(dp->buffer_addr);
+
+#ifdef MAP_RING
+    if (!tp->tse && !tp->cptse && tp->size == 0 &&
+        !tp->vlan_needed && !tp->sum_needed &&
+        (txd_lower & E1000_TXD_CMD_EOP)) {
+            const uint8_t *x = map_mbufs(s, addr);
+        if (x) {
+            /* XXX optimization for netmap */
+            e1000_send_packet(s, x, split_size);
+            tp->tso_frames = 0;
+            tp->sum_needed = 0;
+            tp->vlan_needed = 0;
+            tp->size = 0;
+            tp->cptse = 0;
+            return ;
+        }
+    }
+#endif /* MAP_RING */
+
     if (tp->tse && tp->cptse) {
         hdr = tp->hdr_len;
         msh = hdr + tp->mss;
@@ -668,8 +817,12 @@ txdesc_writeback(E1000State *s, dma_addr_t base, struct e1000_tx_desc *dp)
     txd_upper = (le32_to_cpu(dp->upper.data) | E1000_TXD_STAT_DD) &
                 ~(E1000_TXD_STAT_EC | E1000_TXD_STAT_LC | E1000_TXD_STAT_TU);
     dp->upper.data = cpu_to_le32(txd_upper);
+#ifdef MAP_RING
+    s->txring[s->mac_reg[TDH]].upper = dp->upper;
+#else /* !MAP_RING */
     pci_dma_write(&s->dev, base + ((char *)&dp->upper - (char *)dp),
                   &dp->upper, sizeof(dp->upper));
+#endif /* !MAP_RING */
     return E1000_ICR_TXDW;
 }
 
@@ -761,10 +914,57 @@ start_xmit(E1000State *s)
         return;
     }
 
+#ifdef MAP_RING
+    base = tx_desc_base(s);
+    if (base != s->txring_phi) {
+        hwaddr desclen = s->mac_reg[TDLEN];
+        s->txring_phi = base;
+        s->txring = address_space_map(pci_dma_context(&s->dev)->as,
+              base, &desclen, 0 /* is_write */);
+        D("region size is %ld", desclen);
+    }
+#endif /* MAP_RING */
+
+#ifdef PARAVIRT
+    /* hlim prevents staying here for too long */
+    uint32_t hlim = s->mac_reg[TDLEN] / sizeof(desc) / 2;
+    uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
+
+    s->tx_count = 0;
+    for (;;) {
+        if (csb_mode) {
+            if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
+                /* we ran dry, exchange some notifications */
+                smp_mb(); /* read from guest ? */
+                s->mac_reg[TDT] = s->csb->guest_tdt;
+                tdh_start = s->csb->host_tdh = s->mac_reg[TDH];
+            }
+            if (s->tx_count > hlim || s->mac_reg[TDH] == s->mac_reg[TDT]) {
+                /* still dry, we are done */
+                s->csb->host_tdh = s->mac_reg[TDH];
+                if (s->tx_count > 50) {
+                    ND("sent %d in this iteration", s->tx_count);
+                }
+                smp_mb();
+                if (s->csb->guest_need_txkick) {
+                    mit_set_ics(s, cause);
+                }
+                return;
+            }
+        } else if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
+            break;
+        }
+        s->tx_count++;
+#else /* !PARAVIRT */
     while (s->mac_reg[TDH] != s->mac_reg[TDT]) {
+#endif /* PARAVIRT */
+#ifdef MAP_RING
+        desc = s->txring[s->mac_reg[TDH]];
+#else /* !MAP_RING */
         base = tx_desc_base(s) +
                sizeof(struct e1000_tx_desc) * s->mac_reg[TDH];
         pci_dma_read(&s->dev, base, &desc, sizeof(desc));
+#endif /* MAP_RING */
 
         DBGOUT(TX, "index %d: %p : %x %x\n", s->mac_reg[TDH],
                (void *)(intptr_t)desc.buffer_addr, desc.lower.data,
@@ -775,6 +975,11 @@ start_xmit(E1000State *s)
 
         if (++s->mac_reg[TDH] * sizeof(desc) >= s->mac_reg[TDLEN])
             s->mac_reg[TDH] = 0;
+#ifdef PARAVIRT
+        if (csb_mode) {
+            s->csb->host_tdh = s->mac_reg[TDH];
+        }
+#endif /* PARAVIRT */
         /*
          * the following could happen only if guest sw assigns
          * bogus values to TDT/TDLEN.
@@ -861,6 +1066,54 @@ e1000_set_link_status(NetClientState *nc)
 static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
 {
     int bufs;
+#ifdef PARAVIRT
+    /*
+     * called by set_rdt(), e1000_can_receive(), e1000_receive().
+     * If using the csb:
+     * - update the RDT value from there.
+     * - if there is space, clear csb->host_need_rxkick to
+     *   disable further kicks. This is needed mostly in
+     *   e1000_set_rdt(), and to clear the flag in the double check.
+     *   Otherwise, set csb->host_need_rxkick and do the double check,
+     *   possibly clearing the variable if we were wrong.
+     */
+    struct e1000_csb *csb;
+again:
+    csb = s->csb && s->csb->guest_csb_on ? s->csb : NULL;
+
+    /* XXX todo: optimize the read only if we are short of space */
+    if (csb) {
+        smp_mb();
+        s->mac_reg[RDT] = csb->guest_rdt;
+    }
+    bufs = s->mac_reg[RDT] - s->mac_reg[RDH];
+
+    if (bufs < 0) {
+        bufs += s->rxbufs;
+    }
+#if 0
+    if (s->rxq_full && bufs < s->rxbufs / 2) {
+        return false; /* hysteresis */
+    }
+#endif
+    s->rxq_full = (total_size > bufs * s->rxbuf_size);
+    if (csb) {
+        if (!s->rxq_full) {
+	    /* try to minimize writes, be more cache friendly.
+	     * The guest (or the host) might have already
+	     * cleared the flag in a previous iteration.
+	     */
+	    if (csb->host_need_rxkick) {
+		csb->host_need_rxkick = 0;
+	    }
+	} else if (!csb->host_need_rxkick) {
+	    csb->host_need_rxkick = 1;
+	    goto again;
+	}
+    }
+    return !s->rxq_full;
+#else /* !PARAVIRT */
+
     /* Fast-path short packets */
     if (total_size <= s->rxbuf_size) {
         return s->mac_reg[RDH] != s->mac_reg[RDT];
@@ -874,6 +1127,7 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
         return false;
     }
     return total_size <= bufs * s->rxbuf_size;
+#endif /* !PARAVIRT */
 }
 
 static int
@@ -943,6 +1197,13 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         size -= 4;
     }
 
+#ifdef PARAVIRT
+    if (s->csb && s->csb->guest_csb_on) {
+        smp_mb();
+        s->mac_reg[RDT] = s->csb->guest_rdt;
+    }
+#endif /* PARAVIRT */
+
     rdh_start = s->mac_reg[RDH];
     desc_offset = 0;
     total_size = size + fcs_len(s);
@@ -950,13 +1211,26 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
             set_ics(s, 0, E1000_ICS_RXO);
             return -1;
     }
+#ifdef MAP_RING
+    base = rx_desc_base(s);
+    if (base != s->rxring_phi) {
+        hwaddr desclen = s->mac_reg[RDLEN];
+        s->rxring_phi = base;
+        s->rxring = address_space_map(pci_dma_context(&s->dev)->as,
+                base, &desclen, 0 /* is_write */);
+    }
+#endif /* MAP_RING */
     do {
         desc_size = total_size - desc_offset;
         if (desc_size > s->rxbuf_size) {
             desc_size = s->rxbuf_size;
         }
         base = rx_desc_base(s) + sizeof(desc) * s->mac_reg[RDH];
+#ifdef MAP_RING
+        desc = s->rxring[s->mac_reg[RDH]];
+#else /* !MAP_RING */
         pci_dma_read(&s->dev, base, &desc, sizeof(desc));
+#endif /* !MAP_RING */
         desc.special = vlan_special;
         desc.status |= (vlan_status | E1000_RXD_STAT_DD);
         if (desc.buffer_addr) {
@@ -980,10 +1254,20 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         } else { // as per intel docs; skip descriptors with null buf addr
             DBGOUT(RX, "Null RX descriptor!!\n");
         }
+#ifdef MAP_RING
+        s->rxring[s->mac_reg[RDH]] = desc;
+        /* XXX a barrier ? */
+#else
         pci_dma_write(&s->dev, base, &desc, sizeof(desc));
+#endif /* !MAP_RING */
 
         if (++s->mac_reg[RDH] * sizeof(desc) >= s->mac_reg[RDLEN])
             s->mac_reg[RDH] = 0;
+#ifdef PARAVIRT
+	if (s->csb && s->csb->guest_csb_on) {
+	    s->csb->host_rdh = s->mac_reg[RDH];
+	}
+#endif /* PARAVIRT */
         /* see comment in start_xmit; same here */
         if (s->mac_reg[RDH] == rdh_start) {
             DBGOUT(RXERR, "RDH wraparound @%x, RDT %x, RDLEN %x\n",
@@ -1011,6 +1295,15 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         s->rxbuf_min_shift)
         n |= E1000_ICS_RXDMT0;
 
+#ifdef PARAVIRT
+    // XXX in csb mode, if the guest does not need kick, we are done.
+    if (s->csb && s->csb->guest_csb_on) {
+	if (!s->csb->guest_need_rxkick) {
+	    ND("guest_need_rxkick off, not kicking");
+	    return size;
+        }
+    }
+#endif /* PARAVIRT */
     mit_set_ics(s, n);
 
     return size;
@@ -1057,6 +1350,54 @@ mac_writereg(E1000State *s, int index, uint32_t val)
     s->mac_reg[index] = val;
 }
 
+
+#ifdef PARAVIRT
+static void
+set_32bit(E1000State *s, int index, uint32_t val)
+{
+    s->mac_reg[index] = val;
+    if (index == CSBAL) {
+	/*
+	 * We require that writes to the CSB address registers
+	 * are in the order CSBAH , CSBAL so on the second one
+	 * we have a valid 64-bit memory address.
+	 */
+        hwaddr desclen = 4096;
+        hwaddr base = ((uint64_t)s->mac_reg[CSBAH] << 32) | s->mac_reg[CSBAL];
+        s->csb = address_space_map(pci_dma_context(&s->dev)->as,
+              base, &desclen, 0 /* is_write */);
+    }
+}
+
+static void
+e1000_tx_bh(void *opaque)
+{
+    E1000State *s = opaque;
+    struct e1000_csb *csb = s->csb;
+
+    ND("starting tdt %d sent %d in prev.round ", csb->guest_tdt, s->tx_count);
+    s->mac_reg[TDT] = csb->guest_tdt;
+    start_xmit(s);
+    csb->host_txcycles = (s->tx_count > 0) ? 0 : csb->host_txcycles+1;
+    if (csb->host_txcycles >= csb->host_txcycles_lim) {
+        /* prepare to sleep, with race avoidance */
+        csb->host_txcycles = 0;
+        csb->host_need_txkick = 1;
+	ND("tx bh going to sleep, set txkick");
+        smp_mb();
+        /* XXX read tdt */
+        s->mac_reg[TDT] = csb->guest_tdt;
+        if (s->mac_reg[TDH] != s->mac_reg[TDT]) {
+	    ND("tx bh race avoidance, clear txkick");
+            csb->host_need_txkick = 0;
+        }
+    }
+    if (csb->host_need_txkick == 0) {
+        qemu_bh_schedule(s->tx_bh);
+    }
+}
+#endif /* PARAVIRT */
+
 static void
 set_rdt(E1000State *s, int index, uint32_t val)
 {
@@ -1089,6 +1430,16 @@ set_tctl(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val;
     s->mac_reg[TDT] &= 0xffff;
+#ifdef PARAVIRT
+    if (s->csb && s->csb->guest_csb_on) {
+	ND("kick accepted tdt %d guest-tdt %d",
+		s->mac_reg[TDT], s->csb->guest_tdt);
+        s->csb->host_need_txkick = 0; /* XXX could be done by the guest */
+        smp_mb(); /* XXX do we care ? */
+        qemu_bh_schedule(s->tx_bh);
+        return;
+    }
+#endif /* PARAVIRT */
     start_xmit(s);
 }
 
@@ -1123,6 +1474,9 @@ static uint32_t (*macreg_readops[])(E1000State *, int) = {
     getreg(TDBAL),	getreg(TDBAH),	getreg(RDBAH),	getreg(RDBAL),
     getreg(TDLEN),	getreg(RDLEN),
     getreg(RDTR),       getreg(RADV),   getreg(TADV),   getreg(ITR),
+#ifdef PARAVIRT
+    getreg(CSBAL),      getreg(CSBAH),
+#endif /* PARAVIRT */
 
     [TOTH] = mac_read_clr8,	[TORH] = mac_read_clr8,	[GPRC] = mac_read_clr4,
     [GPTC] = mac_read_clr4,	[TPR] = mac_read_clr4,	[TPT] = mac_read_clr4,
@@ -1141,6 +1495,9 @@ static void (*macreg_writeops[])(E1000State *, int, uint32_t) = {
     putreg(RDBAL),	putreg(LEDCTL), putreg(VET),
     [RDTR] = set_16bit, [RADV] = set_16bit,     [TADV] = set_16bit,
     [ITR] = set_16bit,
+#ifdef PARAVIRT
+    [CSBAL] = set_32bit, [CSBAH] = set_32bit,
+#endif /* PARAVIRT */
     [TDLEN] = set_dlen,	[RDLEN] = set_dlen,	[TCTL] = set_tctl,
     [TDT] = set_tctl,	[MDIC] = set_mdic,	[ICS] = set_ics,
     [TDH] = set_16bit,	[RDH] = set_16bit,	[RDT] = set_rdt,
@@ -1452,6 +1809,9 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     d->mit_timer_on = 0;
     d->mit_timer = qemu_new_timer_ns(vm_clock, mit_rearm_and_int, d);
 
+#ifdef PARAVIRT
+    d->tx_bh = qemu_bh_new(e1000_tx_bh, d);
+#endif /* PARAVIRT */
     return 0;
 }
 
@@ -1479,6 +1839,9 @@ static void e1000_class_init(ObjectClass *klass, void *data)
     k->romfile = "efi-e1000.rom";
     k->vendor_id = PCI_VENDOR_ID_INTEL;
     k->device_id = E1000_DEVID;
+#ifdef PARAVIRT
+    k->subsystem_id = E1000_PARA_SUBDEV;
+#endif /* PARAVIRT */
     k->revision = 0x03;
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     dc->desc = "Intel Gigabit Ethernet";
