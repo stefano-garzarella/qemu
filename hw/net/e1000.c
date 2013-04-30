@@ -37,6 +37,7 @@
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
 #define PARAVIRT        /* use paravirtualized driver */
+//#define RATE		/* debug rate monitor */
 
 #ifdef PARAVIRT
 /*
@@ -44,7 +45,7 @@
  1. the VMM advertises virtio-like synchronization setting
     the subvendor id set to 0x1101 (E1000_PARA_SUBDEV)
 
- 2. the guest allocates the shared command status block (csb) and
+ 2. the guest allocates the shared Communication Status Block (csb) and
     write its physical address at CSBAL and CSBAH (offsets
     0x2830 and 0x2834, data is little endian).
     csb->csb_on enables the mode. If disabled, the device is a
@@ -95,7 +96,6 @@ struct e1000_csb {
 };
 #endif /* PARAVIRT */
 
-//#define RATE
 #ifdef RATE
 #define IFRATE(x) x
 #else
@@ -1041,11 +1041,10 @@ start_xmit(E1000State *s)
                 /* we ran dry, exchange some notifications */
                 smp_mb(); /* read from guest ? */
                 s->mac_reg[TDT] = s->csb->guest_tdt;
-                tdh_start = s->csb->host_tdh = s->mac_reg[TDH];
+                tdh_start = s->mac_reg[TDH];
             }
             if (s->tx_count > hlim || s->mac_reg[TDH] == s->mac_reg[TDT]) {
                 /* still dry, we are done */
-                s->csb->host_tdh = s->mac_reg[TDH];
                 if (s->tx_count > 50) {
                     ND("sent %d in this iteration", s->tx_count);
                 }
@@ -1167,9 +1166,10 @@ e1000_set_link_status(NetClientState *nc)
         set_ics(s, 0, E1000_ICR_LSC);
 }
 
+#define AVAIL_RXBUFS (((int)s->mac_reg[RDT] -(int)s->mac_reg[RDH]) + ((s->mac_reg[RDT] < s->mac_reg[RDH]) ? s->rxbufs : 0))
+
 static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
 {
-    int bufs;
 #ifdef PARAVIRT
     /*
      * called by set_rdt(), e1000_can_receive(), e1000_receive().
@@ -1181,27 +1181,22 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
      *   Otherwise, set csb->host_need_rxkick and do the double check,
      *   possibly clearing the variable if we were wrong.
      */
-    struct e1000_csb *csb;
-again:
-    csb = s->csb && s->csb->guest_csb_on ? s->csb : NULL;
+    struct e1000_csb *csb = s->csb && s->csb->guest_csb_on ? s->csb : NULL;
 
-    /* XXX todo: optimize the read only if we are short of space */
-    if (csb) {
-        smp_mb();
-        s->mac_reg[RDT] = csb->guest_rdt;
-    }
-    bufs = s->mac_reg[RDT] - s->mac_reg[RDH];
-
-    if (bufs < 0) {
-        bufs += s->rxbufs;
-    }
+    s->rxq_full = (total_size > AVAIL_RXBUFS * s->rxbuf_size);
 #if 0
     if (s->rxq_full && bufs < s->rxbufs / 2) {
         return false; /* hysteresis */
     }
 #endif
-    s->rxq_full = (total_size > bufs * s->rxbuf_size);
     if (csb) {
+	if (s->rxq_full) {
+doublecheck:
+	    /* Reload csb->guest_rdt only when necessary. */
+	    smp_mb();
+	    s->mac_reg[RDT] = csb->guest_rdt;
+	    s->rxq_full = (total_size > AVAIL_RXBUFS * s->rxbuf_size);
+	}
         if (!s->rxq_full) {
 	    /* try to minimize writes, be more cache friendly.
 	     * The guest (or the host) might have already
@@ -1212,7 +1207,7 @@ again:
 	    }
 	} else if (!csb->host_need_rxkick) {
 	    csb->host_need_rxkick = 1;
-	    goto again;
+	    goto doublecheck;
 	}
     }
     return !s->rxq_full;
@@ -1265,6 +1260,9 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
     size_t desc_offset;
     size_t desc_size;
     size_t total_size;
+#ifdef PARAVIRT
+    uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
+#endif
 
     if (!(s->mac_reg[STATUS] & E1000_STATUS_LU)) {
         return -1;
@@ -1302,7 +1300,7 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
     }
 
 #ifdef PARAVIRT
-    if (s->csb && s->csb->guest_csb_on) {
+    if (csb_mode) {
         smp_mb();
         s->mac_reg[RDT] = s->csb->guest_rdt;
     }
@@ -1370,7 +1368,7 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         if (++s->mac_reg[RDH] * sizeof(desc) >= s->mac_reg[RDLEN])
             s->mac_reg[RDH] = 0;
 #ifdef PARAVIRT
-	if (s->csb && s->csb->guest_csb_on) {
+	if (csb_mode) {
 	    s->csb->host_rdh = s->mac_reg[RDH];
 	}
 #endif /* PARAVIRT */
@@ -1403,7 +1401,7 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 
 #ifdef PARAVIRT
     // XXX in csb mode, if the guest does not need kick, we are done.
-    if (s->csb && s->csb->guest_csb_on) {
+    if (csb_mode) {
 	if (!s->csb->guest_need_rxkick) {
 	    ND("guest_need_rxkick off, not kicking");
 	    return size;
@@ -1462,6 +1460,14 @@ mac_writereg(E1000State *s, int index, uint32_t val)
 static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
+    if (index == CSBAH && val == 0xFFFFFFFF) {
+	/* Synchronize with the TX bottom half. */
+	qemu_aio_wait();
+	D("TXBH sync");
+	address_space_unmap(pci_dma_context(&s->dev)->as,
+		s->csb, 4096, 1, 4096);
+	//s->csb = NULL;
+    }
     s->mac_reg[index] = val;
     if (index == CSBAL) {
 	/*
@@ -1469,10 +1475,10 @@ set_32bit(E1000State *s, int index, uint32_t val)
 	 * are in the order CSBAH , CSBAL so on the second one
 	 * we have a valid 64-bit memory address.
 	 */
-        hwaddr desclen = 4096;
-        hwaddr base = ((uint64_t)s->mac_reg[CSBAH] << 32) | s->mac_reg[CSBAL];
-        s->csb = address_space_map(pci_dma_context(&s->dev)->as,
-              base, &desclen, 0 /* is_write */);
+	hwaddr len = 4096;
+	hwaddr base = ((uint64_t)s->mac_reg[CSBAH] << 32) | s->mac_reg[CSBAL];
+	s->csb = address_space_map(pci_dma_context(&s->dev)->as,
+		base, &len, 1 /* is_write */);
     }
 }
 
