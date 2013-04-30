@@ -95,6 +95,13 @@ struct e1000_csb {
 };
 #endif /* PARAVIRT */
 
+//#define RATE
+#ifdef RATE
+#define IFRATE(x) x
+#else
+#define IFRATE(x) 
+#endif
+
 #define E1000_DEBUG
 
 #ifdef E1000_DEBUG
@@ -231,6 +238,7 @@ typedef struct E1000State_st {
     QEMUBH       *tx_bh;
     uint32_t     tx_count;          /* written in last round */
 #endif /* PARAVIRT */
+    IFRATE(QEMUTimer * rate_timer);
 } E1000State;
 
 #define	defreg(x)	x = (E1000_##x>>2)
@@ -251,6 +259,93 @@ enum {
     defreg(CSBAL),      defreg(CSBAH),
 #endif /* PARAVIRT */
 };
+
+/* Rate monitor: shows the communication statistics. */
+#ifdef RATE
+static int64_t rate_last_timestamp = 0;
+static int rate_interval_ms = 1000;
+
+/* rate mmio accesses */
+static int rate_mmio_write = 0;
+static int rate_mmio_read = 0;
+
+/* rate interrupts */
+static int rate_irq_int = 0;
+static int rate_irq_level = 0;
+static int rate_ntfy_txfull = 0;
+
+/* rate guest notifications */
+static int rate_ntfy_tx = 0;    // new TX descriptors
+static int rate_ntfy_ic = 0;    // interrupt acknowledge (interrupt clear)
+static int rate_ntfy_rx = 0;
+
+/* rate tx packets */
+static int rate_tx = 0;
+static int64_t rate_txb = 0;
+
+/* rate rx packet */
+static int rate_rx = 0;  // received packet counter
+static int64_t rate_rxb = 0;
+
+static int rate_tx_bh_len = 0;
+static int rate_tx_bh_count = 0;
+
+#ifdef PARAVIRT
+static void csb_dump(E1000State * s) {
+    if (s->csb) {
+	printf("guest_csb_on = %X\n", s->csb->guest_csb_on);
+	printf("guest_tdt = %X\n", s->csb->guest_tdt);
+	printf("guest_rdt = %X\n", s->csb->guest_rdt);
+	printf("guest_need_txkick = %X\n", s->csb->guest_need_txkick);
+	printf("guest_need_rxkick = %X\n", s->csb->guest_need_rxkick);
+	printf("host_tdh = %X\n", s->csb->host_tdh);
+	printf("host_rdh = %X\n", s->csb->host_rdh);
+	printf("host_need_txkick = %X\n", s->csb->host_need_txkick);
+	printf("host_need_rxkick = %X\n", s->csb->host_need_rxkick);
+	printf("host_txcycles_lim = %X\n", s->csb->host_txcycles_lim);
+	printf("host_txcycles = %X\n", s->csb->host_txcycles);
+    }
+}
+#endif /* PARAVIRT */
+
+static void rate_callback(void * opaque)
+{
+    E1000State* s = opaque;
+    int64_t delta;
+
+#ifdef PARAVIRT
+    if (rate_irq_int == 0 && rate_tx == 0 && rate_rx == 0 && rate_ntfy_tx == 0 &&
+	rate_ntfy_rx == 0)
+	csb_dump(s);
+#endif /* PARAVIRT */
+
+    delta = qemu_get_clock_ms(vm_clock) - rate_last_timestamp;
+    printf("Interrupt:           %4.3f KHz\n", (double)rate_irq_int/delta);
+    printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
+    printf("Tx stream:           %4.3f Mbps\n", (double)(rate_txb*8)/delta/1000.0);
+    if (rate_tx_bh_count)
+	printf("Avg BH work:         %4.3f\n", (double)rate_tx_bh_len/(double)rate_tx_bh_count);
+    printf("Rx packets:          %4.3f Kpps\n", (double)rate_rx/delta);
+    printf("Rx stream:           %4.3f Mbps\n", (double)(rate_rxb*8)/delta/1000.0);
+    printf("Tx notifications:    %4.3f KHz\n", (double)rate_ntfy_tx/delta);
+    printf("TX full notif.:      %4.3f KHz\n", (double)rate_ntfy_txfull/delta);
+    printf("Rx notifications:    %4.3f KHz\n", (double)rate_ntfy_rx/delta);
+    printf("MMIO writes:         %4.3f KHz\n", (double)rate_mmio_write/delta);
+    printf("MMIO reads:          %4.3f KHz\n", (double)rate_mmio_read/delta);
+    printf("\n");
+    rate_irq_int = 0;
+    rate_ntfy_txfull = 0;
+    rate_ntfy_tx = rate_ntfy_ic = rate_ntfy_rx = 0;
+    rate_mmio_read = rate_mmio_write = 0;
+    rate_rx = rate_rxb = 0;
+    rate_tx = rate_txb = 0;
+    rate_tx_bh_len = rate_tx_bh_count = 0;
+
+    qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock) +
+		    rate_interval_ms);
+    rate_last_timestamp = qemu_get_clock_ms(vm_clock);
+}
+#endif /* RATE */
 
 #ifdef MAP_RING
 /*
@@ -394,6 +489,12 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
     s->mac_reg[ICS] = val;
 
     qemu_set_irq(s->dev.irq[0], (s->mac_reg[IMS] & s->mac_reg[ICR]) != 0);
+#ifdef RATE
+    if (!rate_irq_level && (s->mac_reg[IMS] & s->mac_reg[ICR])) {
+	IFRATE(rate_irq_int++);
+    }
+    rate_irq_level = (s->mac_reg[IMS] & s->mac_reg[ICR]);
+#endif
 }
 
 static void
@@ -438,7 +539,6 @@ static void e1000_reset(void *opaque)
     d->mit_timer_on = 0;
     d->mit_cause = 0;
     d->mit_ide = 0;
-    d->mit_on = 0;
 #ifdef PARAVIRT
     qemu_bh_cancel(d->tx_bh);
 #endif /* PARAVIRT */
@@ -467,6 +567,8 @@ set_ctrl(E1000State *s, int index, uint32_t val)
 {
     /* RST is self clearing */
     s->mac_reg[CTRL] = val & ~E1000_CTRL_RST;
+    IFRATE(qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock)
+		+ 1000));
 }
 
 static void
@@ -634,6 +736,8 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
     } else {
         qemu_send_packet(nc, buf, size);
     }
+    IFRATE(rate_tx++);
+    IFRATE(rate_txb += size);
 }
 
 static void
@@ -1211,6 +1315,8 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
             set_ics(s, 0, E1000_ICS_RXO);
             return -1;
     }
+    IFRATE(rate_rx++);
+    IFRATE(rate_rxb += size);
 #ifdef MAP_RING
     base = rx_desc_base(s);
     if (base != s->rxring_phi) {
@@ -1322,6 +1428,7 @@ mac_icr_read(E1000State *s, int index)
 
     DBGOUT(INTERRUPT, "ICR read: %x\n", ret);
     set_interrupt_cause(s, 0, 0);
+    IFRATE(rate_ntfy_ic++);
     return ret;
 }
 
@@ -1402,6 +1509,7 @@ static void
 set_rdt(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val & 0xffff;
+    IFRATE(rate_ntfy_rx++);
     if (e1000_has_rxbufs(s, 1)) {
         qemu_flush_queued_packets(qemu_get_queue(s->nic));
     }
@@ -1430,6 +1538,7 @@ set_tctl(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val;
     s->mac_reg[TDT] &= 0xffff;
+    IFRATE(rate_ntfy_tx++);
 #ifdef PARAVIRT
     if (s->csb && s->csb->guest_csb_on) {
 	ND("kick accepted tdt %d guest-tdt %d",
@@ -1525,6 +1634,7 @@ e1000_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         DBGOUT(UNKNOWN, "MMIO unknown write addr=0x%08x,val=0x%08"PRIx64"\n",
                index<<2, val);
     }
+    IFRATE(rate_mmio_write++);
 }
 
 static uint64_t
@@ -1533,6 +1643,7 @@ e1000_mmio_read(void *opaque, hwaddr addr, unsigned size)
     E1000State *s = opaque;
     unsigned int index = (addr & 0x1ffff) >> 2;
 
+    IFRATE(rate_mmio_read++);
     if (index < NREADOPS && macreg_readops[index])
     {
         return macreg_readops[index](s, index);
@@ -1750,6 +1861,8 @@ pci_e1000_uninit(PCIDevice *dev)
 
     qemu_del_timer(d->autoneg_timer);
     qemu_free_timer(d->autoneg_timer);
+    IFRATE(qemu_del_timer(d->rate_timer));
+    IFRATE(qemu_free_timer(d->rate_timer));
     memory_region_destroy(&d->mmio);
     memory_region_destroy(&d->io);
     qemu_del_nic(d->nic);
@@ -1808,6 +1921,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     d->mit_cause = 0;
     d->mit_timer_on = 0;
     d->mit_timer = qemu_new_timer_ns(vm_clock, mit_rearm_and_int, d);
+    IFRATE(d->rate_timer = qemu_new_timer_ms(vm_clock, &rate_callback, d));
 
 #ifdef PARAVIRT
     d->tx_bh = qemu_bh_new(e1000_tx_bh, d);
