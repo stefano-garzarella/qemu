@@ -1461,12 +1461,16 @@ static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
     if (index == CSBAH && val == 0xFFFFFFFF) {
+	smp_mb();
+	s->mac_reg[RDT] = s->csb->guest_rdt;
+	s->mac_reg[TDT] = s->csb->guest_tdt;
 	/* Synchronize with the TX bottom half. */
 	qemu_aio_wait();
 	D("TXBH sync");
+	qemu_bh_cancel(s->tx_bh);
 	address_space_unmap(pci_dma_context(&s->dev)->as,
 		s->csb, 4096, 1, 4096);
-	//s->csb = NULL;
+	s->csb = NULL;
     }
     s->mac_reg[index] = val;
     if (index == CSBAL) {
@@ -1487,6 +1491,12 @@ e1000_tx_bh(void *opaque)
 {
     E1000State *s = opaque;
     struct e1000_csb *csb = s->csb;
+    
+    if (!csb) {
+	D("This is not happening!!");
+	start_xmit(s);
+	return;
+    }
 
     ND("starting tdt %d sent %d in prev.round ", csb->guest_tdt, s->tx_count);
     s->mac_reg[TDT] = csb->guest_tdt;
