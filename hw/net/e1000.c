@@ -314,9 +314,7 @@ static void rate_callback(void * opaque)
     int64_t delta;
 
 #ifdef PARAVIRT
-    if (rate_irq_int == 0 && rate_tx == 0 && rate_rx == 0 && rate_ntfy_tx == 0 &&
-	rate_ntfy_rx == 0)
-	csb_dump(s);
+    csb_dump(s);
 #endif /* PARAVIRT */
 
     delta = qemu_get_clock_ms(vm_clock) - rate_last_timestamp;
@@ -491,7 +489,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
     qemu_set_irq(s->dev.irq[0], (s->mac_reg[IMS] & s->mac_reg[ICR]) != 0);
 #ifdef RATE
     if (!rate_irq_level && (s->mac_reg[IMS] & s->mac_reg[ICR])) {
-	IFRATE(rate_irq_int++);
+	rate_irq_int++;
     }
     rate_irq_level = (s->mac_reg[IMS] & s->mac_reg[ICR]);
 #endif
@@ -540,6 +538,7 @@ static void e1000_reset(void *opaque)
     d->mit_cause = 0;
     d->mit_ide = 0;
 #ifdef PARAVIRT
+    d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
 #endif /* PARAVIRT */
     memset(d->phy_reg, 0, sizeof d->phy_reg);
@@ -736,8 +735,7 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
     } else {
         qemu_send_packet(nc, buf, size);
     }
-    IFRATE(rate_tx++);
-    IFRATE(rate_txb += size);
+    IFRATE(rate_tx++; rate_txb += size);
 }
 
 static void
@@ -1034,7 +1032,6 @@ start_xmit(E1000State *s)
     uint32_t hlim = s->mac_reg[TDLEN] / sizeof(desc) / 2;
     uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
 
-    s->tx_count = 0;
     for (;;) {
         if (csb_mode) {
             if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
@@ -1313,8 +1310,7 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
             set_ics(s, 0, E1000_ICS_RXO);
             return -1;
     }
-    IFRATE(rate_rx++);
-    IFRATE(rate_rxb += size);
+    IFRATE(rate_rx++; rate_rxb += size);
 #ifdef MAP_RING
     base = rx_desc_base(s);
     if (base != s->rxring_phi) {
@@ -1460,29 +1456,29 @@ mac_writereg(E1000State *s, int index, uint32_t val)
 static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
-    if (index == CSBAH && val == 0xFFFFFFFF) {
-	smp_mb();
-	s->mac_reg[RDT] = s->csb->guest_rdt;
-	s->mac_reg[TDT] = s->csb->guest_tdt;
-	/* Synchronize with the TX bottom half. */
-	qemu_aio_wait();
-	D("TXBH sync");
-	qemu_bh_cancel(s->tx_bh);
-	address_space_unmap(pci_dma_context(&s->dev)->as,
-		s->csb, 4096, 1, 4096);
-	s->csb = NULL;
-    }
     s->mac_reg[index] = val;
     if (index == CSBAL) {
+	hwaddr len = 4096;
+	hwaddr base = ((uint64_t)s->mac_reg[CSBAH] << 32) | s->mac_reg[CSBAL];
 	/*
 	 * We require that writes to the CSB address registers
 	 * are in the order CSBAH , CSBAL so on the second one
 	 * we have a valid 64-bit memory address.
-	 */
-	hwaddr len = 4096;
-	hwaddr base = ((uint64_t)s->mac_reg[CSBAH] << 32) | s->mac_reg[CSBAL];
-	s->csb = address_space_map(pci_dma_context(&s->dev)->as,
-		base, &len, 1 /* is_write */);
+         * Any previous region is unmapped, and handlers terminated.
+         * The CSB is then remapped if the new pointer is != 0
+         */
+	if (s->csb) {
+	    qemu_bh_cancel(s->tx_bh);
+	    address_space_unmap(pci_dma_context(&s->dev)->as,
+		    s->csb, len, 1, len);
+	    s->csb = NULL;
+	    D("TXBH canc + CSB release\n");
+	}
+	if (base) {
+	    s->csb = address_space_map(pci_dma_context(&s->dev)->as,
+		    base, &len, 1 /* is_write */);
+	    D("CSB (re)mapping\n");
+	}
     }
 }
 
@@ -1500,7 +1496,9 @@ e1000_tx_bh(void *opaque)
 
     ND("starting tdt %d sent %d in prev.round ", csb->guest_tdt, s->tx_count);
     s->mac_reg[TDT] = csb->guest_tdt;
+    s->tx_count = 0;
     start_xmit(s);
+    IFRATE(rate_tx_bh_count++; rate_tx_bh_len += s->tx_count);
     csb->host_txcycles = (s->tx_count > 0) ? 0 : csb->host_txcycles+1;
     if (csb->host_txcycles >= csb->host_txcycles_lim) {
         /* prepare to sleep, with race avoidance */
@@ -1508,7 +1506,6 @@ e1000_tx_bh(void *opaque)
         csb->host_need_txkick = 1;
 	ND("tx bh going to sleep, set txkick");
         smp_mb();
-        /* XXX read tdt */
         s->mac_reg[TDT] = csb->guest_tdt;
         if (s->mac_reg[TDH] != s->mac_reg[TDT]) {
 	    ND("tx bh race avoidance, clear txkick");
@@ -1877,8 +1874,12 @@ pci_e1000_uninit(PCIDevice *dev)
 
     qemu_del_timer(d->autoneg_timer);
     qemu_free_timer(d->autoneg_timer);
-    IFRATE(qemu_del_timer(d->rate_timer));
-    IFRATE(qemu_free_timer(d->rate_timer));
+    qemu_del_timer(d->mit_timer);
+    qemu_free_timer(d->mit_timer);
+#ifdef PARAVIRT
+    qemu_bh_delete(d->tx_bh);
+#endif /* PARAVIRT */
+    IFRATE(qemu_del_timer(d->rate_timer); qemu_free_timer(d->rate_timer));
     memory_region_destroy(&d->mmio);
     memory_region_destroy(&d->io);
     qemu_del_nic(d->nic);
@@ -1934,8 +1935,6 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 
     d->autoneg_timer = qemu_new_timer_ms(vm_clock, e1000_autoneg_timer, d);
 
-    d->mit_cause = 0;
-    d->mit_timer_on = 0;
     d->mit_timer = qemu_new_timer_ns(vm_clock, mit_rearm_and_int, d);
     IFRATE(d->rate_timer = qemu_new_timer_ms(vm_clock, &rate_callback, d));
 
