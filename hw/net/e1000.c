@@ -312,12 +312,12 @@ static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
 
     for (;;) {
         if (mb->valid && a >= mb->lo && a < mb->hi) {
-            return (const uint8_t *)(a + mb->ofs);
+            return (const uint8_t *)(uintptr_t)(a + mb->ofs);
         }
         dma = pci_dma_context(&s->dev);
         mb->valid = 1;
 
-        D("mapping %p is unset", (void *)addr);
+        D("mapping %p is unset", (void *)(uintptr_t)addr);
         if (dma_has_iommu(dma)) {
             D("iommu range, cannot set");
             break;
@@ -328,10 +328,12 @@ static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
             break;
         }
         D("segment [%p .. %p] delta %p",
-             (void *)mb->lo, (void *)mb->hi, (void *)mb->ofs);
+             (void *)(uintptr_t)mb->lo,
+             (void *)(uintptr_t)mb->hi,
+             (void *)(uintptr_t)mb->ofs);
 
         D("mapping txring correct %p computed %p",
-            s->txring, (void *)(s->txring_phi + mb->ofs));
+            s->txring, (void *)(uintptr_t)(s->txring_phi + mb->ofs));
     }
     mb->hi = mb->lo = 0; /* empty mapping */
     return NULL;
@@ -978,7 +980,7 @@ start_xmit(E1000State *s)
         s->txring_phi = base;
         s->txring = address_space_map(pci_dma_context(&s->dev)->as,
               base, &desclen, 0 /* is_write */);
-        D("region size is %ld", desclen);
+        D("region size is %ld", (long int)desclen);
     }
 #endif /* MAP_RING */
 
