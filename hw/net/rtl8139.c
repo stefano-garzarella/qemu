@@ -721,6 +721,10 @@ static void rtl8139_update_irq(RTL8139State *s)
     int isr;
     isr = (s->IntrStatus & s->IntrMask) & 0xffff;
 
+#ifdef PARAVIRT
+    if (s->csb && s->csb->guest_csb_on)
+	s->csb->host_isr = s->IntrStatus;
+#endif /* PARAVIRT */
     DPRINTF("Set IRQ to %d (%04x %04x)\n", isr ? 1 : 0, s->IntrStatus,
         s->IntrMask);
 
@@ -1196,6 +1200,10 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
     {
         rtl8139_update_irq(s);
     }
+#ifdef PARAVIRT
+    else if (s->csb && s->csb->guest_csb_on)
+	s->csb->host_isr = s->IntrStatus;
+#endif /* PARAVIRT */
 
     return size_;
 }
@@ -1223,6 +1231,10 @@ static void rtl8139_reset(DeviceState *d)
     /* reset interrupt mask */
     s->IntrStatus = 0;
     s->IntrMask = 0;
+#ifdef PARAVIRT
+    if (s->csb)
+	s->csb->host_isr = 0;
+#endif /* PARAVIRT */
 
     rtl8139_update_irq(s);
 
