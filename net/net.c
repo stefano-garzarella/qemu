@@ -757,6 +757,9 @@ static int net_client_init1(const void *object, int is_netdev, Error **errp)
 #ifdef CONFIG_VDE
         case NET_CLIENT_OPTIONS_KIND_VDE:
 #endif
+#ifdef CONFIG_NETMAP
+        case NET_CLIENT_OPTIONS_KIND_NETMAP:
+#endif
 #ifdef CONFIG_NET_BRIDGE
         case NET_CLIENT_OPTIONS_KIND_BRIDGE:
 #endif
