@@ -60,6 +60,13 @@
 #include "sysemu/sysemu.h"
 #include "qemu/iov.h"
 
+#define PARAVIRT
+#ifdef PARAVIRT
+#define RTL8139CP_PARAVIRT_SUBDEV 0x1101
+#include "net/paravirt.h"
+#endif /* PARAVIRT */
+
+
 /* debug RTL8139 card */
 //#define DEBUG_RTL8139 1
 
@@ -139,6 +146,10 @@ enum RTL8139_registers {
     RxRingAddrLO    = 0xE4, /* 64-bit start addr of Rx ring */
     RxRingAddrHI    = 0xE8, /* 64-bit start addr of Rx ring */
     TxThresh    = 0xEC, /* Early Tx threshold */
+#ifdef PARAVIRT
+    CSBAL   = 0xF0,
+    CSBAH   = 0xF4,
+#endif /* PARAVIRT */
 };
 
 enum ClearBitMasks {
@@ -492,6 +503,12 @@ typedef struct RTL8139State {
 
     /* Tally counters */
     RTL8139TallyCounters tally_counters;
+
+#ifdef PARAVIRT
+    uint32_t	CSBAH;
+    uint32_t	CSBAL;
+    struct paravirt_csb * csb;
+#endif /* PARAVIRT */
 
     /* Non-persistent data */
     uint8_t   *cplus_txbuffer;
@@ -2552,6 +2569,33 @@ static uint16_t rtl8139_CSCR_read(RTL8139State *s)
     return ret;
 }
 
+#ifdef PARAVIRT
+static void rtl8139_configure_csb(RTL8139State *s)
+{
+    hwaddr len = 4096;
+    hwaddr base = ((uint64_t)s->CSBAH << 32) | s->CSBAL;
+    /*
+     * We require that writes to the CSB address registers
+     * are in the order CSBAH , CSBAL so on the second one
+     * we have a valid 64-bit memory address.
+     * Any previous region is unmapped, and handlers terminated.
+     * The CSB is then remapped if the new pointer is != 0
+     */
+    if (s->csb) {
+	//qemu_bh_cancel(s->tx_bh); TODO
+	address_space_unmap(pci_dma_context(&s->dev)->as,
+		s->csb, len, 1, len);
+	s->csb = NULL;
+	D("TXBH canc + CSB release\n");
+    }
+    if (base) {
+	s->csb = address_space_map(pci_dma_context(&s->dev)->as,
+		base, &len, 1 /* is_write */);
+	D("CSB (re)mapping\n");
+    }
+}
+#endif
+
 static void rtl8139_TxAddr_write(RTL8139State *s, uint32_t txAddrOffset, uint32_t val)
 {
     DPRINTF("TxAddr write offset=0x%x val=0x%08x\n", txAddrOffset, val);
@@ -2949,7 +2993,17 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
                 rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
             }
             break;
+#ifdef PARAVIRT
+	case CSBAH:
+	    s->CSBAH = val;
+	    break;
 
+	case CSBAL:
+	    s->CSBAL = val;
+	    rtl8139_configure_csb(s);
+	    break;
+
+#endif /* PARAVIRT */
         default:
             DPRINTF("ioport write(l) addr=0x%x val=0x%08x via write(b)\n",
                 addr, val);
@@ -3512,7 +3566,9 @@ static int pci_rtl8139_init(PCIDevice *dev)
     s->TimerExpire = 0;
     s->timer = qemu_new_timer_ns(vm_clock, rtl8139_timer, s);
     rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
-
+#ifdef PARAVIRT
+    s->csb = NULL;
+#endif /* PARAVIRT */
     add_boot_device_path(s->conf.bootindex, &dev->qdev, "/ethernet-phy@0");
 
     return 0;
@@ -3533,6 +3589,9 @@ static void rtl8139_class_init(ObjectClass *klass, void *data)
     k->romfile = "efi-rtl8139.rom";
     k->vendor_id = PCI_VENDOR_ID_REALTEK;
     k->device_id = PCI_DEVICE_ID_REALTEK_8139;
+#ifdef PARAVIRT
+    k->subsystem_id = RTL8139CP_PARAVIRT_SUBDEV;
+#endif /* PARAVIRT */
     k->revision = RTL8139_PCI_REVID; /* >=0x20 is for 8139C+ */
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     dc->reset = rtl8139_reset;
