@@ -508,6 +508,8 @@ typedef struct RTL8139State {
     uint32_t	CSBAH;
     uint32_t	CSBAL;
     struct paravirt_csb * csb;
+    QEMUBH	*tx_bh;
+    uint32_t	tx_count;
 #endif /* PARAVIRT */
 
     /* Non-persistent data */
@@ -2446,6 +2448,9 @@ static void rtl8139_cplus_transmit(RTL8139State *s)
         s->IntrStatus |= TxOK;
         rtl8139_update_irq(s);
     }
+#ifdef PARAVIRT
+    s->tx_count = txcount;
+#endif /* PARAVIRT */
 }
 
 static void rtl8139_transmit(RTL8139State *s)
@@ -2604,6 +2609,31 @@ static void rtl8139_configure_csb(RTL8139State *s)
 	s->csb = address_space_map(pci_dma_context(&s->dev)->as,
 		base, &len, 1 /* is_write */);
 	D("CSB (re)mapping\n");
+    }
+}
+
+static void rtl8139_tx_bh(void * opaque)
+{
+    RTL8139State *s = opaque;
+    struct paravirt_csb *csb = s->csb;
+
+    s->tx_count = 0;
+    rtl8139_cplus_transmit(s);
+    csb->host_txcycles = (s->tx_count > 0) ? 0 : csb->host_txcycles+1;
+    if (csb->host_txcycles >= csb->host_txcycles_lim) {
+        /* prepare to sleep, with race avoidance */
+        csb->host_txcycles = 0;
+        csb->host_need_txkick = 1;
+	ND("tx bh going to sleep, set txkick");
+        smp_mb();
+        /*s->mac_reg[TDT] = csb->guest_tdt;
+        if (s->mac_reg[TDH] != s->mac_reg[TDT]) {
+	    ND("tx bh race avoidance, clear txkick");
+            csb->host_need_txkick = 0;
+        }*/
+    }
+    if (csb->host_need_txkick == 0) {
+        qemu_bh_schedule(s->tx_bh);
     }
 }
 #endif
@@ -2841,6 +2871,14 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
             if (val & (1 << 6))
             {
                 DPRINTF("C+ TxPoll normal priority transmission\n");
+#ifdef PARAVIRT
+		if (s->csb && s->csb->guest_csb_on) {
+		    s->csb->host_need_txkick = 0;
+		    smp_mb();
+		    qemu_bh_schedule(s->tx_bh);
+		    
+		} else
+#endif /* PARAVIRT */
                 rtl8139_cplus_transmit(s);
             }
 
@@ -3580,6 +3618,7 @@ static int pci_rtl8139_init(PCIDevice *dev)
     rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
 #ifdef PARAVIRT
     s->csb = NULL;
+    s->tx_bh = qemu_bh_new(rtl8139_tx_bh, s);
 #endif /* PARAVIRT */
     add_boot_device_path(s->conf.bootindex, &dev->qdev, "/ethernet-phy@0");
 
