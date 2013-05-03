@@ -1400,8 +1400,9 @@ DEF("net", HAS_ARG, QEMU_OPTION_net,
     "                ownership and permissions for communication port.\n"
 #endif
 #ifdef CONFIG_NETMAP
-    "-net netmap[,vlan=n][,ifname=name]\n"
+    "-net netmap[,vlan=n][,ifname=name][,devname=name]\n"
     "                connect the vlan 'n' to VALE port 'name'\n"
+    "                ('devname' is name of the netmap device, defaults to '/dev/netmap')\n"
 #endif
     "-net dump[,vlan=n][,file=f][,len=n]\n"
     "                dump traffic on vlan 'n' to file 'f' (max n bytes per packet)\n"

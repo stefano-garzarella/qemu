@@ -320,7 +320,8 @@ int net_init_netmap(const NetClientOptions *opts,
     struct netmap_state me;
     struct nm_state *s;
 
-    pstrcpy(me.fdname, sizeof(me.fdname), name ? name : "/dev/netmap");
+    pstrcpy(me.fdname, sizeof(me.fdname), 
+        netmap_opts->has_devname ? netmap_opts->devname : "/dev/netmap");
     /* set default name for the port if not supplied */
     pstrcpy(me.ifname, sizeof(me.ifname),
         netmap_opts->has_ifname ? netmap_opts->ifname : "vale0");

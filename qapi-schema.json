@@ -2697,9 +2697,21 @@
   'data': {
     'hubid':     'int32' } }
 
+##
+# @NetdevNetmapOptions
+#
+# Connect two or more net clients through a VALE switch
+#
+# @ifname: optional name of the VALE port
+#
+# @devname: optional path of the netmap device
+#
+# Since 1.2
+##
 { 'type': 'NetdevNetmapOptions',
   'data': {
-    '*ifname':     'str' } }
+    '*ifname':     'str',
+    '*devname':    'str' } }
 
 
 ##
