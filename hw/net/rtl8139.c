@@ -1968,6 +1968,13 @@ static uint16_t ip_checksum(void *data, size_t len)
     return ~ones_complement_sum((uint8_t*)data, len);
 }
 
+struct CplusTxDesc {
+    uint32_t w0;
+    uint32_t w1;
+    uint32_t bufLO;
+    uint32_t bufHI;
+} CplusTxDesc;
+
 static int rtl8139_cplus_transmit_one(RTL8139State *s)
 {
     if (!rtl8139_transmitter_enabled(s))
@@ -1993,19 +2000,17 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         "%08x %08x = 0x"DMA_ADDR_FMT"\n", descriptor, s->TxAddr[1],
         s->TxAddr[0], cplus_tx_ring_desc);
 
-    uint32_t val, txdw0,txdw1,txbufLO,txbufHI;
+    uint32_t val;
+    struct CplusTxDesc txd;
 
-    pci_dma_read(&s->dev, cplus_tx_ring_desc,    (uint8_t *)&val, 4);
-    txdw0 = le32_to_cpu(val);
-    pci_dma_read(&s->dev, cplus_tx_ring_desc+4,  (uint8_t *)&val, 4);
-    txdw1 = le32_to_cpu(val);
-    pci_dma_read(&s->dev, cplus_tx_ring_desc+8,  (uint8_t *)&val, 4);
-    txbufLO = le32_to_cpu(val);
-    pci_dma_read(&s->dev, cplus_tx_ring_desc+12, (uint8_t *)&val, 4);
-    txbufHI = le32_to_cpu(val);
-
+    pci_dma_read(&s->dev, cplus_tx_ring_desc, (uint8_t *)&txd, 16);
+    txd.w0 = le32_to_cpu(txd.w0);
+    txd.w1 = le32_to_cpu(txd.w1);
+    txd.bufLO = le32_to_cpu(txd.bufLO);
+    txd.bufHI = le32_to_cpu(txd.bufHI);
+    
     DPRINTF("+++ C+ mode TX descriptor %d %08x %08x %08x %08x\n", descriptor,
-        txdw0, txdw1, txbufLO, txbufHI);
+        txd.w0, txd.w1, txd.bufLO, txd.bufHI);
 
 /* w0 ownership flag */
 #define CP_TX_OWN (1<<31)
@@ -2049,7 +2054,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
 /* excessive collisions flag */
 #define CP_TX_STATUS_EXC (1<<20)
 
-    if (!(txdw0 & CP_TX_OWN))
+    if (!(txd.w0 & CP_TX_OWN))
     {
         DPRINTF("C+ Tx mode : descriptor %d is owned by host\n", descriptor);
         return 0 ;
@@ -2057,7 +2062,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
 
     DPRINTF("+++ C+ Tx mode : transmitting from descriptor %d\n", descriptor);
 
-    if (txdw0 & CP_TX_FS)
+    if (txd.w0 & CP_TX_FS)
     {
         DPRINTF("+++ C+ Tx mode : descriptor %d is first segment "
             "descriptor\n", descriptor);
@@ -2066,8 +2071,8 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         s->cplus_txbuffer_offset = 0;
     }
 
-    int txsize = txdw0 & CP_TX_BUFFER_SIZE_MASK;
-    dma_addr_t tx_addr = rtl8139_addr64(txbufLO, txbufHI);
+    int txsize = txd.w0 & CP_TX_BUFFER_SIZE_MASK;
+    dma_addr_t tx_addr = rtl8139_addr64(txd.bufLO, txd.bufHI);
 
     /* make sure we have enough space to assemble the packet */
     if (!s->cplus_txbuffer)
@@ -2113,7 +2118,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
     s->cplus_txbuffer_offset += txsize;
 
     /* seek to next Rx descriptor */
-    if (txdw0 & CP_TX_EOR)
+    if (txd.w0 & CP_TX_EOR)
     {
         s->currCPlusTxDesc = 0;
     }
@@ -2125,21 +2130,21 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
     }
 
     /* transfer ownership to target */
-    txdw0 &= ~CP_RX_OWN;
+    txd.w0 &= ~CP_RX_OWN;
 
     /* reset error indicator bits */
-    txdw0 &= ~CP_TX_STATUS_UNF;
-    txdw0 &= ~CP_TX_STATUS_TES;
-    txdw0 &= ~CP_TX_STATUS_OWC;
-    txdw0 &= ~CP_TX_STATUS_LNKF;
-    txdw0 &= ~CP_TX_STATUS_EXC;
+    txd.w0 &= ~CP_TX_STATUS_UNF;
+    txd.w0 &= ~CP_TX_STATUS_TES;
+    txd.w0 &= ~CP_TX_STATUS_OWC;
+    txd.w0 &= ~CP_TX_STATUS_LNKF;
+    txd.w0 &= ~CP_TX_STATUS_EXC;
 
     /* update ring data */
-    val = cpu_to_le32(txdw0);
+    val = cpu_to_le32(txd.w0);
     pci_dma_write(&s->dev, cplus_tx_ring_desc, (uint8_t *)&val, 4);
 
     /* Now decide if descriptor being processed is holding the last segment of packet */
-    if (txdw0 & CP_TX_LS)
+    if (txd.w0 & CP_TX_LS)
     {
         uint8_t dot1q_buffer_space[VLAN_HLEN];
         uint16_t *dot1q_buffer;
@@ -2154,16 +2159,16 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         int      saved_buffer_len = s->cplus_txbuffer_len;
 
         /* create vlan tag */
-        if (txdw1 & CP_TX_TAGC) {
+        if (txd.w1 & CP_TX_TAGC) {
             /* the vlan tag is in BE byte order in the descriptor
              * BE + le_to_cpu() + ~swap()~ = cpu */
             DPRINTF("+++ C+ Tx mode : inserting vlan tag with ""tci: %u\n",
-                bswap16(txdw1 & CP_TX_VLAN_TAG_MASK));
+                bswap16(txd.w1 & CP_TX_VLAN_TAG_MASK));
 
             dot1q_buffer = (uint16_t *) dot1q_buffer_space;
             dot1q_buffer[0] = cpu_to_be16(ETH_P_8021Q);
             /* BE + le_to_cpu() + ~cpu_to_le()~ = BE */
-            dot1q_buffer[1] = cpu_to_le16(txdw1 & CP_TX_VLAN_TAG_MASK);
+            dot1q_buffer[1] = cpu_to_le16(txd.w1 & CP_TX_VLAN_TAG_MASK);
         } else {
             dot1q_buffer = NULL;
         }
@@ -2173,7 +2178,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         s->cplus_txbuffer_offset = 0;
         s->cplus_txbuffer_len = 0;
 
-        if (txdw0 & (CP_TX_IPCS | CP_TX_UDPCS | CP_TX_TCPCS | CP_TX_LGSEN))
+        if (txd.w0 & (CP_TX_IPCS | CP_TX_UDPCS | CP_TX_TCPCS | CP_TX_LGSEN))
         {
             DPRINTF("+++ C+ mode offloaded task checksum\n");
 
@@ -2211,7 +2216,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
 
             if (ip)
             {
-                if (txdw0 & CP_TX_IPCS)
+                if (txd.w0 & CP_TX_IPCS)
                 {
                     DPRINTF("+++ C+ mode need IP checksum\n");
 
@@ -2228,9 +2233,9 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
                     }
                 }
 
-                if ((txdw0 & CP_TX_LGSEN) && ip_protocol == IP_PROTO_TCP)
+                if ((txd.w0 & CP_TX_LGSEN) && ip_protocol == IP_PROTO_TCP)
                 {
-                    int large_send_mss = (txdw0 >> 16) & CP_TC_LGSEN_MSS_MASK;
+                    int large_send_mss = (txd.w0 >> 16) & CP_TC_LGSEN_MSS_MASK;
 
                     DPRINTF("+++ C+ mode offloaded task TSO MTU=%d IP data %d "
                         "frame data %d specified MSS=%d\n", ETH_MTU,
@@ -2342,7 +2347,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
                     /* Stop sending this frame */
                     saved_size = 0;
                 }
-                else if (txdw0 & (CP_TX_TCPCS|CP_TX_UDPCS))
+                else if (txd.w0 & (CP_TX_TCPCS|CP_TX_UDPCS))
                 {
                     DPRINTF("+++ C+ mode need TCP or UDP checksum\n");
 
@@ -2357,7 +2362,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
                     /* copy IP source and destination fields */
                     memcpy(data_to_checksum, saved_ip_header + 12, 8);
 
-                    if ((txdw0 & CP_TX_TCPCS) && ip_protocol == IP_PROTO_TCP)
+                    if ((txd.w0 & CP_TX_TCPCS) && ip_protocol == IP_PROTO_TCP)
                     {
                         DPRINTF("+++ C+ mode calculating TCP checksum for "
                             "packet with %d bytes data\n", ip_data_len);
@@ -2377,7 +2382,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
 
                         p_tcp_hdr->th_sum = tcp_checksum;
                     }
-                    else if ((txdw0 & CP_TX_UDPCS) && ip_protocol == IP_PROTO_UDP)
+                    else if ((txd.w0 & CP_TX_UDPCS) && ip_protocol == IP_PROTO_UDP)
                     {
                         DPRINTF("+++ C+ mode calculating UDP checksum for "
                             "packet with %d bytes data\n", ip_data_len);
@@ -2604,7 +2609,7 @@ static void rtl8139_configure_csb(RTL8139State *s)
      * The CSB is then remapped if the new pointer is != 0
      */
     if (s->csb) {
-	//qemu_bh_cancel(s->tx_bh); TODO
+	qemu_bh_cancel(s->tx_bh);
 	address_space_unmap(pci_dma_context(&s->dev)->as,
 		s->csb, len, 1, len);
 	s->csb = NULL;
@@ -2621,21 +2626,23 @@ static void rtl8139_tx_bh(void * opaque)
 {
     RTL8139State *s = opaque;
     struct paravirt_csb *csb = s->csb;
+    uint32_t w0;
 
     s->tx_count = 0;
     rtl8139_cplus_transmit(s);
     csb->host_txcycles = (s->tx_count > 0) ? 0 : csb->host_txcycles+1;
     if (csb->host_txcycles >= csb->host_txcycles_lim) {
-        /* prepare to sleep, with race avoidance */
+        /* Prepare to sleep, with race avoidance */
         csb->host_txcycles = 0;
         csb->host_need_txkick = 1;
 	ND("tx bh going to sleep, set txkick");
         smp_mb();
-        /*s->mac_reg[TDT] = csb->guest_tdt;
-        if (s->mac_reg[TDH] != s->mac_reg[TDT]) {
+	pci_dma_read(&s->dev, rtl8139_addr64(s->TxAddr[0], s->TxAddr[1]) +
+		16 * s->currCPlusTxDesc, (uint8_t *)&w0, 4);
+	if (le32_to_cpu(w0) & CP_TX_OWN) {
 	    ND("tx bh race avoidance, clear txkick");
             csb->host_need_txkick = 0;
-        }*/
+	}
     }
     if (csb->host_need_txkick == 0) {
         qemu_bh_schedule(s->tx_bh);
