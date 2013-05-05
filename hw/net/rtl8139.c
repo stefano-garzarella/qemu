@@ -724,8 +724,13 @@ static void rtl8139_update_irq(RTL8139State *s)
     isr = (s->IntrStatus & s->IntrMask) & 0xffff;
 
 #ifdef PARAVIRT
-    if (s->csb && s->csb->guest_csb_on)
+    if (s->csb && s->csb->guest_csb_on) {
 	s->csb->host_isr = s->IntrStatus;
+	if (isr && !(s->csb->guest_need_rxkick &&
+		(isr & (RxOK | RxErr | RxOverflow | RxFIFOOver))) &&
+	    !(s->csb->guest_need_txkick && (isr & (TxOK | TxErr))))
+	    return;
+    }
 #endif /* PARAVIRT */
     DPRINTF("Set IRQ to %d (%04x %04x)\n", isr ? 1 : 0, s->IntrStatus,
         s->IntrMask);
