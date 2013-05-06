@@ -65,6 +65,13 @@
 #define RTL8139CP_PARAVIRT_SUBDEV 0x1101
 #include "net/paravirt.h"
 #endif /* PARAVIRT */
+//#define RATE		/* debug rate monitor */
+
+#ifdef RATE
+#define IFRATE(x) x
+#else
+#define IFRATE(x) 
+#endif
 
 
 /* debug RTL8139 card */
@@ -511,6 +518,7 @@ typedef struct RTL8139State {
     QEMUBH	*tx_bh;
     uint32_t	tx_count;
 #endif /* PARAVIRT */
+    IFRATE(QEMUTimer * rate_timer);
 
     /* Non-persistent data */
     uint8_t   *cplus_txbuffer;
@@ -527,6 +535,93 @@ typedef struct RTL8139State {
     /* Support migration to/from old versions */
     int rtl8139_mmio_io_addr_dummy;
 } RTL8139State;
+
+/* Rate monitor: shows the communication statistics. */
+#ifdef RATE
+static int64_t rate_last_timestamp = 0;
+static int rate_interval_ms = 1000;
+
+/* rate mmio accesses */
+static int rate_mmio_write = 0;
+static int rate_mmio_read = 0;
+
+/* rate interrupts */
+static int rate_irq_int = 0;
+static int rate_irq_level = 0;
+static int rate_ntfy_txfull = 0;
+
+/* rate guest notifications */
+static int rate_ntfy_tx = 0;    // new TX descriptors
+static int rate_ntfy_ic = 0;    // interrupt acknowledge (interrupt clear)
+static int rate_ntfy_rx = 0;
+
+/* rate tx packets */
+static int rate_tx = 0;
+static int64_t rate_txb = 0;
+
+/* rate rx packet */
+static int rate_rx = 0;  // received packet counter
+static int64_t rate_rxb = 0;
+
+static int rate_tx_bh_len = 0;
+static int rate_tx_bh_count = 0;
+
+#ifdef PARAVIRT
+static void csb_dump(RTL8139State * s) {
+    if (s->csb) {
+	printf("guest_csb_on = %X\n", s->csb->guest_csb_on);
+	printf("guest_tdt = %X\n", s->csb->guest_tdt);
+	printf("guest_rdt = %X\n", s->csb->guest_rdt);
+	printf("guest_need_txkick = %X\n", s->csb->guest_need_txkick);
+	printf("guest_need_rxkick = %X\n", s->csb->guest_need_rxkick);
+	printf("host_tdh = %X\n", s->csb->host_tdh);
+	printf("host_rdh = %X\n", s->csb->host_rdh);
+	printf("host_need_txkick = %X\n", s->csb->host_need_txkick);
+	printf("host_need_rxkick = %X\n", s->csb->host_need_rxkick);
+	printf("host_txcycles_lim = %X\n", s->csb->host_txcycles_lim);
+	printf("host_txcycles = %X\n", s->csb->host_txcycles);
+	printf("host_isr = %X\n", s->csb->host_isr);
+    }
+}
+#endif /* PARAVIRT */
+
+static void rate_callback(void * opaque)
+{
+    RTL8139State* s = opaque;
+    int64_t delta;
+
+#ifdef PARAVIRT
+    csb_dump(s);
+#endif /* PARAVIRT */
+
+    delta = qemu_get_clock_ms(vm_clock) - rate_last_timestamp;
+    printf("Interrupt:           %4.3f KHz\n", (double)rate_irq_int/delta);
+    printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
+    printf("Tx stream:           %4.3f Mbps\n", (double)(rate_txb*8)/delta/1000.0);
+    if (rate_tx_bh_count)
+	printf("Avg BH work:         %4.3f\n", (double)rate_tx_bh_len/(double)rate_tx_bh_count);
+    printf("Rx packets:          %4.3f Kpps\n", (double)rate_rx/delta);
+    printf("Rx stream:           %4.3f Mbps\n", (double)(rate_rxb*8)/delta/1000.0);
+    printf("Tx notifications:    %4.3f KHz\n", (double)rate_ntfy_tx/delta);
+    printf("TX full notif.:      %4.3f KHz\n", (double)rate_ntfy_txfull/delta);
+    printf("Rx notifications:    %4.3f KHz\n", (double)rate_ntfy_rx/delta);
+    printf("MMIO writes:         %4.3f KHz\n", (double)rate_mmio_write/delta);
+    printf("MMIO reads:          %4.3f KHz\n", (double)rate_mmio_read/delta);
+    printf("\n");
+    rate_irq_int = 0;
+    rate_ntfy_txfull = 0;
+    rate_ntfy_tx = rate_ntfy_ic = rate_ntfy_rx = 0;
+    rate_mmio_read = rate_mmio_write = 0;
+    rate_rx = rate_rxb = 0;
+    rate_tx = rate_txb = 0;
+    rate_tx_bh_len = rate_tx_bh_count = 0;
+
+    qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock) +
+		    rate_interval_ms);
+    rate_last_timestamp = qemu_get_clock_ms(vm_clock);
+}
+#endif /* RATE */
+
 
 /* Writes tally counters to memory via DMA */
 static void RTL8139TallyCounters_dma_write(RTL8139State *s, dma_addr_t tc_addr);
@@ -736,6 +831,12 @@ static void rtl8139_update_irq(RTL8139State *s)
         s->IntrMask);
 
     qemu_set_irq(s->dev.irq[0], (isr != 0));
+#ifdef RATE
+    if (!rate_irq_level && isr) {
+	rate_irq_int++;
+    }
+    rate_irq_level = (isr != 0);
+#endif
 }
 
 static int rtl8139_RxWrap(RTL8139State *s)
@@ -863,6 +964,8 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
         DPRINTF("receiver disabled ================\n");
         return -1;
     }
+
+    IFRATE(rate_rx++; rate_rxb += size);
 
     /* XXX: check this */
     if (s->RxConfig & AcceptAllPhys) {
@@ -1242,6 +1345,8 @@ static void rtl8139_reset(DeviceState *d)
     if (s->csb)
 	s->csb->host_isr = 0;
 #endif /* PARAVIRT */
+    IFRATE(qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock)
+		+ 1000));
 
     rtl8139_update_irq(s);
 
@@ -1833,8 +1938,10 @@ static void rtl8139_transfer_frame(RTL8139State *s, uint8_t *buf, int size,
     {
         if (iov) {
             qemu_sendv_packet(qemu_get_queue(s->nic), iov, 3);
+	    IFRATE(rate_tx++; rate_txb += iov_size(iov, 3));
         } else {
             qemu_send_packet(qemu_get_queue(s->nic), buf, size);
+	    IFRATE(rate_tx++; rate_txb += size);
         }
     }
 }
@@ -2630,6 +2737,7 @@ static void rtl8139_tx_bh(void * opaque)
 
     s->tx_count = 0;
     rtl8139_cplus_transmit(s);
+    IFRATE(rate_tx_bh_count++; rate_tx_bh_len += s->tx_count);
     csb->host_txcycles = (s->tx_count > 0) ? 0 : csb->host_txcycles+1;
     if (csb->host_txcycles >= csb->host_txcycles_lim) {
         /* Prepare to sleep, with race avoidance */
@@ -2769,6 +2877,7 @@ static void rtl8139_IntrStatus_write(RTL8139State *s, uint32_t val)
     rtl8139_update_irq(s);
 
 #endif
+    IFRATE(rate_ntfy_ic++);
 }
 
 static uint32_t rtl8139_IntrStatus_read(RTL8139State *s)
@@ -2893,6 +3002,7 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
 #endif /* PARAVIRT */
                 rtl8139_cplus_transmit(s);
             }
+	    IFRATE(rate_ntfy_tx++);
 
             break;
 
@@ -2901,6 +3011,7 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
                 val);
             break;
     }
+    IFRATE(rate_mmio_write++);
 }
 
 static void rtl8139_io_writew(void *opaque, uint8_t addr, uint32_t val)
@@ -2959,6 +3070,7 @@ static void rtl8139_io_writew(void *opaque, uint8_t addr, uint32_t val)
             rtl8139_io_writeb(opaque, addr + 1, (val >> 8) & 0xff);
             break;
     }
+    IFRATE(rate_mmio_write++);
 }
 
 static void rtl8139_set_next_tctr_time(RTL8139State *s, int64_t current_time)
@@ -3075,6 +3187,7 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
             rtl8139_io_writeb(opaque, addr + 3, (val >> 24) & 0xff);
             break;
     }
+    IFRATE(rate_mmio_write++);
 }
 
 static uint32_t rtl8139_io_readb(void *opaque, uint8_t addr)
@@ -3150,6 +3263,7 @@ static uint32_t rtl8139_io_readb(void *opaque, uint8_t addr)
             ret = 0;
             break;
     }
+    IFRATE(rate_mmio_read++);
 
     return ret;
 }
@@ -3228,6 +3342,7 @@ static uint32_t rtl8139_io_readw(void *opaque, uint8_t addr)
             DPRINTF("ioport read(w) addr=0x%x val=0x%04x\n", addr, ret);
             break;
     }
+    IFRATE(rate_mmio_read++);
 
     return ret;
 }
@@ -3298,6 +3413,7 @@ static uint32_t rtl8139_io_readl(void *opaque, uint8_t addr)
             DPRINTF("read(l) addr=0x%x val=%08x\n", addr, ret);
             break;
     }
+    IFRATE(rate_mmio_read++);
 
     return ret;
 }
@@ -3562,6 +3678,10 @@ static void pci_rtl8139_uninit(PCIDevice *dev)
     }
     qemu_del_timer(s->timer);
     qemu_free_timer(s->timer);
+#ifdef PARAVIRT
+    qemu_bh_delete(s->tx_bh);
+#endif /* PARAVIRT */
+    IFRATE(qemu_del_timer(s->rate_timer); qemu_free_timer(s->rate_timer));
     qemu_del_nic(s->nic);
 }
 
@@ -3632,6 +3752,8 @@ static int pci_rtl8139_init(PCIDevice *dev)
     s->csb = NULL;
     s->tx_bh = qemu_bh_new(rtl8139_tx_bh, s);
 #endif /* PARAVIRT */
+    IFRATE(s->rate_timer = qemu_new_timer_ms(vm_clock, &rate_callback, s));
+
     add_boot_device_path(s->conf.bootindex, &dev->qdev, "/ethernet-phy@0");
 
     return 0;
