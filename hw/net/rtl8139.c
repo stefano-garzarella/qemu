@@ -65,7 +65,7 @@
 #define RTL8139CP_PARAVIRT_SUBDEV 0x1101
 #include "net/paravirt.h"
 #endif /* PARAVIRT */
-#define RATE		/* debug rate monitor */
+//#define RATE		/* debug rate monitor */
 
 #ifdef RATE
 #define IFRATE(x) x
@@ -511,7 +511,12 @@ typedef struct RTL8139State {
     /* Tally counters */
     RTL8139TallyCounters tally_counters;
 
+    uint16_t	IntrMitigate;
 #ifdef PARAVIRT
+    QEMUTimer	*mit_timer;
+    uint32_t	mit_timer_on;     /* mitigation timer active       */
+    uint32_t	mit_irq_level;
+
     uint32_t	CSBAH;
     uint32_t	CSBAL;
     struct paravirt_csb * csb;
@@ -826,7 +831,21 @@ static void rtl8139_update_irq(RTL8139State *s)
 	    !(s->csb->guest_need_txkick && (s->IntrStatus & (TxOK | TxErr))))
 	    return;
     }
+
+    if (!s->mit_irq_level && isr) {
+	/* Rising edge detected. */
+	if (s->mit_timer_on)  /* Filter out if we have a pending timer. */
+	    return;
+	else if (s->IntrMitigate) {
+	    /* Let the interrupt go, but start the mitigation timer. */
+	    s->mit_timer_on = 1;
+	    qemu_mod_timer(s->mit_timer,
+		    qemu_get_clock_ns(vm_clock) + s->IntrMitigate * 1000);
+	}
+    }
+    s->mit_irq_level = (isr != 0);
 #endif /* PARAVIRT */
+
     DPRINTF("Set IRQ to %d (%04x %04x)\n", isr ? 1 : 0, s->IntrStatus,
         s->IntrMask);
 
@@ -1413,6 +1432,12 @@ static void rtl8139_reset(DeviceState *d)
 
     /* reset tally counters */
     RTL8139TallyCounters_clear(&s->tally_counters);
+
+    s->IntrMitigate = 0;
+#ifdef PARAVIRT
+    s->mit_timer_on = 0;
+    s->mit_irq_level = 0;
+#endif /* PARAVIRT */
 }
 
 static void RTL8139TallyCounters_clear(RTL8139TallyCounters* counters)
@@ -1589,11 +1614,12 @@ static uint32_t rtl8139_CpCmd_read(RTL8139State *s)
 static void rtl8139_IntrMitigate_write(RTL8139State *s, uint32_t val)
 {
     DPRINTF("C+ IntrMitigate register write(w) val=0x%04x\n", val);
+    s->IntrMitigate = val;
 }
 
 static uint32_t rtl8139_IntrMitigate_read(RTL8139State *s)
 {
-    uint32_t ret = 0;
+    uint32_t ret = s->IntrMitigate;
 
     DPRINTF("C+ IntrMitigate register read(w) val=0x%04x\n", ret);
 
@@ -2756,6 +2782,18 @@ static void rtl8139_tx_bh(void * opaque)
         qemu_bh_schedule(s->tx_bh);
     }
 }
+
+static void rtl8139_mit_timer(void *opaque)
+{
+    RTL8139State *s = opaque;
+
+    s->mit_timer_on = 0;
+    if (s->IntrStatus == 0) { /* no events pending, we are done */
+        return;
+    }
+
+    rtl8139_update_irq(s);
+}
 #endif
 
 static void rtl8139_TxAddr_write(RTL8139State *s, uint32_t txAddrOffset, uint32_t val)
@@ -3679,6 +3717,8 @@ static void pci_rtl8139_uninit(PCIDevice *dev)
     qemu_del_timer(s->timer);
     qemu_free_timer(s->timer);
 #ifdef PARAVIRT
+    qemu_del_timer(s->mit_timer);
+    qemu_free_timer(s->mit_timer);
     qemu_bh_delete(s->tx_bh);
 #endif /* PARAVIRT */
     IFRATE(qemu_del_timer(s->rate_timer); qemu_free_timer(s->rate_timer));
@@ -3749,6 +3789,7 @@ static int pci_rtl8139_init(PCIDevice *dev)
     s->timer = qemu_new_timer_ns(vm_clock, rtl8139_timer, s);
     rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
 #ifdef PARAVIRT
+    s->mit_timer = qemu_new_timer_ns(vm_clock, rtl8139_mit_timer, s);
     s->csb = NULL;
     s->tx_bh = qemu_bh_new(rtl8139_tx_bh, s);
 #endif /* PARAVIRT */
