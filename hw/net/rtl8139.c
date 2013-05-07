@@ -65,7 +65,7 @@
 #define RTL8139CP_PARAVIRT_SUBDEV 0x1101
 #include "net/paravirt.h"
 #endif /* PARAVIRT */
-//#define RATE		/* debug rate monitor */
+#define RATE		/* debug rate monitor */
 
 #ifdef RATE
 #define IFRATE(x) x
@@ -822,8 +822,8 @@ static void rtl8139_update_irq(RTL8139State *s)
     if (s->csb && s->csb->guest_csb_on) {
 	s->csb->host_isr = s->IntrStatus;
 	if (isr && !(s->csb->guest_need_rxkick &&
-		(isr & (RxOK | RxErr | RxOverflow | RxFIFOOver))) &&
-	    !(s->csb->guest_need_txkick && (isr & (TxOK | TxErr))))
+	    (s->IntrStatus & (RxOK | RxErr | RxOverflow | RxFIFOOver))) &&
+	    !(s->csb->guest_need_txkick && (s->IntrStatus & (TxOK | TxErr))))
 	    return;
     }
 #endif /* PARAVIRT */
