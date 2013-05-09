@@ -728,6 +728,9 @@ static int (* const net_client_init_fun[NET_CLIENT_OPTIONS_KIND_MAX])(
         [NET_CLIENT_OPTIONS_KIND_BRIDGE]    = net_init_bridge,
 #endif
         [NET_CLIENT_OPTIONS_KIND_HUBPORT]   = net_init_hubport,
+#ifdef CONFIG_NETMAP
+        [NET_CLIENT_OPTIONS_KIND_NETMAP]    = net_init_netmap,
+#endif
 };
 
 
@@ -753,6 +756,9 @@ static int net_client_init1(const void *object, int is_netdev, Error **errp)
         case NET_CLIENT_OPTIONS_KIND_SOCKET:
 #ifdef CONFIG_VDE
         case NET_CLIENT_OPTIONS_KIND_VDE:
+#endif
+#ifdef CONFIG_NETMAP
+        case NET_CLIENT_OPTIONS_KIND_NETMAP:
 #endif
 #ifdef CONFIG_NET_BRIDGE
         case NET_CLIENT_OPTIONS_KIND_BRIDGE:

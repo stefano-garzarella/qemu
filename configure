@@ -156,6 +156,7 @@ curl=""
 curses=""
 docs=""
 fdt=""
+netmap=""
 nptl=""
 pixman=""
 sdl=""
@@ -756,6 +757,10 @@ for opt do
   ;;
   --enable-vde) vde="yes"
   ;;
+  --disable-netmap) netmap="no"
+  ;;
+  --enable-netmap) netmap="yes"
+  ;;
   --disable-xen) xen="no"
   ;;
   --enable-xen) xen="yes"
@@ -1162,6 +1167,8 @@ echo "  --disable-uuid           disable uuid support"
 echo "  --enable-uuid            enable uuid support"
 echo "  --disable-vde            disable support for vde network"
 echo "  --enable-vde             enable support for vde network"
+echo "  --disable-netmap         disable support for netmap network"
+echo "  --enable-netmap          enable support for netmap network"
 echo "  --disable-linux-aio      disable Linux AIO support"
 echo "  --enable-linux-aio       enable Linux AIO support"
 echo "  --disable-cap-ng         disable libcap-ng support"
@@ -2008,6 +2015,26 @@ EOF
       feature_not_found "vde"
     fi
     vde=no
+  fi
+fi
+
+##########################################
+# netmap headers probe
+if test "$netmap" != "no" ; then
+  cat > $TMPC << EOF
+#include <inttypes.h>
+#include <net/if.h>
+#include <net/netmap.h>
+#include <net/netmap_user.h>
+int main(void) { return 0; }
+EOF
+  if compile_prog "" "" ; then
+    netmap=yes
+  else
+    if test "$netmap" = "yes" ; then
+      feature_not_found "netmap"
+    fi
+    netmap=no
   fi
 fi
 
@@ -3538,6 +3565,7 @@ echo "NPTL support      $nptl"
 echo "GUEST_BASE        $guest_base"
 echo "PIE               $pie"
 echo "vde support       $vde"
+echo "netmap support    $netmap"
 echo "Linux AIO support $linux_aio"
 echo "ATTR/XATTR support $attr"
 echo "Install blobs     $blobs"
@@ -3674,6 +3702,9 @@ if test "$slirp" = "yes" ; then
 fi
 if test "$vde" = "yes" ; then
   echo "CONFIG_VDE=y" >> $config_host_mak
+fi
+if test "$netmap" = "yes" ; then
+  echo "CONFIG_NETMAP=y" >> $config_host_mak
 fi
 if test "$cap_ng" = "yes" ; then
   echo "CONFIG_LIBCAP=y" >> $config_host_mak

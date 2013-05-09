@@ -2094,7 +2094,7 @@ int address_space_mappable(AddressSpace *as, hwaddr gp_addr,
             if (gp_addr - block->offset < block->length) {
                 *gpa_lo = block->offset;
                 *gpa_hi = block->offset + block->length;
-                *g2h_ofs = (uint64_t)block->host - block->offset;
+                *g2h_ofs = (uintptr_t)block->host - block->offset;
                 return 1;
             }
         }
