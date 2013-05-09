@@ -32,9 +32,6 @@
 ******************************************************************************/
 /*$FreeBSD: head/sys/dev/e1000/if_em.c 243857 2012-12-04 09:32:43Z glebius $*/
 
-#define MITIGATION
-#define PARAVIRT	/* enable virtio-like synchronization */
-
 #ifdef HAVE_KERNEL_OPTION_HEADERS
 #include "opt_device_polling.h"
 #include "opt_inet.h"
@@ -88,6 +85,9 @@
 #include "e1000_api.h"
 #include "e1000_82571.h"
 #include "if_em.h"
+
+#define MAX_INTS_PER_SEC	8000
+#define DEFAULT_ITR		(1000000000/(MAX_INTS_PER_SEC * 256))
 
 /*********************************************************************
  *  Set this to one to display debug statistics
@@ -339,9 +339,6 @@ MODULE_DEPEND(em, ether, 1, 1, 1);
 
 static SYSCTL_NODE(_hw, OID_AUTO, em, CTLFLAG_RD, 0, "EM driver parameters");
 
-#define MAX_INTS_PER_SEC	8000
-#define DEFAULT_ITR		1000000000/(MAX_INTS_PER_SEC * 256)
-
 static int em_tx_int_delay_dflt = EM_TICKS_TO_USECS(EM_TIDV);
 static int em_rx_int_delay_dflt = EM_TICKS_TO_USECS(EM_RDTR);
 TUNABLE_INT("hw.em.tx_int_delay", &em_tx_int_delay_dflt);
@@ -362,8 +359,8 @@ SYSCTL_INT(_hw_em, OID_AUTO, rx_abs_int_delay, CTLFLAG_RDTUN,
     &em_rx_abs_int_delay_dflt, 0,
     "Default receive interrupt delay limit in usecs");
 
-static int em_rxd = 8*EM_DEFAULT_RXD;
-static int em_txd = 8*EM_DEFAULT_TXD;
+static int em_rxd = EM_DEFAULT_RXD;
+static int em_txd = EM_DEFAULT_TXD;
 TUNABLE_INT("hw.em.rxd", &em_rxd);
 TUNABLE_INT("hw.em.txd", &em_txd);
 SYSCTL_INT(_hw_em, OID_AUTO, rxd, CTLFLAG_RDTUN, &em_rxd, 0,
@@ -3914,17 +3911,9 @@ em_txeof(struct tx_ring *txr)
 
 	EM_TX_LOCK_ASSERT(txr);
 #ifdef DEV_NETMAP
-	if (ifp->if_capenable & IFCAP_NETMAP) {
-		struct netmap_adapter *na = NA(ifp);
-
-		selwakeuppri(&na->tx_rings[txr->me].si, PI_NET);
-		EM_TX_UNLOCK(txr);
-		EM_CORE_LOCK(adapter);
-		selwakeuppri(&na->tx_si, PI_NET);
-		EM_CORE_UNLOCK(adapter);
-		EM_TX_LOCK(txr);
+	if (netmap_tx_irq(ifp, txr->me |
+	    (NETMAP_LOCKED_ENTER | NETMAP_LOCKED_EXIT)))
 		return;
-	}
 #endif /* DEV_NETMAP */
 
 	/* No work, make sure watchdog is off */
@@ -4549,17 +4538,8 @@ em_rxeof(struct rx_ring *rxr, int count, int *done)
 	EM_RX_LOCK(rxr);
 
 #ifdef DEV_NETMAP
-	if (ifp->if_capenable & IFCAP_NETMAP) {
-		struct netmap_adapter *na = NA(ifp);
-
-		na->rx_rings[rxr->me].nr_kflags |= NKR_PENDINTR;
-		selwakeuppri(&na->rx_rings[rxr->me].si, PI_NET);
-		EM_RX_UNLOCK(rxr);
-		EM_CORE_LOCK(adapter);
-		selwakeuppri(&na->rx_si, PI_NET);
-		EM_CORE_UNLOCK(adapter);
-		return (0);
-	}
+	if (netmap_rx_irq(ifp, rxr->me | NETMAP_LOCKED_ENTER, &processed))
+		return (FALSE);
 #endif /* DEV_NETMAP */
 
 	retries = 0;
