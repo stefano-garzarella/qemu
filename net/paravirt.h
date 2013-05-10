@@ -26,6 +26,9 @@
 #ifndef NET_PARAVIRT_H
 #define NET_PARAVIRT_H
 
+#include "hw/pci/pci.h"  /* AddressSpace */
+
+
 /*
  Support for virtio-like communication between host and guest NICs.
 
@@ -72,5 +75,8 @@ struct paravirt_csb {
     uint32_t host_need_rxkick;     /* HW- GR+ flush rx queued packets */
     uint32_t host_isr;
 };
+
+void paravirt_configure_csb(struct paravirt_csb** csb, uint32_t csbbal,
+			uint32_t csbbah, QEMUBH* tx_bh, AddressSpace *as);
 
 #endif /* NET_PARAVIRT_H */

@@ -154,8 +154,8 @@ enum RTL8139_registers {
     RxRingAddrHI    = 0xE8, /* 64-bit start addr of Rx ring */
     TxThresh    = 0xEC, /* Early Tx threshold */
 #ifdef PARAVIRT
-    CSBAL   = 0xF0,
-    CSBAH   = 0xF4,
+    CsbAddrLO   = 0xF0,
+    CsbAddrHI   = 0xF4,
 #endif /* PARAVIRT */
 };
 
@@ -517,8 +517,8 @@ typedef struct RTL8139State {
     uint32_t	mit_timer_on;     /* mitigation timer active       */
     uint32_t	mit_irq_level;
 
-    uint32_t	CSBAH;
-    uint32_t	CSBAL;
+    uint32_t	CsbAddrHI;
+    uint32_t	CsbAddrLO;
     struct paravirt_csb * csb;
     QEMUBH	*tx_bh;
     uint32_t	tx_count;
@@ -2730,31 +2730,6 @@ static uint16_t rtl8139_CSCR_read(RTL8139State *s)
 }
 
 #ifdef PARAVIRT
-static void rtl8139_configure_csb(RTL8139State *s)
-{
-    hwaddr len = 4096;
-    hwaddr base = ((uint64_t)s->CSBAH << 32) | s->CSBAL;
-    /*
-     * We require that writes to the CSB address registers
-     * are in the order CSBAH , CSBAL so on the second one
-     * we have a valid 64-bit memory address.
-     * Any previous region is unmapped, and handlers terminated.
-     * The CSB is then remapped if the new pointer is != 0
-     */
-    if (s->csb) {
-	qemu_bh_cancel(s->tx_bh);
-	address_space_unmap(pci_dma_context(&s->dev)->as,
-		s->csb, len, 1, len);
-	s->csb = NULL;
-	D("TXBH canc + CSB release\n");
-    }
-    if (base) {
-	s->csb = address_space_map(pci_dma_context(&s->dev)->as,
-		base, &len, 1 /* is_write */);
-	D("CSB (re)mapping\n");
-    }
-}
-
 static void rtl8139_tx_bh(void * opaque)
 {
     RTL8139State *s = opaque;
@@ -3206,13 +3181,14 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
             }
             break;
 #ifdef PARAVIRT
-	case CSBAH:
-	    s->CSBAH = val;
+	case CsbAddrHI:
+	    s->CsbAddrHI = val;
 	    break;
 
-	case CSBAL:
-	    s->CSBAL = val;
-	    rtl8139_configure_csb(s);
+	case CsbAddrLO:
+	    s->CsbAddrLO = val;
+	    paravirt_configure_csb(&s->csb, s->CsbAddrLO, s->CsbAddrHI,
+				    s->tx_bh, pci_dma_context(&s->dev)->as);
 	    break;
 
 #endif /* PARAVIRT */

@@ -46,7 +46,8 @@
  * the subvendor id set to 0x1101 (E1000_PARA_SUBDEV).
  */
 #define E1000_PARA_SUBDEV 0x1101
-#define E1000_CSBAL       0x02830 /* addresses for the csb */
+/* Address registers for the Communication Status Block. */
+#define E1000_CSBAL       0x02830 
 #define E1000_CSBAH       0x02834
 #include "net/paravirt.h"
 #endif /* PARAVIRT */
@@ -1414,29 +1415,9 @@ static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val;
-    if (index == CSBAL) {
-	hwaddr len = 4096;
-	hwaddr base = ((uint64_t)s->mac_reg[CSBAH] << 32) | s->mac_reg[CSBAL];
-	/*
-	 * We require that writes to the CSB address registers
-	 * are in the order CSBAH , CSBAL so on the second one
-	 * we have a valid 64-bit memory address.
-         * Any previous region is unmapped, and handlers terminated.
-         * The CSB is then remapped if the new pointer is != 0
-         */
-	if (s->csb) {
-	    qemu_bh_cancel(s->tx_bh);
-	    address_space_unmap(pci_dma_context(&s->dev)->as,
-		    s->csb, len, 1, len);
-	    s->csb = NULL;
-	    D("TXBH canc + CSB release\n");
-	}
-	if (base) {
-	    s->csb = address_space_map(pci_dma_context(&s->dev)->as,
-		    base, &len, 1 /* is_write */);
-	    D("CSB (re)mapping\n");
-	}
-    }
+    if (index == CSBAL)
+	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
+				s->tx_bh, pci_dma_context(&s->dev)->as);
 }
 
 static void
