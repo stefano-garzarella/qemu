@@ -522,6 +522,7 @@ typedef struct RTL8139State {
     struct paravirt_csb * csb;
     QEMUBH	*tx_bh;
     uint32_t	tx_count;
+    uint32_t	force_txkick;
 #endif /* PARAVIRT */
     IFRATE(QEMUTimer * rate_timer);
 
@@ -826,7 +827,7 @@ static void rtl8139_update_irq(RTL8139State *s)
 #ifdef PARAVIRT
     if (s->csb && s->csb->guest_csb_on) {
 	s->csb->host_isr = s->IntrStatus;
-	if (isr && !(s->csb->guest_need_rxkick &&
+	if (isr && !s->force_txkick && !(s->csb->guest_need_rxkick &&
 	    (s->IntrStatus & (RxOK | RxErr | RxOverflow | RxFIFOOver))) &&
 	    !(s->csb->guest_need_txkick && (s->IntrStatus & (TxOK | TxErr))))
 	    return;
@@ -843,6 +844,7 @@ static void rtl8139_update_irq(RTL8139State *s)
 		    qemu_get_clock_ns(vm_clock) + s->IntrMitigate * 1000);
 	}
     }
+    s->force_txkick = 0;
     s->mit_irq_level = (isr != 0);
 #endif /* PARAVIRT */
 
@@ -1437,6 +1439,7 @@ static void rtl8139_reset(DeviceState *d)
 #ifdef PARAVIRT
     s->mit_timer_on = 0;
     s->mit_irq_level = 0;
+    s->force_txkick = 0;
 #endif /* PARAVIRT */
 }
 
@@ -2192,6 +2195,13 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         DPRINTF("C+ Tx mode : descriptor %d is owned by host\n", descriptor);
         return 0 ;
     }
+#ifdef PARAVIRT
+    if (s->csb && s->csb->guest_csb_on && 
+		s->currCPlusTxDesc == s->csb->guest_request_txkick) {
+	s->force_txkick = 1;
+    }
+#endif
+    
 
     DPRINTF("+++ C+ Tx mode : transmitting from descriptor %d\n", descriptor);
 
@@ -2250,7 +2260,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
                  s->cplus_txbuffer + s->cplus_txbuffer_offset, txsize);
     s->cplus_txbuffer_offset += txsize;
 
-    /* seek to next Rx descriptor */
+    /* seek to next Tx descriptor */
     if (txd.w0 & CP_TX_EOR)
     {
         s->currCPlusTxDesc = 0;
@@ -2263,7 +2273,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
     }
 
     /* transfer ownership to target */
-    txd.w0 &= ~CP_RX_OWN;
+    txd.w0 &= ~CP_TX_OWN;
 
     /* reset error indicator bits */
     txd.w0 &= ~CP_TX_STATUS_UNF;
