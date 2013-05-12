@@ -956,6 +956,13 @@ static int rtl8139_can_receive(NetClientState *nc)
     }
 }
 
+struct CplusDesc {
+    uint32_t w0;
+    uint32_t w1;
+    uint32_t bufLO;
+    uint32_t bufHI;
+} CplusDesc;
+
 static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t size_, int do_interrupt)
 {
     RTL8139State *s = qemu_get_nic_opaque(nc);
@@ -1123,21 +1130,19 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
             "%08x %08x = "DMA_ADDR_FMT"\n", descriptor, s->RxRingAddrHI,
             s->RxRingAddrLO, cplus_rx_ring_desc);
 
-        uint32_t val, rxdw0,rxdw1,rxbufLO,rxbufHI;
+        uint32_t val;
+	struct CplusDesc rxd;
 
-        pci_dma_read(&s->dev, cplus_rx_ring_desc, &val, 4);
-        rxdw0 = le32_to_cpu(val);
-        pci_dma_read(&s->dev, cplus_rx_ring_desc+4, &val, 4);
-        rxdw1 = le32_to_cpu(val);
-        pci_dma_read(&s->dev, cplus_rx_ring_desc+8, &val, 4);
-        rxbufLO = le32_to_cpu(val);
-        pci_dma_read(&s->dev, cplus_rx_ring_desc+12, &val, 4);
-        rxbufHI = le32_to_cpu(val);
+        pci_dma_read(&s->dev, cplus_rx_ring_desc, &rxd, sizeof(struct CplusDesc));
+	rxd.w0 = le32_to_cpu(rxd.w0);
+	rxd.w1 = le32_to_cpu(rxd.w1);
+	rxd.bufLO = le32_to_cpu(rxd.bufLO);
+	rxd.bufHI = le32_to_cpu(rxd.bufHI);
 
         DPRINTF("+++ C+ mode RX descriptor %d %08x %08x %08x %08x\n",
-            descriptor, rxdw0, rxdw1, rxbufLO, rxbufHI);
+            descriptor, rxd.w0, rxd.w1, rxd.bufLO, rxd.bufHI);
 
-        if (!(rxdw0 & CP_RX_OWN))
+        if (!(rxd.w0 & CP_RX_OWN))
         {
             DPRINTF("C+ Rx mode : descriptor %d is owned by host\n",
                 descriptor);
@@ -1153,7 +1158,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
             return size_;
         }
 
-        uint32_t rx_space = rxdw0 & CP_RX_BUFFER_SIZE_MASK;
+        uint32_t rx_space = rxd.w0 & CP_RX_BUFFER_SIZE_MASK;
 
         /* write VLAN info to descriptor variables. */
         if (s->CpCmd & CPlusRxVLAN && be16_to_cpup((uint16_t *)
@@ -1165,16 +1170,16 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
                 size = MIN_BUF_SIZE;
             }
 
-            rxdw1 &= ~CP_RX_VLAN_TAG_MASK;
+            rxd.w1 &= ~CP_RX_VLAN_TAG_MASK;
             /* BE + ~le_to_cpu()~ + cpu_to_le() = BE */
-            rxdw1 |= CP_RX_TAVA | le16_to_cpup((uint16_t *)
+            rxd.w1 |= CP_RX_TAVA | le16_to_cpup((uint16_t *)
                 &dot1q_buf[ETHER_TYPE_LEN]);
 
             DPRINTF("C+ Rx mode : extracted vlan tag with tci: ""%u\n",
                 be16_to_cpup((uint16_t *)&dot1q_buf[ETHER_TYPE_LEN]));
         } else {
             /* reset VLAN tag flag */
-            rxdw1 &= ~CP_RX_TAVA;
+            rxd.w1 &= ~CP_RX_TAVA;
         }
 
         /* TODO: scatter the packet over available receive ring descriptors space */
@@ -1195,7 +1200,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
             return size_;
         }
 
-        dma_addr_t rx_addr = rtl8139_addr64(rxbufLO, rxbufHI);
+        dma_addr_t rx_addr = rtl8139_addr64(rxd.bufLO, rxd.bufHI);
 
         /* receive/copy to target memory */
         if (dot1q_buf) {
@@ -1238,37 +1243,36 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
 #define CP_RX_STATUS_TCPF (1<<13)
 
         /* transfer ownership to target */
-        rxdw0 &= ~CP_RX_OWN;
+        rxd.w0 &= ~CP_RX_OWN;
 
         /* set first segment bit */
-        rxdw0 |= CP_RX_STATUS_FS;
+        rxd.w0 |= CP_RX_STATUS_FS;
 
         /* set last segment bit */
-        rxdw0 |= CP_RX_STATUS_LS;
+        rxd.w0 |= CP_RX_STATUS_LS;
 
         /* set received packet type flags */
         if (packet_header & RxBroadcast)
-            rxdw0 |= CP_RX_STATUS_BAR;
+            rxd.w0 |= CP_RX_STATUS_BAR;
         if (packet_header & RxMulticast)
-            rxdw0 |= CP_RX_STATUS_MAR;
+            rxd.w0 |= CP_RX_STATUS_MAR;
         if (packet_header & RxPhysical)
-            rxdw0 |= CP_RX_STATUS_PAM;
+            rxd.w0 |= CP_RX_STATUS_PAM;
 
         /* set received size */
-        rxdw0 &= ~CP_RX_BUFFER_SIZE_MASK;
-        rxdw0 |= (size+4);
+        rxd.w0 &= ~CP_RX_BUFFER_SIZE_MASK;
+        rxd.w0 |= (size+4);
 
         /* update ring data */
-        val = cpu_to_le32(rxdw0);
-        pci_dma_write(&s->dev, cplus_rx_ring_desc, (uint8_t *)&val, 4);
-        val = cpu_to_le32(rxdw1);
-        pci_dma_write(&s->dev, cplus_rx_ring_desc+4, (uint8_t *)&val, 4);
+        rxd.w0 = cpu_to_le32(rxd.w0);
+        rxd.w1 = cpu_to_le32(rxd.w1);
+        pci_dma_write(&s->dev, cplus_rx_ring_desc, (uint8_t *)&rxd, sizeof(rxd.w0) + sizeof(rxd.w1));
 
         /* update tally counter */
         ++s->tally_counters.RxOk;
 
         /* seek to next Rx descriptor */
-        if (rxdw0 & CP_RX_EOR)
+        if (rxd.w0 & CP_RX_EOR)
         {
             s->currCPlusRxDesc = 0;
         }
@@ -1331,10 +1335,6 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
     {
         rtl8139_update_irq(s);
     }
-#ifdef PARAVIRT
-    else if (s->csb && s->csb->guest_csb_on)
-	s->csb->host_isr = s->IntrStatus;
-#endif /* PARAVIRT */
 
     return size_;
 }
@@ -2104,13 +2104,6 @@ static uint16_t ip_checksum(void *data, size_t len)
     return ~ones_complement_sum((uint8_t*)data, len);
 }
 
-struct CplusTxDesc {
-    uint32_t w0;
-    uint32_t w1;
-    uint32_t bufLO;
-    uint32_t bufHI;
-} CplusTxDesc;
-
 static int rtl8139_cplus_transmit_one(RTL8139State *s)
 {
     if (!rtl8139_transmitter_enabled(s))
@@ -2137,9 +2130,9 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         s->TxAddr[0], cplus_tx_ring_desc);
 
     uint32_t val;
-    struct CplusTxDesc txd;
+    struct CplusDesc txd;
 
-    pci_dma_read(&s->dev, cplus_tx_ring_desc, (uint8_t *)&txd, 16);
+    pci_dma_read(&s->dev, cplus_tx_ring_desc, (uint8_t *)&txd, sizeof(CplusDesc));
     txd.w0 = le32_to_cpu(txd.w0);
     txd.w1 = le32_to_cpu(txd.w1);
     txd.bufLO = le32_to_cpu(txd.bufLO);
@@ -2222,6 +2215,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
     {
         s->cplus_txbuffer_len = CP_TX_BUFFER_SIZE;
         s->cplus_txbuffer = g_malloc(s->cplus_txbuffer_len);
+printf("mallocing\n");
         s->cplus_txbuffer_offset = 0;
 
         DPRINTF("+++ C+ mode transmission buffer allocated space %d\n",
