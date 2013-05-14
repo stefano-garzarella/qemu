@@ -56,7 +56,7 @@
 #define IFRATE(x) x
 #else
 #define IFRATE(x) 
-#endif
+#endif /* RATE */
 
 #define E1000_DEBUG
 
@@ -107,6 +107,7 @@ enum {
                    /* default to E1000_DEV_ID_82540EM */	0xc20
 };
 
+#ifdef MAP_RING
 /*
  * map a guest region into a host region
  * if the pointer is within the region, ofs gives the displacement.
@@ -118,6 +119,7 @@ struct guest_memreg_map {
         uint64_t hi;
         uint64_t ofs;
 };
+#endif /* MAP_RING */
 
 typedef struct E1000State_st {
     PCIDevice dev;
@@ -172,11 +174,11 @@ typedef struct E1000State_st {
 #define E1000_FLAG_AUTONEG (1 << E1000_FLAG_AUTONEG_BIT)
     uint32_t compat_flags;
 
-    QEMUTimer *mit_timer;      /* handle for the timer          */
-    uint32_t mit_timer_on;     /* mitigation timer active        */
-    uint32_t mit_irq_level;    /* track the interrupt pin level  */
-    uint32_t mit_on;           /* mitigation enable              */
-    uint32_t mit_ide;          /* use old tx mitigation regs     */
+    QEMUTimer *mit_timer;      /* handle for the timer           */
+    bool mit_timer_on;         /* mitigation timer active        */
+    bool mit_irq_level;        /* track the interrupt pin level  */
+    bool mit_on;               /* mitigation enable              */
+    uint32_t mit_ide;          /* old tx mitigation TXD_CMD_IDE  */
 
     /* when the rxq becomes full, disable input until half empty */
     uint32_t rxbufs, txbufs, rxq_full;
@@ -437,14 +439,13 @@ mit_update_delay(uint32_t *curr, uint32_t value)
 static void
 set_interrupt_cause(E1000State *s, int index, uint32_t val)
 {
-    uint32_t masked;
+    uint32_t pending_ints;
 
     if (val && (E1000_DEVID >= E1000_DEV_ID_82547EI_MOBILE)) {
         /* Only for 8257x */
         val |= E1000_ICR_INT_ASSERTED;
     }
     s->mac_reg[ICR] = val;
-    masked = (s->mac_reg[IMS] & s->mac_reg[ICR]);
 
     /*
      * Make sure ICR and ICS registers have the same value.
@@ -456,12 +457,16 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
      */
     s->mac_reg[ICS] = val;
 
-    if (!s->mit_irq_level && masked) { /* Rising edge detected. */
+    pending_ints = (s->mac_reg[IMS] & s->mac_reg[ICR]);
+    if (!s->mit_irq_level && pending_ints) { /* Rising edge detected. */
+	/*
+	 * We may want to postpone raising the interrupt line.
+	 */
 	if (s->mit_timer_on)  /* Filter out if we have a pending timer. */
 	    return;
 #ifdef PARAVIRT
 	else if (s->csb && s->csb->guest_csb_on && !s->pending_txkick &&
-	    !(s->csb->guest_need_rxkick && (masked & (E1000_ICS_RXT0))))
+	    !(s->csb->guest_need_rxkick && (pending_ints & (E1000_ICS_RXT0))))
 	    return;
 #endif
 	else {
@@ -474,9 +479,9 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 		 * Then rearm the timer.
 		 */
 		if (s->mit_ide &&
-			(masked & (E1000_ICR_TXQE | E1000_ICR_TXDW)))
+			(pending_ints & (E1000_ICR_TXQE | E1000_ICR_TXDW)))
 		    mit_update_delay(&mit_delay, s->mac_reg[TADV] * 4);
-		if (s->mac_reg[RDTR] && (masked & E1000_ICS_RXT0))
+		if (s->mac_reg[RDTR] && (pending_ints & E1000_ICS_RXT0))
 		    mit_update_delay(&mit_delay, s->mac_reg[RADV] * 4);
 		mit_update_delay(&mit_delay, s->mac_reg[ITR]);
 
@@ -494,8 +499,8 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	}
     }
 
-    s->mit_irq_level = (masked != 0);
-    qemu_set_irq(s->dev.irq[0], masked != 0);
+    s->mit_irq_level = (pending_ints != 0);
+    qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
 }
 
 /*
