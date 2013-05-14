@@ -1000,6 +1000,7 @@ start_xmit(E1000State *s)
     /* hlim prevents staying here for too long */
     uint32_t hlim = s->mac_reg[TDLEN] / sizeof(desc) / 2;
     uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
+    uint32_t old_tdh; /* value to compare against txkick_at */
 
     for (;;) {
         if (csb_mode) {
@@ -1017,9 +1018,7 @@ start_xmit(E1000State *s)
                 set_ics(s, 0, cause); /* XXX should we call after each packet has been sent? Recall that this code flow is concurrent with the guest. */
                 return;
             }
-	    if (!s->pending_txkick &&
-			s->mac_reg[TDH] == s->csb->guest_need_txkick_at)
-		s->pending_txkick = 1;
+	    old_tdh = s->mac_reg[TDH];
         } else if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
             break;
         }
@@ -1047,6 +1046,10 @@ start_xmit(E1000State *s)
 #ifdef PARAVIRT
         if (csb_mode) {
             s->csb->host_tdh = s->mac_reg[TDH];
+            if (!s->pending_txkick &&
+                    old_tdh == s->csb->guest_need_txkick_at) {
+                s->pending_txkick = 1;
+            }
         }
 #endif /* PARAVIRT */
         /*
