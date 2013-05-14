@@ -47,7 +47,7 @@
  */
 #define E1000_PARA_SUBDEV 0x1101
 /* Address registers for the Communication Status Block. */
-#define E1000_CSBAL       0x02830 
+#define E1000_CSBAL       0x02830
 #define E1000_CSBAH       0x02834
 #include "net/paravirt.h"
 #endif /* PARAVIRT */
@@ -55,7 +55,7 @@
 #ifdef RATE
 #define IFRATE(x) x
 #else
-#define IFRATE(x) 
+#define IFRATE(x)
 #endif /* RATE */
 
 #define E1000_DEBUG
@@ -460,7 +460,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
     if (!s->mit_irq_level && pending_ints) {
 	/*
 	 * Here we detect a potential raising edge. We may want to postpone
-	 * raising the interrupt line. We let the interrupt fire in the 
+	 * raising the interrupt line. We let the interrupt fire in the
 	 * following cases:
 	 *  1) We're out of the mitigation delay window (s->mit_timer_on == 1)
 	 *  2) In CSB mode we have a pending_txkick and the txkicks are
@@ -478,7 +478,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	    if (s->csb->guest_need_txkick_at == ~0) {
 		s->pending_txkick = 0;
 	    }
-	    if (!s->pending_txkick && !(s->csb->guest_need_rxkick && 
+	    if (!s->pending_txkick && !(s->csb->guest_need_rxkick &&
 					(pending_ints & (E1000_ICS_RXT0)))) {
 		return;
 	    }
@@ -885,7 +885,7 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
         cpu_to_be16wu((uint16_t *)(tp->vlan_header + 2),
                       le16_to_cpu(dp->upper.fields.special));
     }
-        
+
     addr = le64_to_cpu(dp->buffer_addr);
 
 #ifdef MAP_RING
@@ -1017,7 +1017,7 @@ start_xmit(E1000State *s)
                 set_ics(s, 0, cause); /* XXX should we call after each packet has been sent? Recall that this code flow is concurrent with the guest. */
                 return;
             }
-	    if (!s->pending_txkick && 
+	    if (!s->pending_txkick &&
 			s->mac_reg[TDH] == s->csb->guest_need_txkick_at)
 		s->pending_txkick = 1;
         } else if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
@@ -1422,7 +1422,7 @@ e1000_tx_bh(void *opaque)
 {
     E1000State *s = opaque;
     struct paravirt_csb *csb = s->csb;
-    
+
     if (!csb) {
 	D("This is not happening!!");
 	start_xmit(s);
@@ -1475,7 +1475,7 @@ set_dlen(E1000State *s, int index, uint32_t val)
     s->mac_reg[index] = val & 0xfff80;
     if (index == RDLEN) {
         s->rxbufs = s->mac_reg[index] / sizeof(struct e1000_rx_desc);
-    } 
+    }
 }
 
 static void
