@@ -30,7 +30,10 @@
   POSSIBILITY OF SUCH DAMAGE.
 
 ******************************************************************************/
-/*$FreeBSD: head/sys/dev/e1000/if_em.c 250108 2013-04-30 16:18:29Z luigi $*/
+/*$FreeBSD: head/sys/dev/e1000/if_em.c 250414 2013-05-09 17:07:30Z luigi $*/
+
+#define NIC_SEND_COMBINING
+#define NIC_PARAVIRT
 
 #ifdef HAVE_KERNEL_OPTION_HEADERS
 #include "opt_device_polling.h"
@@ -85,9 +88,6 @@
 #include "e1000_api.h"
 #include "e1000_82571.h"
 #include "if_em.h"
-
-#define MAX_INTS_PER_SEC	8000
-#define DEFAULT_ITR		(1000000000/(MAX_INTS_PER_SEC * 256))
 
 /*********************************************************************
  *  Set this to one to display debug statistics
@@ -338,6 +338,9 @@ MODULE_DEPEND(em, ether, 1, 1, 1);
 #define EM_USECS_TO_TICKS(usecs)	((1000 * (usecs) + 512) / 1024)
 #define M_TSO_LEN			66
 
+#define MAX_INTS_PER_SEC	8000
+#define DEFAULT_ITR		(1000000000/(MAX_INTS_PER_SEC * 256))
+
 /* Allow common code without TSO */
 #ifndef CSUM_TSO
 #define CSUM_TSO	0
@@ -519,46 +522,46 @@ em_attach(device_t dev)
 		goto err_pci;
 	}
 
-#ifdef PARAVIRT
-	if (adapter->hw.subsystem_device_id == E1000_PARA_SUBDEV) {
+#ifdef NIC_PARAVIRT
+	if (hw->subsystem_device_id == E1000_PARA_SUBDEV) {
 		uint64_t bus_addr;
-		int tsize;
+		int tsize = 4096; // XXX one page for the csb
+		struct paravirt_csb *csb;
 
 		device_printf(dev, "paravirt support on dev %p\n", adapter);
-		tsize = 4096; // XXX one page for the csb
 		if (em_dma_malloc(adapter, tsize, &adapter->csb_mem, BUS_DMA_NOWAIT)) {
 			device_printf(dev, "Unable to allocate csb memory\n");
 			error = ENOMEM;
 			goto err_pci;
 		}
 		/* Setup the Base of the CSB */
-		adapter->csb = (struct e1000_csb *)adapter->csb_mem.dma_vaddr;
+		csb = adapter->csb = (struct paravirt_csb *)adapter->csb_mem.dma_vaddr;
 		/* force the first kick */
-		adapter->csb->host_need_txkick = 1; /* txring empty */
-		adapter->csb->guest_need_rxkick = 1; /* no rx packets */
+		csb->host_need_txkick = 1; /* txring empty */
+		csb->guest_need_rxkick = 1; /* no rx packets */
 		bus_addr = adapter->csb_mem.dma_paddr;
 		em_set_sysctl_value(adapter, "csb_on",
-		    "enable paravirt.", &adapter->csb->guest_csb_on, 0);
+		    "enable paravirt.", &csb->guest_csb_on, 0);
 		em_set_sysctl_value(adapter, "txc_lim",
-		    "txc_lim", &adapter->csb->host_txcycles_lim, 1);
+		    "txc_lim", &csb->host_txcycles_lim, 1);
+
 		/* some stats */
 #define PA_SC(name, var, val)		\
 	em_set_sysctl_value(adapter, name, name, var, val)
-		PA_SC("host_need_txkick",&adapter->csb->host_need_txkick, 1);
-		PA_SC("host_need_rxkick",&adapter->csb->host_need_rxkick, 1);
-		PA_SC("guest_need_txkick",&adapter->csb->guest_need_txkick, 0);
-		PA_SC("guest_need_rxkick",&adapter->csb->guest_need_rxkick, 1);
-		PA_SC("tdt_reg_count",&adapter->tdt_reg_count, 0);
-		PA_SC("tdt_csb_count",&adapter->tdt_csb_count, 0);
-		PA_SC("tdt_int_count",&adapter->tdt_int_count, 0);
-		PA_SC("guest_need_kick_count",&adapter->guest_need_kick_count, 0);
+
+		PA_SC("host_need_txkick", &csb->host_need_txkick, 1);
+		PA_SC("host_need_rxkick", &csb->host_need_rxkick, 1);
+		PA_SC("guest_need_txkick", &csb->guest_need_txkick, 0);
+		PA_SC("guest_need_rxkick", &csb->guest_need_rxkick, 1);
+		PA_SC("tdt_reg_count", &adapter->tdt_reg_count, 0);
+		PA_SC("tdt_csb_count", &adapter->tdt_csb_count, 0);
+		PA_SC("tdt_int_count", &adapter->tdt_int_count, 0);
+		PA_SC("guest_need_kick_count", &adapter->guest_need_kick_count, 0);
 		/* tell the host where the block is */
-		E1000_WRITE_REG(&adapter->hw, E1000_CSBAH,
-			(u32)(bus_addr >> 32));
-		E1000_WRITE_REG(&adapter->hw, E1000_CSBAL,
-			(u32)bus_addr);
+		E1000_WRITE_REG(hw, E1000_CSBAH, (u32)(bus_addr >> 32));
+		E1000_WRITE_REG(hw, E1000_CSBAL, (u32)bus_addr);
 	}
-#endif /* PARAVIRT */
+#endif /* NIC_PARAVIRT */
 
 	/*
 	** For ICH8 and family we need to
@@ -617,7 +620,7 @@ em_attach(device_t dev)
 	em_add_int_delay_sysctl(adapter, "itr",
 	    "interrupt delay limit in usecs/4",
 	    &adapter->tx_itr,
-	    E1000_REGISTER(&adapter->hw, E1000_ITR),
+	    E1000_REGISTER(hw, E1000_ITR),
 	    DEFAULT_ITR);
 
 	/* Sysctl for limiting the amount of work done in the taskqueue */
@@ -625,13 +628,15 @@ em_attach(device_t dev)
 	    "max number of rx packets to process", &adapter->rx_process_limit,
 	    em_rx_process_limit);
 
-#ifdef MITIGATION
-	/* Sysctls to control mitigation */
-	em_set_sysctl_value(adapter, "mit_enable",
-	    "driver TDT mitigation", &adapter->mit_enable, 0);
+#ifdef NIC_SEND_COMBINING
+	/* Sysctls to control send combining */
+	em_set_sysctl_value(adapter, "sc_enable",
+	    "driver TDT mitigation", &adapter->sc_enable, 0);
+#endif /* NIC_SEND_COMBINING */
+#ifdef NIC_PARAVIRT
 	em_set_sysctl_value(adapter, "rx_retries",
 	    "driver rx retries", &adapter->rx_retries, 0);
-#endif /* MITIGATION */
+#endif /* NIC_PARAVIRT */
 
 	/*
 	 * Validate number of transmit and receive descriptors. It
@@ -805,10 +810,10 @@ err_late:
 	if (adapter->ifp != NULL)
 		if_free(adapter->ifp);
 err_pci:
-#ifdef PARAVIRT
+#ifdef NIC_PARAVIRT
 	if (adapter->csb)
 		em_dma_free(adapter, &adapter->csb_mem);
-#endif /* PARAVIRT */
+#endif /* NIC_PARAVIRT */
 	em_free_pci_resources(adapter);
 	free(adapter->mta, M_DEVBUF);
 	EM_CORE_LOCK_DESTROY(adapter);
@@ -856,12 +861,12 @@ em_detach(device_t dev)
 
 	e1000_phy_hw_reset(&adapter->hw);
 
-#ifdef PARAVIRT
+#ifdef NIC_PARAVIRT
 	if (adapter->csb) {
 		em_dma_free(adapter, &adapter->csb_mem);
 		adapter->csb = NULL;
 	}
-#endif /* PARAVIRT */
+#endif /* NIC_PARAVIRT */
 	em_release_manageability(adapter);
 	em_release_hw_control(adapter);
 
@@ -1014,7 +1019,7 @@ em_mq_start_locked(struct ifnet *ifp, struct tx_ring *txr, struct mbuf *m)
 		em_txeof(txr);
 	if (txr->tx_avail < EM_MAX_SCATTER)
 		ifp->if_drv_flags |= IFF_DRV_OACTIVE;
-#ifdef PARAVIRT
+#ifdef NIC_PARAVIRT
 	if (ifp->if_drv_flags & IFF_DRV_OACTIVE && adapter->csb &&
 	    adapter->csb->guest_csb_on && !adapter->csb->guest_need_txkick) {
 		adapter->csb->guest_need_txkick = 1;
@@ -1022,7 +1027,7 @@ em_mq_start_locked(struct ifnet *ifp, struct tx_ring *txr, struct mbuf *m)
 		// XXX memory barrier
 		em_txeof(txr); // XXX possibly clear IFF_DRV_OACTIVE
 	}
-#endif /* PARAVIRT */
+#endif /* NIC_PARAVIRT */
 
 	return (err);
 }
@@ -2182,7 +2187,7 @@ retry:
 	bus_dmamap_sync(txr->txdma.dma_tag, txr->txdma.dma_map,
 	    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
 
-#ifdef PARAVIRT
+#ifdef NIC_PARAVIRT
 	if (adapter->csb) {
 		adapter->csb->guest_tdt = i;
 		/* XXX memory barrier ? */
@@ -2195,10 +2200,10 @@ retry:
 			return (0);
 		}
 	}
-#endif /* PARAVIRT */
+#endif /* NIC_PARAVIRT */
 
-#ifdef MITIGATION
-	if (adapter->mit_enable) {
+#ifdef NIC_SEND_COMBINING
+	if (adapter->sc_enable) {
 		if (adapter->shadow_tdt & MIT_PENDING_INT) {
 			/* signal intr and data pending */
 			adapter->shadow_tdt = MIT_PENDING_TDT | (i & 0xffff);
@@ -2207,8 +2212,10 @@ retry:
 			adapter->shadow_tdt = MIT_PENDING_INT;
 		}
 	}
+#endif /* NIC_SEND_COMBINING */
+#ifdef NIC_PARAVIRT
 	adapter->tdt_reg_count++;
-#endif /* MITIGATION */
+#endif /* NIC_PARAVIRT */
 
 	E1000_WRITE_REG(&adapter->hw, E1000_TDT(txr->me), i);
 
@@ -2392,7 +2399,7 @@ em_local_timer(void *arg)
 			taskqueue_enqueue(txr->tq, &txr->tx_task);
 	}
 	
-#if 0 // def PARAVIRT
+#if 0 // def NIC_PARAVIRT
 	/* recover space if needed */
 	if (adapter->csb && adapter->csb->guest_csb_on &&
 	    (adapter->watchdog_check == TRUE) &&
@@ -2401,7 +2408,7 @@ em_local_timer(void *arg)
 		em_txeof(txr);
 		/* XXX should also recover from stalls ? */
 	}
-#endif /* PARAVIRT */
+#endif /* NIC_PARAVIRT */
 
 	adapter->pause_frames = 0;
 	callout_reset(&adapter->timer, hz, em_local_timer, adapter);
@@ -4019,7 +4026,7 @@ em_txeof(struct tx_ring *txr)
 
         txr->next_to_clean = first;
 
-#ifdef MITIGATION
+#ifdef NIC_SEND_COMBINING
 	if ((adapter->shadow_tdt & MIT_PENDING_TDT) == MIT_PENDING_TDT) {
 		/* a tdt write is pending, do it */
 		E1000_WRITE_REG(&adapter->hw, E1000_TDT(txr->me),
@@ -4028,7 +4035,7 @@ em_txeof(struct tx_ring *txr)
 	} else {
 		adapter->shadow_tdt = 0; // disable
 	}
-#endif /* MITIGATION */
+#endif /* NIC_SEND_COMBINING */
 
 	/*
 	** Watchdog calculation, we know there's
@@ -4128,14 +4135,14 @@ update:
 	** Update the tail pointer only if,
 	** and as far as we have refreshed.
 	*/
-#ifdef PARAVIRT // XXX fix for multiqueue
+#ifdef NIC_PARAVIRT // XXX fix for multiqueue
 	if (cleaned) {
 		adapter->csb->guest_rdt = rxr->next_to_refresh;
 		if (adapter->csb->guest_csb_on &&
 		    !adapter->csb->host_need_rxkick)
 			return;
 	}
-#endif /* PARAVIRT */
+#endif /* NIC_PARAVIRT */
 	if (cleaned)
 		E1000_WRITE_REG(&adapter->hw,
 		    E1000_RDT(rxr->me), rxr->next_to_refresh);
@@ -4466,8 +4473,9 @@ em_initialize_receive_unit(struct adapter *adapter)
 		E1000_WRITE_REG(hw, E1000_RDTR, 0x20);
 
 	for (int i = 0; i < adapter->num_queues; i++, rxr++) {
-		int t = adapter->num_rx_desc - 1;
 		/* Setup the Base and Length of the Rx Descriptor Ring */
+		u32 rdt = adapter->num_rx_desc - 1; /* default */
+
 		bus_addr = rxr->rxdma.dma_paddr;
 		E1000_WRITE_REG(hw, E1000_RDLEN(i),
 		    adapter->num_rx_desc * sizeof(struct e1000_rx_desc));
@@ -4479,20 +4487,11 @@ em_initialize_receive_unit(struct adapter *adapter)
 		/*
 		 * an init() while a netmap client is active must
 		 * preserve the rx buffers passed to userspace.
-		 * In this driver it means we adjust RDT to
-		 * something different from na->num_rx_desc - 1.
 		 */
-		if (ifp->if_capenable & IFCAP_NETMAP) {
-			struct netmap_adapter *na = NA(adapter->ifp);
-			struct netmap_kring *kring = &na->rx_rings[i];
-			t = na->num_rx_desc - 1 - kring->nr_hwavail;
-		}
+		if (ifp->if_capenable & IFCAP_NETMAP)
+			rdt -= NA(adapter->ifp)->rx_rings[i].nr_hwavail;
 #endif /* DEV_NETMAP */
-
-#ifdef PARAVIRT
-		adapter->csb->guest_rdt = t;
-#endif /* PARAVIRT */
-		E1000_WRITE_REG(hw, E1000_RDT(i), t);
+		E1000_WRITE_REG(hw, E1000_RDT(i), rdt);
 	}
 
 	/* Set PTHRESH for improved jumbo performance */
@@ -4567,9 +4566,12 @@ em_rxeof(struct rx_ring *rxr, int count, int *done)
 	struct e1000_rx_desc	*cur;
 	int retries;
 
-#ifdef PARAVIRT
-	adapter->csb->guest_need_rxkick = 0;
-#endif /* PARAVIRT */
+#ifdef NIC_PARAVIRT
+	struct paravirt_csb* csb = adapter->csb;
+
+	if (csb)
+		csb->guest_need_rxkick = 0;
+#endif /* NIC_PARAVIRT */
 	EM_RX_LOCK(rxr);
 
 #ifdef DEV_NETMAP
@@ -4591,20 +4593,21 @@ em_rxeof(struct rx_ring *rxr, int count, int *done)
 		mp = sendmp = NULL;
 
 		if ((status & E1000_RXD_STAT_DD) == 0) {
+#ifdef NIC_PARAVIRT
 			if (++retries <= adapter->rx_retries) {
 				continue;
 			}
-#ifdef PARAVIRT
-			if (adapter->csb->guest_need_rxkick == 0) {
-				adapter->csb->guest_need_rxkick = 1;
+			if (csb && csb->guest_need_rxkick == 0) {
+				csb->guest_need_rxkick = 1;
 				continue;
 			}
-#endif /* PARAVIRT */
+#endif /* NIC_PARAVIRT */
 			break;
 		}
-#ifdef PARAVIRT
-		adapter->csb->guest_need_rxkick = 0;
-#endif /* PARAVIRT */
+#ifdef NIC_PARAVIRT
+		if (csb)
+			csb->guest_need_rxkick = 0;
+#endif /* NIC_PARAVIRT */
 
 		len = le16toh(cur->length);
 		eop = (status & E1000_RXD_STAT_EOP) != 0;
@@ -5778,7 +5781,7 @@ em_sysctl_int_delay(SYSCTL_HANDLER_ARGS)
 		return (EINVAL);
 	info->value = usecs;
 	ticks = EM_USECS_TO_TICKS(usecs);
-	if (info->offset == E1000_ITR)  /* units are 256ns here */
+	if (info->offset == E1000_ITR)	/* units are 256ns here */
 		ticks *= 4;
 
 	adapter = info->adapter;

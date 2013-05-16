@@ -30,7 +30,7 @@
   POSSIBILITY OF SUCH DAMAGE.
 
 ******************************************************************************/
-/*$FreeBSD: head/sys/dev/e1000/if_em.h 228387 2011-12-10 07:08:52Z jfv $*/
+/*$FreeBSD: head/sys/dev/e1000/if_em.h 250414 2013-05-09 17:07:30Z luigi $*/
 
 
 #ifndef _EM_H_DEFINED_
@@ -271,27 +271,12 @@ struct em_int_delay_info {
 	int value;			/* Current value in usecs */
 };
 
-#ifdef PARAVIRT
+#ifdef NIC_PARAVIRT
 #define	E1000_PARA_SUBDEV	0x1101		/* special id */
 #define	E1000_CSBAL		0x02830		/* csb physical address */
 #define	E1000_CSBAH		0x02834
-struct e1000_csb {				/* comm. block */
-	uint32_t	guest_tdt;		/* signals from guest */
-	uint32_t	guest_need_txkick;	/* out of tx bufs */
-	uint32_t	guest_need_rxkick;	/* out of rx bufs */
-	uint32_t	guest_csb_on;		/* mode enabled on the guest */
-	uint32_t	guest_rdt;		/* signals from guest */
-	uint32_t	pad[11];		/* to 64 bytes */
-
-	uint32_t	host_tdh;		/* mirror tdh, unused */
-	uint32_t	host_need_txkick;	/* enable mode */
-	uint32_t	host_txcycles_lim;	/* cycles before stop bh */
-	uint32_t	host_txcycles;		/* current bh cycles */
-	uint32_t	host_rdh;		/* mirror rdh, unused */
-	uint32_t	host_need_rxkick;	/* ??? */
-
-};
-#endif /* PARAVIRT */
+#include <net/paravirt.h>
+#endif /* NIC_PARAVIRT */
 
 /*
  * The transmit ring, one per tx queue
@@ -463,23 +448,23 @@ struct adapter {
 	unsigned long	watchdog_events;
 	unsigned long	link_irq;
 
-#ifdef MITIGATION
+#ifdef NIC_SEND_COMBINING
 	/* 0 = idle; 1xxxx int-pending; 3xxxx int + d pending + tdt */
 #define MIT_PENDING_INT	0x10000	/* pending interrupt */
 #define MIT_PENDING_TDT	0x30000	/* both intr and tdt write are pending */
 	uint32_t shadow_tdt;
-	uint32_t mit_enable;
-	uint32_t rx_retries;	/* optimize rx loop */
-#endif /* MITIGATION */
+	uint32_t sc_enable;
+#endif /* NIC_SEND_COMBINING */
 
-#ifdef PARAVIRT
+#ifdef NIC_PARAVIRT
 	struct em_dma_alloc	csb_mem;	/* phys address */
-	struct e1000_csb	*csb;		/* virtual addr */
+	struct paravirt_csb	*csb;		/* virtual addr */
+	uint32_t rx_retries;	/* optimize rx loop */
 	uint32_t		tdt_csb_count;// XXX stat
 	uint32_t		tdt_reg_count;// XXX stat
 	uint32_t		tdt_int_count;// XXX stat
 	uint32_t		guest_need_kick_count;// XXX stat
-#endif /* PARAVIRT */
+#endif /* NIC_PARAVIRT */
 
 	struct e1000_hw_stats stats;
 };
