@@ -22,6 +22,57 @@
 #include "net/vhost_net.h"
 #include "hw/virtio/virtio-bus.h"
 
+/* Rate monitor: shows the communication statistics. */
+#ifdef RATE
+static int64_t rate_last_timestamp = 0;
+static int rate_interval_ms = 1000;
+
+/* rate interrupts */
+static int rate_ints = 0;
+
+/* rate guest notifications */
+static int rate_ntfy_tx = 0;    // new TX descriptors
+static int rate_ntfy_rx = 0;
+
+/* rate tx packets */
+static int rate_tx = 0;
+static int64_t rate_txb = 0;
+
+/* rate rx packet */
+static int rate_rx = 0;  // received packet counter
+static int64_t rate_rxb = 0;
+
+static int rate_tx_bh_len = 0;
+static int rate_tx_bh_count = 0;
+
+static void rate_callback(void * opaque)
+{
+    VirtIONet* n = opaque;
+    int64_t delta;
+
+    delta = qemu_get_clock_ms(vm_clock) - rate_last_timestamp;
+    printf("Interrupt:           %4.3f KHz\n", (double)rate_ints/delta);
+    printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
+    printf("Tx stream:           %4.3f Mbps\n", (double)(rate_txb*8)/delta/1000.0);
+    if (rate_tx_bh_count)
+	printf("Avg BH work:         %4.3f\n", (double)rate_tx_bh_len/(double)rate_tx_bh_count);
+    printf("Rx packets:          %4.3f Kpps\n", (double)rate_rx/delta);
+    printf("Rx stream:           %4.3f Mbps\n", (double)(rate_rxb*8)/delta/1000.0);
+    printf("Tx notifications:    %4.3f KHz\n", (double)rate_ntfy_tx/delta);
+    printf("Rx notifications:    %4.3f KHz\n", (double)rate_ntfy_rx/delta);
+    printf("\n");
+    rate_ints = 0;
+    rate_ntfy_tx = rate_ntfy_rx = 0;
+    rate_rx = rate_rxb = 0;
+    rate_tx = rate_txb = 0;
+    rate_tx_bh_len = rate_tx_bh_count = 0;
+
+    qemu_mod_timer(n->rate_timer, qemu_get_clock_ms(vm_clock) +
+		    rate_interval_ms);
+    rate_last_timestamp = qemu_get_clock_ms(vm_clock);
+}
+#endif
+
 #define VIRTIO_NET_VM_VERSION    11
 
 #define MAC_TABLE_ENTRIES    64
@@ -214,6 +265,8 @@ static void virtio_net_reset(VirtIODevice *vdev)
     memset(n->mac_table.macs, 0, MAC_TABLE_ENTRIES * ETH_ALEN);
     memcpy(&n->mac[0], &n->nic->conf->macaddr, sizeof(n->mac));
     memset(n->vlans, 0, MAX_VLAN >> 3);
+
+    IFRATE(qemu_mod_timer(n->rate_timer, qemu_get_clock_ms(vm_clock) + 3000));
 }
 
 static void peer_test_vnet_hdr(VirtIONet *n)
@@ -597,7 +650,7 @@ static void virtio_net_handle_ctrl(VirtIODevice *vdev, VirtQueue *vq)
         assert(s == sizeof(status));
 
         virtqueue_push(vq, &elem, sizeof(status));
-        virtio_notify(vdev, vq);
+        IFRATE(rate_ints += )virtio_notify(vdev, vq);
     }
 }
 
@@ -609,6 +662,7 @@ static void virtio_net_handle_rx(VirtIODevice *vdev, VirtQueue *vq)
     int queue_index = vq2q(virtio_get_queue_index(vq));
 
     qemu_flush_queued_packets(qemu_get_subqueue(n->nic, queue_index));
+    IFRATE(rate_ntfy_rx++);
 }
 
 static int virtio_net_can_receive(NetClientState *nc)
@@ -847,7 +901,10 @@ static ssize_t virtio_net_receive(NetClientState *nc, const uint8_t *buf, size_t
     }
 
     virtqueue_flush(q->rx_vq, i);
-    virtio_notify(vdev, q->rx_vq);
+    IFRATE(rate_ints += )virtio_notify(vdev, q->rx_vq);
+ 
+    IFRATE(rate_rx++);
+    IFRATE(rate_rxb += size);
 
     return size;
 }
@@ -861,7 +918,7 @@ static void virtio_net_tx_complete(NetClientState *nc, ssize_t len)
     VirtIODevice *vdev = VIRTIO_DEVICE(n);
 
     virtqueue_push(q->tx_vq, &q->async_tx.elem, 0);
-    virtio_notify(vdev, q->tx_vq);
+    IFRATE(rate_ints += )virtio_notify(vdev, q->tx_vq);
 
     q->async_tx.elem.out_num = q->async_tx.len = 0;
 
@@ -920,6 +977,9 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
 
         ret = qemu_sendv_packet_async(qemu_get_subqueue(n->nic, queue_index),
                                       out_sg, out_num, virtio_net_tx_complete);
+	IFRATE(rate_tx++);
+	IFRATE(rate_txb += ret);
+
         if (ret == 0) {
             virtio_queue_set_notification(q->tx_vq, 0);
             q->async_tx.elem = elem;
@@ -931,11 +991,14 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
 
         virtqueue_push(q->tx_vq, &elem, 0);
         virtio_notify(vdev, q->tx_vq);
+        IFRATE(rate_ints += )virtio_notify(vdev, q->tx_vq);
 
         if (++num_packets >= n->tx_burst) {
             break;
         }
     }
+    IFRATE(rate_tx_bh_len += num_packets);
+    IFRATE(rate_tx_bh_count++);
     return num_packets;
 }
 
@@ -968,6 +1031,7 @@ static void virtio_net_handle_tx_bh(VirtIODevice *vdev, VirtQueue *vq)
     VirtIONet *n = VIRTIO_NET(vdev);
     VirtIONetQueue *q = &n->vqs[vq2q(virtio_get_queue_index(vq))];
 
+    IFRATE(rate_ntfy_tx++);
     if (unlikely(q->tx_waiting)) {
         return;
     }
@@ -1032,6 +1096,7 @@ static void virtio_net_tx_bh(void *opaque)
      * we find something, assume the guest is still active and reschedule */
     virtio_queue_set_notification(q->tx_vq, 1);
     if (virtio_net_flush_tx(q) > 0) {
+	IFRATE(rate_tx_bh_count--);
         virtio_queue_set_notification(q->tx_vq, 0);
         qemu_bh_schedule(q->tx_bh);
         q->tx_waiting = 1;
@@ -1341,6 +1406,7 @@ static int virtio_net_device_init(VirtIODevice *vdev)
                     virtio_net_save, virtio_net_load, n);
 
     add_boot_device_path(n->nic_conf.bootindex, qdev, "/ethernet-phy@0");
+    IFRATE(n->rate_timer = qemu_new_timer_ms(vm_clock, &rate_callback, n));
     return 0;
 }
 
@@ -1371,6 +1437,9 @@ static int virtio_net_device_exit(DeviceState *qdev)
             qemu_bh_delete(q->tx_bh);
         }
     }
+
+    IFRATE(qemu_del_timer(n->rate_timer));
+    IFRATE(qemu_free_timer(n->rate_timer));
 
     g_free(n->vqs);
     qemu_del_nic(n->nic);

@@ -770,15 +770,16 @@ static bool vring_notify(VirtIODevice *vdev, VirtQueue *vq)
     return !v || vring_need_event(vring_used_event(vq), new, old);
 }
 
-void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
+int virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
 {
     if (!vring_notify(vdev, vq)) {
-        return;
+        return 0;
     }
 
     trace_virtio_notify(vdev, vq);
     vdev->isr |= 0x01;
     virtio_notify_vector(vdev, vq->vector);
+    return 1;
 }
 
 void virtio_notify_config(VirtIODevice *vdev)

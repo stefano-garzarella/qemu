@@ -17,6 +17,14 @@
 #include "hw/virtio/virtio.h"
 #include "hw/pci/pci.h"
 
+
+//#define RATE
+#ifdef RATE
+#define IFRATE(x) x
+#else
+#define IFRATE(x) 
+#endif
+
 #define TYPE_VIRTIO_NET "virtio-net-device"
 #define VIRTIO_NET(obj) \
         OBJECT_CHECK(VirtIONet, (obj), TYPE_VIRTIO_NET)
@@ -188,6 +196,7 @@ typedef struct VirtIONet {
     uint16_t max_queues;
     uint16_t curr_queues;
     size_t config_size;
+    IFRATE(QEMUTimer * rate_timer);
 } VirtIONet;
 
 #define VIRTIO_NET_CTRL_MAC    1
