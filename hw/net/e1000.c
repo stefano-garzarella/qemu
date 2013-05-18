@@ -180,8 +180,7 @@ typedef struct E1000State_st {
     bool mit_on;               /* mitigation enable              */
     uint32_t mit_ide;          /* old tx mitigation TXD_CMD_IDE  */
 
-    /* when the rxq becomes full, disable input until half empty */
-    uint32_t rxbufs, txbufs, rxq_full;
+    uint32_t rxbufs;
 #ifdef MAP_RING
     /* used for map ring */
     uint64_t txring_phi, rxring_phi;         /* phisical address */
@@ -1149,22 +1148,17 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
      *   possibly clearing the variable if we were wrong.
      */
     struct paravirt_csb *csb = s->csb && s->csb->guest_csb_on ? s->csb : NULL;
+    bool rxq_full = (total_size > AVAIL_RXBUFS * s->rxbuf_size);
 
-    s->rxq_full = (total_size > AVAIL_RXBUFS * s->rxbuf_size);
-#if 0
-    if (s->rxq_full && bufs < s->rxbufs / 2) {
-        return false; /* hysteresis */
-    }
-#endif
     if (csb) {
-	if (s->rxq_full) {
+	if (rxq_full) {
 doublecheck:
 	    /* Reload csb->guest_rdt only when necessary. */
 	    smp_mb();
 	    s->mac_reg[RDT] = csb->guest_rdt;
-	    s->rxq_full = (total_size > AVAIL_RXBUFS * s->rxbuf_size);
+	    rxq_full = (total_size > AVAIL_RXBUFS * s->rxbuf_size);
 	}
-        if (!s->rxq_full) {
+        if (!rxq_full) {
 	    /* try to minimize writes, be more cache friendly.
 	     * The guest (or the host) might have already
 	     * cleared the flag in a previous iteration.
@@ -1177,7 +1171,7 @@ doublecheck:
 	    goto doublecheck;
 	}
     }
-    return !s->rxq_full;
+    return !rxq_full;
 #else /* !PARAVIRT */
 
     /* Fast-path short packets */
@@ -1481,10 +1475,7 @@ set_dlen(E1000State *s, int index, uint32_t val)
     s->mac_reg[index] = val & 0xfff80;
     if (index == RDLEN) {
         s->rxbufs = s->mac_reg[index] / sizeof(struct e1000_rx_desc);
-        s->rxq_full = 0;
-    } else {
-        s->txbufs = s->mac_reg[index] / sizeof(struct e1000_tx_desc);
-    }
+    } 
 }
 
 static void
