@@ -2190,7 +2190,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
     }
 #ifdef PARAVIRT
     if (s->csb && s->csb->guest_csb_on && 
-		s->currCPlusTxDesc == s->csb->guest_request_txkick) {
+		s->currCPlusTxDesc == s->csb->guest_need_txkick_at) {
 	s->force_txkick = 1;
     }
 #endif

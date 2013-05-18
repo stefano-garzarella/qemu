@@ -37,7 +37,7 @@
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
 #define PARAVIRT        /* use paravirtualized driver */
-#define RATE		/* debug rate monitor */
+//#define RATE		/* debug rate monitor */
 
 #ifdef PARAVIRT
 /*
@@ -191,8 +191,9 @@ typedef struct E1000State_st {
 #ifdef PARAVIRT
     /* used for the communication block */
     struct paravirt_csb *csb;
-    QEMUBH       *tx_bh;
-    uint32_t     tx_count;          /* written in last round */
+    QEMUBH *tx_bh;
+    uint32_t tx_count;	    /* TX processed in last start_xmit round */
+    uint32_t pending_txkick;  /* Set if we hit a guest_need_txkick_at. */
 #endif /* PARAVIRT */
     IFRATE(QEMUTimer * rate_timer);
 } E1000State;
@@ -459,33 +460,36 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	if (s->mit_timer_on)  /* Filter out if we have a pending timer. */
 	    return;
 #ifdef PARAVIRT
-	else if (s->csb && s->csb->guest_csb_on && 
-	    !(s->csb->guest_need_rxkick && (masked & (E1000_ICS_RXT0))) &&
-	    !(s->csb->guest_need_txkick && 
-			    (masked & (E1000_ICR_TXQE | E1000_ICR_TXDW))))
+	else if (s->csb && s->csb->guest_csb_on && !s->pending_txkick &&
+	    !(s->csb->guest_need_rxkick && (masked & (E1000_ICS_RXT0))))
 	    return;
 #endif
-	else if (s->mit_on) {
-	    uint32_t mit_delay = 0;
+	else {
+	    if (s->mit_on) {
+		uint32_t mit_delay = 0;
 
-	    /* Compute the next mitigation delay according to pending
-	     * interrupts and the current values of RADV (provided RDTR!=0), 
-	     * TADV and ITR.
-	     * Then rearm the timer.
-	     */
-	    if (s->mit_ide &&
-		    (masked & (E1000_ICR_TXQE | E1000_ICR_TXDW)))
-		mit_update_delay(&mit_delay, s->mac_reg[TADV] * 4);
-	    if (s->mac_reg[RDTR] && (masked & E1000_ICS_RXT0))
-		mit_update_delay(&mit_delay, s->mac_reg[RADV] * 4);
-	    mit_update_delay(&mit_delay, s->mac_reg[ITR]);
+		/* Compute the next mitigation delay according to pending
+		 * interrupts and the current values of RADV (provided
+		 * RDTR!=0), TADV and ITR.
+		 * Then rearm the timer.
+		 */
+		if (s->mit_ide &&
+			(masked & (E1000_ICR_TXQE | E1000_ICR_TXDW)))
+		    mit_update_delay(&mit_delay, s->mac_reg[TADV] * 4);
+		if (s->mac_reg[RDTR] && (masked & E1000_ICS_RXT0))
+		    mit_update_delay(&mit_delay, s->mac_reg[RADV] * 4);
+		mit_update_delay(&mit_delay, s->mac_reg[ITR]);
 
-	    if (mit_delay) {
-		s->mit_timer_on = 1;
-		qemu_mod_timer(s->mit_timer,
+		if (mit_delay) {
+		    s->mit_timer_on = 1;
+		    qemu_mod_timer(s->mit_timer,
 			qemu_get_clock_ns(vm_clock) + mit_delay * 256);
+		}
+		s->mit_ide = 0;
 	    }
-	    s->mit_ide = 0;
+#ifdef PARAVIRT
+	    s->pending_txkick = 0;
+#endif
 	    IFRATE(rate_irq_int++);
 	}
     }
@@ -556,6 +560,7 @@ static void e1000_reset(void *opaque)
 #ifdef PARAVIRT
     d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
+    d->pending_txkick = 0;
 #endif /* PARAVIRT */
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
@@ -996,6 +1001,9 @@ start_xmit(E1000State *s)
                 set_ics(s, 0, cause);
                 return;
             }
+	    if (!s->pending_txkick && 
+			s->mac_reg[TDH] == s->csb->guest_need_txkick_at)
+		s->pending_txkick = 1;
         } else if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
             break;
         }
