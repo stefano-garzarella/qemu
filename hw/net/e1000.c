@@ -458,45 +458,57 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
     s->mac_reg[ICS] = val;
 
     pending_ints = (s->mac_reg[IMS] & s->mac_reg[ICR]);
-    if (!s->mit_irq_level && pending_ints) { /* Rising edge detected. */
+    if (!s->mit_irq_level && pending_ints) {
 	/*
-	 * We may want to postpone raising the interrupt line.
+	 * Here we detect a potential raising edge. We may want to postpone
+	 * raising the interrupt line. We let the interrupt fire in the 
+	 * following cases:
+	 *  1) We're out of the mitigation delay window (s->mit_timer_on == 1)
+	 *  2) In CSB mode we have a pending_txkick and the txkicks are
+	 *    not disabled at the present moment. If txkicks are disabled
+	 *    (guest_need_txkick_at = ~0), we clear pending_txkick before
+	 *    the check.
+	 *  3) In CSB mode we have a pending RX interrupt and the guest wants
+	 *    to be interrupted for an RX event.
 	 */
-	if (s->mit_timer_on)  /* Filter out if we have a pending timer. */
+	if (s->mit_timer_on) {
 	    return;
-#ifdef PARAVIRT
-	else if (s->csb && s->csb->guest_csb_on && !s->pending_txkick &&
-	    !(s->csb->guest_need_rxkick && (pending_ints & (E1000_ICS_RXT0))))
-	    return;
-#endif
-	else {
-	    if (s->mit_on) {
-		uint32_t mit_delay = 0;
-
-		/* Compute the next mitigation delay according to pending
-		 * interrupts and the current values of RADV (provided
-		 * RDTR!=0), TADV and ITR.
-		 * Then rearm the timer.
-		 */
-		if (s->mit_ide &&
-			(pending_ints & (E1000_ICR_TXQE | E1000_ICR_TXDW)))
-		    mit_update_delay(&mit_delay, s->mac_reg[TADV] * 4);
-		if (s->mac_reg[RDTR] && (pending_ints & E1000_ICS_RXT0))
-		    mit_update_delay(&mit_delay, s->mac_reg[RADV] * 4);
-		mit_update_delay(&mit_delay, s->mac_reg[ITR]);
-
-		if (mit_delay) {
-		    s->mit_timer_on = 1;
-		    qemu_mod_timer(s->mit_timer,
-			qemu_get_clock_ns(vm_clock) + mit_delay * 256);
-		}
-		s->mit_ide = 0;
-	    }
-#ifdef PARAVIRT
-	    s->pending_txkick = 0;
-#endif
-	    IFRATE(rate_irq_int++);
 	}
+#ifdef PARAVIRT
+	if (s->csb && s->csb->guest_csb_on) {
+	    if (s->csb->guest_need_txkick_at == ~0) {
+		s->pending_txkick = 0;
+	    }
+	    if (!s->pending_txkick && !(s->csb->guest_need_rxkick && 
+					(pending_ints & (E1000_ICS_RXT0)))) {
+		return;
+	    }
+	    s->pending_txkick = 0; /* Clear anyways if the interrupt fires */
+	}
+#endif
+	if (s->mit_on) {
+	    uint32_t mit_delay = 0;
+
+	    /* Compute the next mitigation delay according to pending
+	     * interrupts and the current values of RADV (provided
+	     * RDTR!=0), TADV and ITR.
+	     * Then rearm the timer.
+	     */
+	    if (s->mit_ide &&
+		    (pending_ints & (E1000_ICR_TXQE | E1000_ICR_TXDW)))
+		mit_update_delay(&mit_delay, s->mac_reg[TADV] * 4);
+	    if (s->mac_reg[RDTR] && (pending_ints & E1000_ICS_RXT0))
+		mit_update_delay(&mit_delay, s->mac_reg[RADV] * 4);
+	    mit_update_delay(&mit_delay, s->mac_reg[ITR]);
+
+	    if (mit_delay) {
+		s->mit_timer_on = 1;
+		qemu_mod_timer(s->mit_timer,
+			qemu_get_clock_ns(vm_clock) + mit_delay * 256);
+	    }
+	    s->mit_ide = 0;
+	}
+	IFRATE(rate_irq_int++);
     }
 
     s->mit_irq_level = (pending_ints != 0);
@@ -1003,7 +1015,7 @@ start_xmit(E1000State *s)
                 if (s->tx_count > 50) {
                     ND("sent %d in this iteration", s->tx_count);
                 }
-                set_ics(s, 0, cause);
+                set_ics(s, 0, cause); /* XXX should we call after each packet has been sent? Recall that this code flow is concurrent with the guest. */
                 return;
             }
 	    if (!s->pending_txkick && 
@@ -1883,7 +1895,7 @@ static Property e1000_properties[] = {
     DEFINE_NIC_PROPERTIES(E1000State, conf),
     DEFINE_PROP_BIT("autonegotiation", E1000State,
                     compat_flags, E1000_FLAG_AUTONEG_BIT, true),
-    DEFINE_PROP_UINT32("mit_on", E1000State, mit_on, 5),
+    DEFINE_PROP_BOOL("mit_on", E1000State, mit_on, 5),
     DEFINE_PROP_END_OF_LIST(),
 };
 
