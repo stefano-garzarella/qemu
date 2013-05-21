@@ -26,9 +26,6 @@
 #ifndef NET_PARAVIRT_H
 #define NET_PARAVIRT_H
 
-#include "hw/pci/pci.h"  /* AddressSpace */
-
-
 /*
  Support for virtio-like communication between host and guest NICs.
 
@@ -78,7 +75,14 @@ struct paravirt_csb {
     uint32_t host_need_rxkick_at;  /* Ring index where host expects an rxkick. */
 };
 
+#ifdef	QEMU_PCI_H
+
+/*
+ * API functions only available within QEMU
+ */
+
 void paravirt_configure_csb(struct paravirt_csb** csb, uint32_t csbbal,
 			uint32_t csbbah, QEMUBH* tx_bh, AddressSpace *as);
 
+#endif /* QEMU_PCI_H */
 #endif /* NET_PARAVIRT_H */
