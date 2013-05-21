@@ -24,7 +24,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-
+#define WITH_D	// debugging macros
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
 #include "net/net.h"
@@ -111,10 +111,9 @@ enum {
 /*
  * map a guest region into a host region
  * if the pointer is within the region, ofs gives the displacement.
- * valid = 0 means we should try to map it.
+ * hi >= lo means we should try to map it.
  */
 struct guest_memreg_map {
-        int      valid;
         uint64_t lo;
         uint64_t hi;
         uint64_t ofs;
@@ -313,11 +312,10 @@ static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
     DMAContext *dma;
 
     for (;;) {
-        if (mb->valid && a >= mb->lo && a < mb->hi) {
+        if (mb->lo < mb->hi && mb->lo <= a && a < mb->hi) {
             return (const uint8_t *)(uintptr_t)(a + mb->ofs);
         }
         dma = pci_dma_context(&s->dev);
-        mb->valid = 1;
 
         D("mapping %p is unset", (void *)(uintptr_t)addr);
         if (dma_has_iommu(dma)) {
@@ -325,7 +323,7 @@ static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
             break;
         }
         if (!address_space_mappable(dma->as, addr,
-                  &mb->lo, &mb->hi, &mb->ofs)) {
+                  &mb->lo, &mb->hi, &mb->ofs) || mb->hi <= mb->lo) {
             D("not mappable, cannot set");
             break;
         }
@@ -1415,10 +1413,19 @@ static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val;
-    if (index == CSBAL)
+    if (index == CSBAL) {
+	/*
+	 * We require that writes to the CSB address registers
+	 * are in the order CSBAH , CSBAL so on the second one
+	 * we have a valid 64-bit memory address.
+         * Any previous region is unmapped, and handlers terminated.
+         * The CSB is then remapped if the new pointer is != 0
+         */
 	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
 				s->tx_bh, pci_dma_context(&s->dev)->as);
+    }
 }
+
 
 static void
 e1000_tx_bh(void *opaque)
@@ -1889,7 +1896,7 @@ static Property e1000_properties[] = {
     DEFINE_NIC_PROPERTIES(E1000State, conf),
     DEFINE_PROP_BIT("autonegotiation", E1000State,
                     compat_flags, E1000_FLAG_AUTONEG_BIT, true),
-    DEFINE_PROP_BOOL("mit_on", E1000State, mit_on, 5),
+    DEFINE_PROP_BOOL("mit_on", E1000State, mit_on, true),
     DEFINE_PROP_END_OF_LIST(),
 };
 

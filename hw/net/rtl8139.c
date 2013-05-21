@@ -48,6 +48,8 @@
  *  2011-Mar-22  Benjamin Poirier:  Implemented VLAN offloading
  */
 
+#define WITH_D	/* include debugging macros from qemu-common.h */
+
 /* For crc32 */
 #include <zlib.h>
 

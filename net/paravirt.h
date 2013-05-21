@@ -129,6 +129,7 @@ struct paravirt_csb {
     uint32_t host_txcycles;        /* GR0 HW- counter, but no need to be exported */
     uint32_t host_rdh;             /* GR0 HW- shadow register, mostly unused */
     uint32_t host_need_rxkick;     /* GR+ HW- flush rx queued packets */
+    uint32_t host_isr;             /* GR* HW* shadow copy of ISR */
     uint32_t host_rxkick_at;       /* GR+ HW- rx ring pos where H expects a kick */
 };
 

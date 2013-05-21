@@ -22,6 +22,8 @@
  * THE SOFTWARE.
  */
 
+#define WITH_D	/* include debugging macros from qemu-common.h */
+
 #include "config-host.h"
 
 /* note paths are different for -head and 1.3 */
@@ -220,6 +222,15 @@ static ssize_t netmap_receive_raw(NetClientState *nc,
         if (ring->avail < ring->num_slots / 2 && s->write_poll == false) {
             netmap_write_poll(s, true);
         }
+	/*
+	 * XXX note, in this implementation we simply push packets into
+	 * the ring and rely on a future select() to push packets out.
+	 * What we should really do is add a NIOCTXSYNC call (maybe not
+	 * always, but at least when a burst is over) to flush packets
+	 * out without too much delay. This (and disabling tx flushes
+	 * in the select() ) would also allow this function to be
+	 * called in the CPU thread.
+	 */
         if (ring->avail == 0) { /* cannot write */
             return 0;
         }
