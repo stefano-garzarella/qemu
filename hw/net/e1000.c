@@ -37,7 +37,7 @@
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
 #define PARAVIRT        /* use paravirtualized driver */
-//#define RATE		/* debug rate monitor */
+#define RATE		/* debug rate monitor */
 
 #ifdef PARAVIRT
 /*
@@ -254,6 +254,7 @@ static void csb_dump(E1000State * s) {
 	printf("guest_tdt = %X\n", s->csb->guest_tdt);
 	printf("guest_rdt = %X\n", s->csb->guest_rdt);
 	printf("guest_need_txkick = %X\n", s->csb->guest_need_txkick);
+	printf("guest_need_txkick_at = %X\n", s->csb->guest_need_txkick_at);
 	printf("guest_need_rxkick = %X\n", s->csb->guest_need_rxkick);
 	printf("host_tdh = %X\n", s->csb->host_tdh);
 	printf("host_rdh = %X\n", s->csb->host_rdh);
@@ -261,6 +262,7 @@ static void csb_dump(E1000State * s) {
 	printf("host_need_rxkick = %X\n", s->csb->host_need_rxkick);
 	printf("host_txcycles_lim = %X\n", s->csb->host_txcycles_lim);
 	printf("host_txcycles = %X\n", s->csb->host_txcycles);
+	printf("pending_txkick = %X\n", s->pending_txkick);
     }
 }
 #endif /* PARAVIRT */
@@ -475,9 +477,9 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	}
 #ifdef PARAVIRT
 	if (s->csb && s->csb->guest_csb_on) {
-	    if (s->csb->guest_need_txkick_at == ~0) {
+	    /*if (s->csb->guest_need_txkick_at == ~0) {
 		s->pending_txkick = 0;
-	    }
+	    }*/
 	    if (!s->pending_txkick && !(s->csb->guest_need_rxkick &&
 					(pending_ints & (E1000_ICS_RXT0)))) {
 		return;
@@ -978,7 +980,7 @@ start_xmit(E1000State *s)
 {
     dma_addr_t base;
     struct e1000_tx_desc desc;
-    uint32_t tdh_start = s->mac_reg[TDH], cause = E1000_ICS_TXQE;
+    uint32_t tdh_start = s->mac_reg[TDH], cause = 0;
 
     if (!(s->mac_reg[TCTL] & E1000_TCTL_EN)) {
         DBGOUT(TX, "tx disabled\n");
@@ -1000,7 +1002,7 @@ start_xmit(E1000State *s)
     /* hlim prevents staying here for too long */
     uint32_t hlim = s->mac_reg[TDLEN] / sizeof(desc) / 2;
     uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
-    uint32_t old_tdh; /* value to compare against txkick_at */
+    uint32_t old_tdh = 0; /* value to compare against txkick_at */
 
     for (;;) {
         if (csb_mode) {
@@ -1015,7 +1017,6 @@ start_xmit(E1000State *s)
                 if (s->tx_count > 50) {
                     ND("sent %d in this iteration", s->tx_count);
                 }
-                set_ics(s, 0, cause); /* XXX should we call after each packet has been sent? Recall that this code flow is concurrent with the guest. */
                 return;
             }
 	    old_tdh = s->mac_reg[TDH];
@@ -1050,6 +1051,10 @@ start_xmit(E1000State *s)
                     old_tdh == s->csb->guest_need_txkick_at) {
                 s->pending_txkick = 1;
             }
+	    if (s->mac_reg[TDH] == s->mac_reg[TDT])
+		cause |= E1000_ICS_TXQE;
+	    set_ics(s, 0, cause);
+	    cause = 0;
         }
 #endif /* PARAVIRT */
         /*
@@ -1063,7 +1068,7 @@ start_xmit(E1000State *s)
             break;
         }
     }
-    set_ics(s, 0, cause);
+    set_ics(s, 0, cause | E1000_ICS_TXQE);
 }
 
 static int
