@@ -75,6 +75,8 @@ struct paravirt_csb {
     uint32_t host_need_rxkick_at;  /* Ring index where host expects an rxkick. */
 };
 
+#define NET_PARAVIRT_NONE   (~((uint32_t)0))
+
 #ifdef	QEMU_PCI_H
 
 /*
@@ -85,4 +87,5 @@ void paravirt_configure_csb(struct paravirt_csb** csb, uint32_t csbbal,
 			uint32_t csbbah, QEMUBH* tx_bh, AddressSpace *as);
 
 #endif /* QEMU_PCI_H */
+
 #endif /* NET_PARAVIRT_H */

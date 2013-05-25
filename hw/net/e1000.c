@@ -258,6 +258,7 @@ static void csb_dump(E1000State * s) {
 	printf("host_rdh = %X\n", s->csb->host_rdh);
 	printf("host_need_txkick = %X\n", s->csb->host_need_txkick);
 	printf("host_need_rxkick = %X\n", s->csb->host_need_rxkick);
+	printf("host_need_rxkick_at = %X\n", s->csb->host_need_rxkick_at);
 	printf("host_txcycles_lim = %X\n", s->csb->host_txcycles_lim);
 	printf("host_txcycles = %X\n", s->csb->host_txcycles);
     }
@@ -1128,7 +1129,8 @@ e1000_set_link_status(NetClientState *nc)
         set_ics(s, 0, E1000_ICR_LSC);
 }
 
-#define AVAIL_RXBUFS (((int)s->mac_reg[RDT] -(int)s->mac_reg[RDH]) + ((s->mac_reg[RDT] < s->mac_reg[RDH]) ? s->rxbufs : 0))
+//#define AVAIL_RXBUFS(s) (((int)(s)->mac_reg[RDT] -(int)(s)->mac_reg[RDH]) + (((s)->mac_reg[RDT] < (s)->mac_reg[RDH]) ? (s)->rxbufs : 0))
+#define AVAIL_RXBUFS(s) (((((s)->mac_reg[RDT] < (s)->mac_reg[RDH]) ? (s)->rxbufs : 0) + (s)->mac_reg[RDT]) -(s)->mac_reg[RDH])
 
 static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
 {
@@ -1137,34 +1139,39 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
      * called by set_rdt(), e1000_can_receive(), e1000_receive().
      * If using the csb:
      * - update the RDT value from there.
-     * - if there is space, clear csb->host_need_rxkick to
+     * - if there is space, clear csb->host_need_rxkick_at to
      *   disable further kicks. This is needed mostly in
      *   e1000_set_rdt(), and to clear the flag in the double check.
-     *   Otherwise, set csb->host_need_rxkick and do the double check,
+     *   Otherwise, set csb->host_need_rxkick_at and do the double check,
      *   possibly clearing the variable if we were wrong.
      */
     struct paravirt_csb *csb = s->csb && s->csb->guest_csb_on ? s->csb : NULL;
-    bool rxq_full = (total_size > AVAIL_RXBUFS * s->rxbuf_size);
+    bool rxq_full = (total_size > AVAIL_RXBUFS(s) * s->rxbuf_size);
+    int avail;
 
     if (csb) {
 	if (rxq_full) {
-doublecheck:
 	    /* Reload csb->guest_rdt only when necessary. */
 	    smp_mb();
 	    s->mac_reg[RDT] = csb->guest_rdt;
-	    rxq_full = (total_size > AVAIL_RXBUFS * s->rxbuf_size);
-	}
-        if (!rxq_full) {
+	    avail = AVAIL_RXBUFS(s);
+	    if ((rxq_full = (total_size > avail * s->rxbuf_size))) {
+		csb->host_need_rxkick_at = (s->mac_reg[RDT] + 1 + 
+			(s->rxbufs - avail - 1) * 3/4) % s->rxbufs;
+		/* Doublecheck for more space to avoid race conditions. */
+		smp_mb();
+		s->mac_reg[RDT] = csb->guest_rdt;
+		rxq_full = (total_size > AVAIL_RXBUFS(s) * s->rxbuf_size);
+		if (unlikely(!rxq_full)) {
+		    csb->host_need_rxkick_at = NET_PARAVIRT_NONE;
+		}
+	    }
+	} else if (csb->host_need_rxkick_at != NET_PARAVIRT_NONE) {
 	    /* try to minimize writes, be more cache friendly.
 	     * The guest (or the host) might have already
 	     * cleared the flag in a previous iteration.
 	     */
-	    if (csb->host_need_rxkick) {
-		csb->host_need_rxkick = 0;
-	    }
-	} else if (!csb->host_need_rxkick) {
-	    csb->host_need_rxkick = 1;
-	    goto doublecheck;
+	    csb->host_need_rxkick_at = NET_PARAVIRT_NONE;
 	}
     }
     return !rxq_full;
