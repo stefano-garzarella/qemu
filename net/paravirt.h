@@ -60,7 +60,7 @@ struct paravirt_csb {
     uint32_t guest_need_rxkick;    /* GW- HR+ ran out of rx pkts, request kick  */
     uint32_t guest_csb_on;         /* GW- HR+ enable paravirtual mode */
     uint32_t guest_rdt;            /* GW+ HR+ rx buffers available */
-    uint32_t guest_need_txkick_at; /* Ring index where guest expects a txkick. */
+    uint32_t guest_txkick_at; /* Ring index where guest expects a txkick. */
     uint32_t pad[10];
 
     /* these are (mostly) written by the host */
@@ -72,7 +72,7 @@ struct paravirt_csb {
     uint32_t host_rdh;             /* HW+ GR0 shadow register, mostly unused */
     uint32_t host_need_rxkick;     /* HW- GR+ flush rx queued packets */
     uint32_t host_isr;
-    uint32_t host_need_rxkick_at;  /* Ring index where host expects an rxkick. */
+    uint32_t host_rxkick_at;  /* Ring index where host expects an rxkick. */
 };
 
 #define NET_PARAVIRT_NONE   (~((uint32_t)0))
