@@ -194,7 +194,6 @@ typedef struct E1000State_st {
     struct paravirt_csb *csb;
     QEMUBH *tx_bh;
     uint32_t tx_count;	    /* TX processed in last start_xmit round */
-    uint32_t pending_txkick;  /* Set if we hit a guest_need_txkick_at. */
 #endif /* PARAVIRT */
     IFRATE(QEMUTimer * rate_timer);
 } E1000State;
@@ -254,7 +253,6 @@ static void csb_dump(E1000State * s) {
 	printf("guest_tdt = %X\n", s->csb->guest_tdt);
 	printf("guest_rdt = %X\n", s->csb->guest_rdt);
 	printf("guest_need_txkick = %X\n", s->csb->guest_need_txkick);
-	printf("guest_need_txkick_at = %X\n", s->csb->guest_need_txkick_at);
 	printf("guest_need_rxkick = %X\n", s->csb->guest_need_rxkick);
 	printf("host_tdh = %X\n", s->csb->host_tdh);
 	printf("host_rdh = %X\n", s->csb->host_rdh);
@@ -262,7 +260,6 @@ static void csb_dump(E1000State * s) {
 	printf("host_need_rxkick = %X\n", s->csb->host_need_rxkick);
 	printf("host_txcycles_lim = %X\n", s->csb->host_txcycles_lim);
 	printf("host_txcycles = %X\n", s->csb->host_txcycles);
-	printf("pending_txkick = %X\n", s->pending_txkick);
     }
 }
 #endif /* PARAVIRT */
@@ -465,26 +462,24 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	 * raising the interrupt line. We let the interrupt fire in the
 	 * following cases:
 	 *  1) We're out of the mitigation delay window (s->mit_timer_on == 1)
-	 *  2) In CSB mode we have a pending_txkick and the txkicks are
-	 *    not disabled at the present moment. If txkicks are disabled
-	 *    (guest_need_txkick_at = ~0), we clear pending_txkick before
-	 *    the check.
+	 *  2) In CSB mode we have a pending TX interrupt and the guest wants
+	 *    to be interrupted for an TX event.
 	 *  3) In CSB mode we have a pending RX interrupt and the guest wants
 	 *    to be interrupted for an RX event.
+	 *  4) XXX Other interrupt events.
 	 */
 	if (s->mit_timer_on) {
 	    return;
 	}
 #ifdef PARAVIRT
-	if (s->csb && s->csb->guest_csb_on) {
-	    /*if (s->csb->guest_need_txkick_at == ~0) {
-		s->pending_txkick = 0;
-	    }*/
-	    if (!s->pending_txkick && !(s->csb->guest_need_rxkick &&
-					(pending_ints & (E1000_ICS_RXT0)))) {
+#define E1000_PARAVIRT_INTR_OTHER (~(E1000_ICS_RXT0 | E1000_ICS_RXDMT0 | E1000_ICR_TXQE | E1000_ICR_TXDW | E1000_ICR_INT_ASSERTED))
+	if (s->csb && s->csb->guest_csb_on && 
+		!(pending_ints & E1000_PARAVIRT_INTR_OTHER) &&
+		!(s->csb->guest_need_txkick && 
+		    (pending_ints & (E1000_ICR_TXQE | E1000_ICR_TXDW))) && 
+		!(s->csb->guest_need_rxkick &&
+				(pending_ints & (E1000_ICS_RXT0)))) {
 		return;
-	    }
-	    s->pending_txkick = 0; /* Clear anyways if the interrupt fires */
 	}
 #endif
 	if (s->mit_on) {
@@ -533,7 +528,7 @@ e1000_mit_timer(void *opaque)
     set_interrupt_cause(s, 0, s->mac_reg[ICR]);
 }
 
-static void
+static inline void
 set_ics(E1000State *s, int index, uint32_t val)
 {
     DBGOUT(INTERRUPT, "set_ics %x, ICR %x, IMR %x\n", val, s->mac_reg[ICR],
@@ -578,7 +573,6 @@ static void e1000_reset(void *opaque)
 #ifdef PARAVIRT
     d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
-    d->pending_txkick = 0;
 #endif /* PARAVIRT */
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
@@ -1002,7 +996,6 @@ start_xmit(E1000State *s)
     /* hlim prevents staying here for too long */
     uint32_t hlim = s->mac_reg[TDLEN] / sizeof(desc) / 2;
     uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
-    uint32_t old_tdh = 0; /* value to compare against txkick_at */
 
     for (;;) {
         if (csb_mode) {
@@ -1019,7 +1012,6 @@ start_xmit(E1000State *s)
                 }
                 return;
             }
-	    old_tdh = s->mac_reg[TDH];
         } else if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
             break;
         }
@@ -1047,10 +1039,6 @@ start_xmit(E1000State *s)
 #ifdef PARAVIRT
         if (csb_mode) {
             s->csb->host_tdh = s->mac_reg[TDH];
-            if (!s->pending_txkick &&
-                    old_tdh == s->csb->guest_need_txkick_at) {
-                s->pending_txkick = 1;
-            }
 	    if (s->mac_reg[TDH] == s->mac_reg[TDT])
 		cause |= E1000_ICS_TXQE;
 	    set_ics(s, 0, cause);
