@@ -75,6 +75,7 @@ struct paravirt_csb {
     uint32_t host_rxkick_at;  /* Ring index where host expects an rxkick. */
 };
 
+#define NET_PARAVIRT_CSB_SIZE   4096
 #define NET_PARAVIRT_NONE   (~((uint32_t)0))
 
 #ifdef	QEMU_PCI_H
