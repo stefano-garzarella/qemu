@@ -22,7 +22,7 @@
  * THE SOFTWARE.
  */
 
-#define WITH_D	/* include debugging macros from qemu-common.h */
+#define WITH_D /* include debugging macros from qemu-common.h */
 
 #include "config-host.h"
 
@@ -107,7 +107,7 @@ static int netmap_open(struct netmap_state *me)
     }
     bzero(&req, sizeof(req));
     pstrcpy(req.nr_name, sizeof(req.nr_name), me->ifname);
-    req.nr_ringid = 0;
+    req.nr_ringid = NETMAP_NO_TX_POLL;
     req.nr_version = NETMAP_API;
     err = ioctl(fd, NIOCGINFO, &req);
     if (err) {
@@ -206,8 +206,8 @@ static void netmap_writable(void *opaque)
 /*
  * new data guest --> backend
  */
-static ssize_t netmap_receive_raw(NetClientState *nc,
-      const uint8_t *buf, size_t size)
+static ssize_t netmap_receive_flags(NetClientState *nc,
+      const uint8_t *buf, size_t size, uint32_t flags)
 {
     struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
     struct netmap_ring *ring = s->me.tx;
@@ -222,15 +222,6 @@ static ssize_t netmap_receive_raw(NetClientState *nc,
         if (ring->avail < ring->num_slots / 2 && s->write_poll == false) {
             netmap_write_poll(s, true);
         }
-	/*
-	 * XXX note, in this implementation we simply push packets into
-	 * the ring and rely on a future select() to push packets out.
-	 * What we should really do is add a NIOCTXSYNC call (maybe not
-	 * always, but at least when a burst is over) to flush packets
-	 * out without too much delay. This (and disabling tx flushes
-	 * in the select() ) would also allow this function to be
-	 * called in the CPU thread.
-	 */
         if (ring->avail == 0) { /* cannot write */
             return 0;
         }
@@ -242,8 +233,16 @@ static ssize_t netmap_receive_raw(NetClientState *nc,
         pkt_copy(buf, dst, size);
         ring->cur = NETMAP_RING_NEXT(ring, i);
         ring->avail--;
+        if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE))
+            ioctl(s->me.fd, NIOCTXSYNC, NULL);
     }
     return size;
+}
+
+static ssize_t netmap_receive_raw(NetClientState *nc,
+      const uint8_t *buf, size_t size)
+{
+	return netmap_receive_flags(nc, buf, size, 0);
 }
 
 /* complete a previous send (backend --> guest), enable the fd_read callback */
@@ -309,6 +308,7 @@ static void netmap_cleanup(NetClientState *nc)
 static NetClientInfo net_netmap_info = {
     .type = NET_CLIENT_OPTIONS_KIND_NETMAP,
     .size = sizeof(struct nm_state),
+    .receive_flags = netmap_receive_flags,
     .receive = netmap_receive_raw,
 #if 0 /* not implemented */
     .receive_raw = netmap_receive_raw,

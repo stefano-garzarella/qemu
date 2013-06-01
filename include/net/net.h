@@ -45,6 +45,7 @@ typedef struct NICConf {
 typedef void (NetPoll)(NetClientState *, bool enable);
 typedef int (NetCanReceive)(NetClientState *);
 typedef ssize_t (NetReceive)(NetClientState *, const uint8_t *, size_t);
+typedef ssize_t (NetReceiveFlags)(NetClientState *, const uint8_t *, size_t, uint32_t flags);
 typedef ssize_t (NetReceiveIOV)(NetClientState *, const struct iovec *, int);
 typedef void (NetCleanup) (NetClientState *);
 typedef void (LinkStatusChanged)(NetClientState *);
@@ -55,6 +56,7 @@ typedef struct NetClientInfo {
     size_t size;
     NetReceive *receive;
     NetReceive *receive_raw;
+    NetReceiveFlags *receive_flags;
     NetReceiveIOV *receive_iov;
     NetCanReceive *can_receive;
     NetCleanup *cleanup;
@@ -114,6 +116,8 @@ void qemu_send_packet(NetClientState *nc, const uint8_t *buf, int size);
 ssize_t qemu_send_packet_raw(NetClientState *nc, const uint8_t *buf, int size);
 ssize_t qemu_send_packet_async(NetClientState *nc, const uint8_t *buf,
                                int size, NetPacketSent *sent_cb);
+ssize_t qemu_send_packet_async_moreflags(NetClientState *nc, const uint8_t *buf,
+                               int size, NetPacketSent *sent_cb, unsigned more);
 void qemu_purge_queued_packets(NetClientState *nc);
 void qemu_flush_queued_packets(NetClientState *nc);
 void qemu_format_nic_info_str(NetClientState *nc, uint8_t macaddr[6]);

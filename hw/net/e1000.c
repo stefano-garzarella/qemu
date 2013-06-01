@@ -24,7 +24,8 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#define WITH_D	// debugging macros
+#define WITH_D /* include debugging macros from qemu-common.h */
+
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
 #include "net/net.h"
@@ -111,9 +112,10 @@ enum {
 /*
  * map a guest region into a host region
  * if the pointer is within the region, ofs gives the displacement.
- * hi >= lo means we should try to map it.
+ * valid = 0 means we should try to map it.
  */
 struct guest_memreg_map {
+        int      valid;
         uint64_t lo;
         uint64_t hi;
         uint64_t ofs;
@@ -194,6 +196,7 @@ typedef struct E1000State_st {
     QEMUBH *tx_bh;
     uint32_t tx_count;	    /* TX processed in last start_xmit round */
 #endif /* PARAVIRT */
+    uint32_t next_tdh;
     IFRATE(QEMUTimer * rate_timer);
 } E1000State;
 
@@ -244,6 +247,7 @@ static int64_t rate_rxb = 0;
 
 static int rate_tx_bh_len = 0;
 static int rate_tx_bh_count = 0;
+static int rate_txsync = 0;
 
 #ifdef PARAVIRT
 static void csb_dump(E1000State * s) {
@@ -286,6 +290,7 @@ static void rate_callback(void * opaque)
     printf("Rx notifications:    %4.3f KHz\n", (double)rate_ntfy_rx/delta);
     printf("MMIO writes:         %4.3f KHz\n", (double)rate_mmio_write/delta);
     printf("MMIO reads:          %4.3f KHz\n", (double)rate_mmio_read/delta);
+    printf("TXSYNC:		%4.3f KHz\n", (double)rate_txsync/delta);
     printf("\n");
     rate_irq_int = 0;
     rate_ntfy_txfull = 0;
@@ -294,6 +299,7 @@ static void rate_callback(void * opaque)
     rate_rx = rate_rxb = 0;
     rate_tx = rate_txb = 0;
     rate_tx_bh_len = rate_tx_bh_count = 0;
+    rate_txsync = 0;
 
     qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock) +
 		    rate_interval_ms);
@@ -312,10 +318,11 @@ static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
     DMAContext *dma;
 
     for (;;) {
-        if (mb->lo < mb->hi && mb->lo <= a && a < mb->hi) {
+        if (mb->valid && a >= mb->lo && a < mb->hi) {
             return (const uint8_t *)(uintptr_t)(a + mb->ofs);
         }
         dma = pci_dma_context(&s->dev);
+        mb->valid = 1;
 
         D("mapping %p is unset", (void *)(uintptr_t)addr);
         if (dma_has_iommu(dma)) {
@@ -323,7 +330,7 @@ static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
             break;
         }
         if (!address_space_mappable(dma->as, addr,
-                  &mb->lo, &mb->hi, &mb->ofs) || mb->hi <= mb->lo) {
+                  &mb->lo, &mb->hi, &mb->ofs)) {
             D("not mappable, cannot set");
             break;
         }
@@ -762,10 +769,13 @@ static void
 e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
 {
     NetClientState *nc = qemu_get_queue(s->nic);
+
     if (s->phy_reg[PHY_CTRL] & MII_CR_LOOPBACK) {
         nc->info->receive(nc, buf, size);
     } else {
-        qemu_send_packet(nc, buf, size);
+	qemu_send_packet_async_moreflags(nc, buf, size, NULL,
+	    (s->mac_reg[TDT] == s->next_tdh) ? 0: QEMU_NET_PACKET_FLAG_MORE);
+	rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0;
     }
     IFRATE(rate_tx++; rate_txb += size);
 }
@@ -1030,11 +1040,14 @@ start_xmit(E1000State *s)
                (void *)(intptr_t)desc.buffer_addr, desc.lower.data,
                desc.upper.data);
 
+	s->next_tdh = s->mac_reg[TDH];
+        if (++s->next_tdh * sizeof(desc) >= s->mac_reg[TDLEN])
+            s->next_tdh = 0;
+
         process_tx_desc(s, &desc);
         cause |= txdesc_writeback(s, base, &desc);
 
-        if (++s->mac_reg[TDH] * sizeof(desc) >= s->mac_reg[TDLEN])
-            s->mac_reg[TDH] = 0;
+	s->mac_reg[TDH] = s->next_tdh;
 #ifdef PARAVIRT
         if (csb_mode) {
             s->csb->host_tdh = s->mac_reg[TDH];
@@ -1413,19 +1426,10 @@ static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val;
-    if (index == CSBAL) {
-	/*
-	 * We require that writes to the CSB address registers
-	 * are in the order CSBAH , CSBAL so on the second one
-	 * we have a valid 64-bit memory address.
-         * Any previous region is unmapped, and handlers terminated.
-         * The CSB is then remapped if the new pointer is != 0
-         */
+    if (index == CSBAL)
 	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
 				s->tx_bh, pci_dma_context(&s->dev)->as);
-    }
 }
-
 
 static void
 e1000_tx_bh(void *opaque)

@@ -414,7 +414,9 @@ ssize_t qemu_deliver_packet(NetClientState *sender,
         return 0;
     }
 
-    if (flags & QEMU_NET_PACKET_FLAG_RAW && nc->info->receive_raw) {
+    if (nc->info->receive_flags) {
+        ret = nc->info->receive_flags(nc, data, size, flags);
+    } else if (flags & QEMU_NET_PACKET_FLAG_RAW && nc->info->receive_raw) {
         ret = nc->info->receive_raw(nc, data, size);
     } else {
         ret = nc->info->receive(nc, data, size);
@@ -486,6 +488,14 @@ ssize_t qemu_send_packet_async(NetClientState *sender,
 void qemu_send_packet(NetClientState *nc, const uint8_t *buf, int size)
 {
     qemu_send_packet_async(nc, buf, size, NULL);
+}
+
+ssize_t qemu_send_packet_async_moreflags(NetClientState *sender,
+                               const uint8_t *buf, int size,
+                               NetPacketSent *sent_cb, unsigned more)
+{
+    return qemu_send_packet_async_with_flags(sender, QEMU_NET_PACKET_FLAG_NONE | more,
+                                             buf, size, sent_cb);
 }
 
 ssize_t qemu_send_packet_raw(NetClientState *nc, const uint8_t *buf, int size)
