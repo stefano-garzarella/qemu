@@ -775,7 +775,9 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
     } else {
 	qemu_send_packet_async_moreflags(nc, buf, size, NULL,
 	    (s->mac_reg[TDT] == s->next_tdh) ? 0: QEMU_NET_PACKET_FLAG_MORE);
+#ifdef RATE
 	rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0;
+#endif
     }
     IFRATE(rate_tx++; rate_txb += size);
 }
