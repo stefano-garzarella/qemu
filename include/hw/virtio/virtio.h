@@ -23,6 +23,14 @@
 #include "hw/virtio/virtio-9p.h"
 #endif
 
+
+//#define RATE
+#ifdef RATE
+#define IFRATE(x) x
+#else
+#define IFRATE(x)
+#endif
+
 /* from Linux's linux/virtio_config.h */
 
 /* Status byte for guest to report progress, and synchronize features. */
@@ -170,7 +178,11 @@ void virtqueue_get_avail_bytes(VirtQueue *vq, unsigned int *in_bytes,
                                unsigned int *out_bytes,
                                unsigned max_in_bytes, unsigned max_out_bytes);
 
+#ifdef RATE
 int virtio_notify(VirtIODevice *vdev, VirtQueue *vq);
+#else /* RATE */
+void virtio_notify(VirtIODevice *vdev, VirtQueue *vq);
+#endif /* RATE */
 
 void virtio_save(VirtIODevice *vdev, QEMUFile *f);
 

@@ -902,7 +902,6 @@ static ssize_t virtio_net_receive(NetClientState *nc, const uint8_t *buf, size_t
 
     virtqueue_flush(q->rx_vq, i);
     IFRATE(rate_ints += )virtio_notify(vdev, q->rx_vq);
- 
     IFRATE(rate_rx++);
     IFRATE(rate_rxb += size);
 

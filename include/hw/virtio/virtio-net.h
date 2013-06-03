@@ -17,14 +17,6 @@
 #include "hw/virtio/virtio.h"
 #include "hw/pci/pci.h"
 
-
-//#define RATE
-#ifdef RATE
-#define IFRATE(x) x
-#else
-#define IFRATE(x) 
-#endif
-
 #define TYPE_VIRTIO_NET "virtio-net-device"
 #define VIRTIO_NET(obj) \
         OBJECT_CHECK(VirtIONet, (obj), TYPE_VIRTIO_NET)
