@@ -524,6 +524,8 @@ typedef struct RTL8139State {
     struct paravirt_csb * csb;
     QEMUBH	*tx_bh;
     uint32_t	tx_count;
+    uint32_t	txcycles;
+    uint32_t	txcycles_lim;
     uint32_t	force_txkick;
 #endif /* PARAVIRT */
     IFRATE(QEMUTimer * rate_timer);
@@ -2745,10 +2747,10 @@ static void rtl8139_tx_bh(void * opaque)
     s->tx_count = 0;
     rtl8139_cplus_transmit(s);
     IFRATE(rate_tx_bh_count++; rate_tx_bh_len += s->tx_count);
-    csb->host_txcycles = (s->tx_count > 0) ? 0 : csb->host_txcycles+1;
-    if (csb->host_txcycles >= csb->host_txcycles_lim) {
+    s->txcycles = (s->tx_count > 0) ? 0 : s->txcycles+1;
+    if (s->txcycles >= s->txcycles_lim) {
         /* Prepare to sleep, with race avoidance */
-        csb->host_txcycles = 0;
+        s->txcycles = 0;
         csb->host_need_txkick = 1;
 	ND("tx bh going to sleep, set txkick");
         smp_mb();
@@ -3195,6 +3197,10 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
 	    s->CsbAddrLO = val;
 	    paravirt_configure_csb(&s->csb, s->CsbAddrLO, s->CsbAddrHI,
 				    s->tx_bh, pci_dma_context(&s->dev)->as);
+	    if (s->csb) {
+		s->txcycles_lim = s->csb->host_txcycles_lim;
+		s->txcycles = 0;
+	    }
 	    break;
 
 #endif /* PARAVIRT */

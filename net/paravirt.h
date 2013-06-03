@@ -126,7 +126,7 @@ struct paravirt_csb {
     uint32_t host_need_txkick;     /* GR+ HW- start the iothread */
     uint32_t host_txcycles_lim;    /* GW- HR- how much to spin before  sleep.
 				    * set by the guest */
-    uint32_t host_txcycles;        /* GR0 HW- counter, but no need to be exported */
+    uint32_t unused;		    /* GR0 HW- counter, but no need to be exported */
     uint32_t host_rdh;             /* GR0 HW- shadow register, mostly unused */
     uint32_t host_need_rxkick;     /* GR+ HW- flush rx queued packets */
     uint32_t host_isr;             /* GR* HW* shadow copy of ISR */

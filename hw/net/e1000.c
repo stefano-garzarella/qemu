@@ -194,6 +194,8 @@ typedef struct E1000State_st {
     struct paravirt_csb *csb;
     QEMUBH *tx_bh;
     uint32_t tx_count;	    /* TX processed in last start_xmit round */
+    uint32_t txcycles;	    /* TX bottom half spinning counter */
+    uint32_t txcycles_lim;  /* Snapshot of s->csb->host_txcycles_lim */
 #endif /* CONFIG_E1000_PARAVIRT */
     uint32_t next_tdh;
     IFRATE(QEMUTimer * rate_timer);
@@ -262,7 +264,6 @@ static void csb_dump(E1000State * s) {
 	printf("host_need_rxkick = %X\n", s->csb->host_need_rxkick);
 	printf("host_rxkick_at = %X\n", s->csb->host_rxkick_at);
 	printf("host_txcycles_lim = %X\n", s->csb->host_txcycles_lim);
-	printf("host_txcycles = %X\n", s->csb->host_txcycles);
     }
 }
 #endif /* CONFIG_E1000_PARAVIRT */
@@ -1426,9 +1427,14 @@ static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val;
-    if (index == CSBAL)
+    if (index == CSBAL) {
 	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
 				s->tx_bh, pci_dma_context(&s->dev)->as);
+	if (s->csb) {
+	    s->txcycles_lim = s->csb->host_txcycles_lim;
+	    s->txcycles = 0;
+	}
+    }
 }
 
 static void
@@ -1448,10 +1454,10 @@ e1000_tx_bh(void *opaque)
     s->tx_count = 0;
     start_xmit(s);
     IFRATE(rate_tx_bh_count++; rate_tx_bh_len += s->tx_count);
-    csb->host_txcycles = (s->tx_count > 0) ? 0 : csb->host_txcycles+1;
-    if (csb->host_txcycles >= csb->host_txcycles_lim) {
+    s->txcycles = (s->tx_count > 0) ? 0 : s->txcycles+1;
+    if (s->txcycles >= s->txcycles_lim) {
         /* prepare to sleep, with race avoidance */
-        csb->host_txcycles = 0;
+        s->txcycles = 0;
         csb->host_need_txkick = 1;
 	ND("tx bh going to sleep, set txkick");
         smp_mb();
