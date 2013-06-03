@@ -38,7 +38,7 @@
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
 #define PARAVIRT        /* use paravirtualized driver */
-#define RATE		/* debug rate monitor */
+//#define RATE		/* debug rate monitor */
 
 #ifdef PARAVIRT
 /*
@@ -775,9 +775,7 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
     } else {
 	qemu_send_packet_async_moreflags(nc, buf, size, NULL,
 	    (s->mac_reg[TDT] == s->next_tdh) ? 0: QEMU_NET_PACKET_FLAG_MORE);
-#ifdef RATE
-	rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0;
-#endif
+	IFRATE(rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0);
     }
     IFRATE(rate_tx++; rate_txb += size);
 }
@@ -1189,6 +1187,7 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
     }
     return !rxq_full;
 #else /* !PARAVIRT */
+    int bufs;
 
     /* Fast-path short packets */
     if (total_size <= s->rxbuf_size) {
@@ -1906,7 +1905,11 @@ static Property e1000_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
+#ifdef PARAVIRT
+static void e1000_class_init_common(ObjectClass *klass, void *data, int paravirt)
+#else  /* PARAVIRT */
 static void e1000_class_init(ObjectClass *klass, void *data)
+#endif /* PARAVIRT */
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -1917,7 +1920,8 @@ static void e1000_class_init(ObjectClass *klass, void *data)
     k->vendor_id = PCI_VENDOR_ID_INTEL;
     k->device_id = E1000_DEVID;
 #ifdef PARAVIRT
-    k->subsystem_id = E1000_PARA_SUBDEV;
+    if (paravirt)
+	k->subsystem_id = E1000_PARA_SUBDEV;
 #endif /* PARAVIRT */
     k->revision = 0x03;
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
@@ -1926,6 +1930,24 @@ static void e1000_class_init(ObjectClass *klass, void *data)
     dc->vmsd = &vmstate_e1000;
     dc->props = e1000_properties;
 }
+
+#ifdef PARAVIRT
+static void e1000_class_init(ObjectClass *klass, void *data)
+{
+    e1000_class_init_common(klass, data, 0);
+}
+static void e1000_paravirt_class_init(ObjectClass *klass, void *data)
+{
+    e1000_class_init_common(klass, data, 1);
+}
+
+static const TypeInfo e1000_paravirt_info = {
+    .name          = "e1000-paravirt",
+    .parent        = TYPE_PCI_DEVICE,
+    .instance_size = sizeof(E1000State),
+    .class_init    = e1000_paravirt_class_init,
+};
+#endif /* PARAVIRT */
 
 static const TypeInfo e1000_info = {
     .name          = "e1000",
@@ -1937,6 +1959,9 @@ static const TypeInfo e1000_info = {
 static void e1000_register_types(void)
 {
     type_register_static(&e1000_info);
+#ifdef PARAVIRT
+    type_register_static(&e1000_paravirt_info);
+#endif /* PARAVIRT */
 }
 
 type_init(e1000_register_types)
