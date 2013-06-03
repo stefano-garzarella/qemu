@@ -37,10 +37,9 @@
 #include "e1000_regs.h"
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
-#define PARAVIRT        /* use paravirtualized driver */
 //#define RATE		/* debug rate monitor */
 
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
 /*
  * Support for virtio-like communication:
  * The VMM advertises virtio-like synchronization setting
@@ -51,7 +50,7 @@
 #define E1000_CSBAL       0x02830
 #define E1000_CSBAH       0x02834
 #include "net/paravirt.h"
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 
 #ifdef RATE
 #define IFRATE(x) x
@@ -190,12 +189,12 @@ typedef struct E1000State_st {
     struct guest_memreg_map mbufs;
 #endif /* MAP_RING */
 
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     /* used for the communication block */
     struct paravirt_csb *csb;
     QEMUBH *tx_bh;
     uint32_t tx_count;	    /* TX processed in last start_xmit round */
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
     uint32_t next_tdh;
     IFRATE(QEMUTimer * rate_timer);
 } E1000State;
@@ -214,9 +213,9 @@ enum {
     defreg(RA),		defreg(MTA),	defreg(CRCERRS),defreg(VFTA),
     defreg(VET),
     defreg(RDTR),       defreg(RADV),   defreg(TADV),   defreg(ITR),
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     defreg(CSBAL),      defreg(CSBAH),
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 };
 
 /* Rate monitor: shows the communication statistics. */
@@ -249,7 +248,7 @@ static int rate_tx_bh_len = 0;
 static int rate_tx_bh_count = 0;
 static int rate_txsync = 0;
 
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
 static void csb_dump(E1000State * s) {
     if (s->csb) {
 	printf("guest_csb_on = %X\n", s->csb->guest_csb_on);
@@ -266,16 +265,16 @@ static void csb_dump(E1000State * s) {
 	printf("host_txcycles = %X\n", s->csb->host_txcycles);
     }
 }
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 
 static void rate_callback(void * opaque)
 {
     E1000State* s = opaque;
     int64_t delta;
 
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     csb_dump(s);
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 
     delta = qemu_get_clock_ms(vm_clock) - rate_last_timestamp;
     printf("Interrupt:           %4.3f KHz\n", (double)rate_irq_int/delta);
@@ -477,7 +476,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	if (s->mit_timer_on) {
 	    return;
 	}
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
 #define E1000_PARAVIRT_INTR_OTHER (~(E1000_ICS_RXT0 | E1000_ICS_RXDMT0 | E1000_ICR_TXQE | E1000_ICR_TXDW | E1000_ICR_INT_ASSERTED))
 	if (s->csb && s->csb->guest_csb_on && 
 		!(pending_ints & E1000_PARAVIRT_INTR_OTHER) &&
@@ -576,10 +575,10 @@ static void e1000_reset(void *opaque)
     d->mit_timer_on = 0;
     d->mit_irq_level = 0;
     d->mit_ide = 0;
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
     memset(d->mac_reg, 0, sizeof d->mac_reg);
@@ -1001,7 +1000,7 @@ start_xmit(E1000State *s)
     }
 #endif /* MAP_RING */
 
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     /* hlim prevents staying here for too long */
     uint32_t hlim = s->mac_reg[TDLEN] / sizeof(desc) / 2;
     uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
@@ -1025,9 +1024,9 @@ start_xmit(E1000State *s)
             break;
         }
         s->tx_count++;
-#else /* !PARAVIRT */
+#else /* !CONFIG_E1000_PARAVIRT */
     while (s->mac_reg[TDH] != s->mac_reg[TDT]) {
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 #ifdef MAP_RING
         desc = s->txring[s->mac_reg[TDH]];
 #else /* !MAP_RING */
@@ -1048,7 +1047,7 @@ start_xmit(E1000State *s)
         cause |= txdesc_writeback(s, base, &desc);
 
 	s->mac_reg[TDH] = s->next_tdh;
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
         if (csb_mode) {
             s->csb->host_tdh = s->mac_reg[TDH];
 	    if (s->mac_reg[TDH] == s->mac_reg[TDT])
@@ -1056,7 +1055,7 @@ start_xmit(E1000State *s)
 	    set_ics(s, 0, cause);
 	    cause = 0;
         }
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
         /*
          * the following could happen only if guest sw assigns
          * bogus values to TDT/TDLEN.
@@ -1145,7 +1144,7 @@ e1000_set_link_status(NetClientState *nc)
 
 static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
 {
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     /*
      * called by set_rdt(), e1000_can_receive(), e1000_receive().
      * If using the csb:
@@ -1186,7 +1185,7 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
 	}
     }
     return !rxq_full;
-#else /* !PARAVIRT */
+#else /* !CONFIG_E1000_PARAVIRT */
     int bufs;
 
     /* Fast-path short packets */
@@ -1202,7 +1201,7 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
         return false;
     }
     return total_size <= bufs * s->rxbuf_size;
-#endif /* !PARAVIRT */
+#endif /* !CONFIG_E1000_PARAVIRT */
 }
 
 static int
@@ -1236,7 +1235,7 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
     size_t desc_offset;
     size_t desc_size;
     size_t total_size;
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
 #endif
 
@@ -1275,12 +1274,12 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         size -= 4;
     }
 
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     if (csb_mode) {
         smp_mb();
         s->mac_reg[RDT] = s->csb->guest_rdt;
     }
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 
     rdh_start = s->mac_reg[RDH];
     desc_offset = 0;
@@ -1342,11 +1341,11 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 
         if (++s->mac_reg[RDH] * sizeof(desc) >= s->mac_reg[RDLEN])
             s->mac_reg[RDH] = 0;
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
 	if (csb_mode) {
 	    s->csb->host_rdh = s->mac_reg[RDH];
 	}
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
         /* see comment in start_xmit; same here */
         if (s->mac_reg[RDH] == rdh_start) {
             DBGOUT(RXERR, "RDH wraparound @%x, RDT %x, RDLEN %x\n",
@@ -1422,7 +1421,7 @@ mac_writereg(E1000State *s, int index, uint32_t val)
 }
 
 
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
 static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
@@ -1466,7 +1465,7 @@ e1000_tx_bh(void *opaque)
         qemu_bh_schedule(s->tx_bh);
     }
 }
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 
 static void
 set_rdt(E1000State *s, int index, uint32_t val)
@@ -1499,7 +1498,7 @@ set_tctl(E1000State *s, int index, uint32_t val)
     s->mac_reg[index] = val;
     s->mac_reg[TDT] &= 0xffff;
     IFRATE(rate_ntfy_tx++);
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     if (s->csb && s->csb->guest_csb_on) {
 	ND("kick accepted tdt %d guest-tdt %d",
 		s->mac_reg[TDT], s->csb->guest_tdt);
@@ -1508,7 +1507,7 @@ set_tctl(E1000State *s, int index, uint32_t val)
         qemu_bh_schedule(s->tx_bh);
         return;
     }
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
     start_xmit(s);
 }
 
@@ -1543,9 +1542,9 @@ static uint32_t (*macreg_readops[])(E1000State *, int) = {
     getreg(TDBAL),	getreg(TDBAH),	getreg(RDBAH),	getreg(RDBAL),
     getreg(TDLEN),	getreg(RDLEN),
     getreg(RDTR),       getreg(RADV),   getreg(TADV),   getreg(ITR),
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     getreg(CSBAL),      getreg(CSBAH),
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 
     [TOTH] = mac_read_clr8,	[TORH] = mac_read_clr8,	[GPRC] = mac_read_clr4,
     [GPTC] = mac_read_clr4,	[TPR] = mac_read_clr4,	[TPT] = mac_read_clr4,
@@ -1564,9 +1563,9 @@ static void (*macreg_writeops[])(E1000State *, int, uint32_t) = {
     putreg(RDBAL),	putreg(LEDCTL), putreg(VET),
     [RDTR] = set_16bit, [RADV] = set_16bit,     [TADV] = set_16bit,
     [ITR] = set_16bit,
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     [CSBAL] = set_32bit, [CSBAH] = set_32bit,
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
     [TDLEN] = set_dlen,	[RDLEN] = set_dlen,	[TCTL] = set_tctl,
     [TDT] = set_tctl,	[MDIC] = set_mdic,	[ICS] = set_ics,
     [TDH] = set_16bit,	[RDH] = set_16bit,	[RDT] = set_rdt,
@@ -1823,9 +1822,9 @@ pci_e1000_uninit(PCIDevice *dev)
     qemu_free_timer(d->autoneg_timer);
     qemu_del_timer(d->mit_timer);
     qemu_free_timer(d->mit_timer);
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     qemu_bh_delete(d->tx_bh);
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
     IFRATE(qemu_del_timer(d->rate_timer); qemu_free_timer(d->rate_timer));
     memory_region_destroy(&d->mmio);
     memory_region_destroy(&d->io);
@@ -1885,9 +1884,9 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     d->mit_timer = qemu_new_timer_ns(vm_clock, e1000_mit_timer, d);
     IFRATE(d->rate_timer = qemu_new_timer_ms(vm_clock, &rate_callback, d));
 
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     d->tx_bh = qemu_bh_new(e1000_tx_bh, d);
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
     return 0;
 }
 
@@ -1905,11 +1904,11 @@ static Property e1000_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
 static void e1000_class_init_common(ObjectClass *klass, void *data, int paravirt)
-#else  /* PARAVIRT */
+#else  /* CONFIG_E1000_PARAVIRT */
 static void e1000_class_init(ObjectClass *klass, void *data)
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -1919,10 +1918,10 @@ static void e1000_class_init(ObjectClass *klass, void *data)
     k->romfile = "efi-e1000.rom";
     k->vendor_id = PCI_VENDOR_ID_INTEL;
     k->device_id = E1000_DEVID;
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     if (paravirt)
 	k->subsystem_id = E1000_PARA_SUBDEV;
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
     k->revision = 0x03;
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     dc->desc = "Intel Gigabit Ethernet";
@@ -1931,7 +1930,7 @@ static void e1000_class_init(ObjectClass *klass, void *data)
     dc->props = e1000_properties;
 }
 
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
 static void e1000_class_init(ObjectClass *klass, void *data)
 {
     e1000_class_init_common(klass, data, 0);
@@ -1947,7 +1946,7 @@ static const TypeInfo e1000_paravirt_info = {
     .instance_size = sizeof(E1000State),
     .class_init    = e1000_paravirt_class_init,
 };
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 
 static const TypeInfo e1000_info = {
     .name          = "e1000",
@@ -1959,9 +1958,9 @@ static const TypeInfo e1000_info = {
 static void e1000_register_types(void)
 {
     type_register_static(&e1000_info);
-#ifdef PARAVIRT
+#ifdef CONFIG_E1000_PARAVIRT
     type_register_static(&e1000_paravirt_info);
-#endif /* PARAVIRT */
+#endif /* CONFIG_E1000_PARAVIRT */
 }
 
 type_init(e1000_register_types)
