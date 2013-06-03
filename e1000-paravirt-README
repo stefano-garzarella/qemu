@@ -1,0 +1,60 @@
+*********************** e1000 device extensions **********************
+**********************************************************************
+
+
+(1) Interrupt Mitigation
+=============================================================================
+The original e1000 emulation doesn't implement the e1000 interrupt mitigation,
+so that when the e1000 interrupts are enabled the guest gets one interrupt
+per TX/RX packet. If the incoming/outcoming network traffic is high there is
+an huge overhead because of the interrupt handling.
+
+The QEMU patchset we provide includes a partial implementation of the e1000
+interrupt mitigation, emulating the ITR, RADV and TADV registers. The 
+RDTR and TIDV registers are not (completely) implemented, because
+    a) these are part of the old (discouraged) e1000 mitigation mechanism, 
+       while the new one uses only the ITR register
+    b) their emulation would have complicated the implementation without
+       benefits
+
+The e1000 interrupt mitigation can be enabled on the QEMU command-line by 
+specifing the e1000 "mit_on" device option ("true"/"false"):
+
+    qemu -device e1000,mit_on=true,...  ...
+
+============================================================================
+
+
+
+
+(2) Device paravirtualization
+============================================================================
+With a small extension to the original e1000 interface it is possible to
+turn the e1000 emulated device into an paravirtualized network device, and
+get high RX/TX performance.
+A paravirtualization-capable e1000 driver¹ running on the guest can tell the
+(emulated) NIC to switch to the high performance "paravirtual mode".
+Moreover the e1000 paravirtual device is fully integrated with the fast
+VALE switch (which is a network backend in the QEMU terminology), which
+is dramatically faster than the standard TAP backend.
+
+The paravirtualization extension can be enabled at QEMU compile time by
+specifing the "--enable-e1000-paravirt" option.
+
+In order to use a paravirtualized e1000 device, the user must specify the
+"e1000-paravirt" device on the QEMU command-line:
+
+    qemu -device e1000-paravirt,...  ...
+
+If the guest does not use a paravirtualization-capable driver, we fall back to
+normal e1000 emulation, as if you specify "e1000" instead of "e1000-paravirt".
+For this reason you can always use "e1000-paravirt" instead of "e1000" unless
+you want explicitly avoid device paravirtualization.
+
+The interrupt mitigation (1) can be used in conjunction with device
+paravirtualization.
+
+
+
+¹We provide a modified Linux and FreeBSD paravirtualization capable-e1000
+driver
