@@ -1,0 +1,2074 @@
+diff --git a/configure b/configure
+index 5ae7e4a..5567146 100755
+--- a/configure
++++ b/configure
+@@ -154,6 +154,8 @@ curl=""
+ curses=""
+ docs=""
+ fdt=""
++netmap=""
++e1000_paravirt=""
+ nptl=""
+ pixman=""
+ sdl=""
+@@ -757,6 +759,14 @@ for opt do
+   ;;
+   --enable-vde) vde="yes"
+   ;;
++  --disable-netmap) netmap="no"
++  ;;
++  --enable-netmap) netmap="yes"
++  ;;
++  --disable-e1000-paravirt) e1000_paravirt="no"
++  ;;
++  --enable-e1000-paravirt) e1000_paravirt="yes"
++  ;;
+   --disable-xen) xen="no"
+   ;;
+   --enable-xen) xen="yes"
+@@ -1161,6 +1171,10 @@ echo "  --disable-uuid           disable uuid support"
+ echo "  --enable-uuid            enable uuid support"
+ echo "  --disable-vde            disable support for vde network"
+ echo "  --enable-vde             enable support for vde network"
++echo "  --disable-netmap         disable support for netmap network"
++echo "  --enable-netmap          enable support for netmap network"
++echo "  --disable-e1000-paravirt disable support for e1000 paravirtualization"
++echo "  --enable-e1000-paravirt  enable support for e1000 paravirtualization (needs guest support)"
+ echo "  --disable-linux-aio      disable Linux AIO support"
+ echo "  --enable-linux-aio       enable Linux AIO support"
+ echo "  --disable-cap-ng         disable libcap-ng support"
+@@ -2025,6 +2039,26 @@ EOF
+ fi
+ 
+ ##########################################
++# netmap headers probe
++if test "$netmap" != "no" ; then
++  cat > $TMPC << EOF
++#include <inttypes.h>
++#include <net/if.h>
++#include <net/netmap.h>
++#include <net/netmap_user.h>
++int main(void) { return 0; }
++EOF
++  if compile_prog "" "" ; then
++    netmap=yes
++  else
++    if test "$netmap" = "yes" ; then
++      feature_not_found "netmap"
++    fi
++    netmap=no
++  fi
++fi
++
++##########################################
+ # libcap-ng library probe
+ if test "$cap_ng" != "no" ; then
+   cap_libs="-lcap-ng"
+@@ -3550,6 +3584,8 @@ echo "NPTL support      $nptl"
+ echo "GUEST_BASE        $guest_base"
+ echo "PIE               $pie"
+ echo "vde support       $vde"
++echo "netmap support    $netmap"
++echo "e1000 paravirt    $e1000_paravirt"
+ echo "Linux AIO support $linux_aio"
+ echo "ATTR/XATTR support $attr"
+ echo "Install blobs     $blobs"
+@@ -3688,6 +3724,12 @@ fi
+ if test "$vde" = "yes" ; then
+   echo "CONFIG_VDE=y" >> $config_host_mak
+ fi
++if test "$netmap" = "yes" ; then
++  echo "CONFIG_NETMAP=y" >> $config_host_mak
++fi
++if test "$e1000_paravirt" = "yes" ; then
++  echo "CONFIG_E1000_PARAVIRT=y" >> $config_host_mak
++fi
+ if test "$cap_ng" = "yes" ; then
+   echo "CONFIG_LIBCAP=y" >> $config_host_mak
+ fi
+@@ -3979,7 +4021,11 @@ linux)
+   echo "HOST_USB=linux legacy" >> $config_host_mak
+ ;;
+ bsd)
+-  echo "HOST_USB=bsd" >> $config_host_mak
++  if test "$targetos" = "FreeBSD"; then
++    echo "HOST_USB=stub" >> $config_host_mak
++  else
++    echo "HOST_USB=bsd" >> $config_host_mak
++  fi
+ ;;
+ libusb)
+   if test "$linux" = "yes"; then
+diff --git a/exec.c b/exec.c
+index aec65c5..337ae5a 100644
+--- a/exec.c
++++ b/exec.c
+@@ -2080,6 +2080,35 @@ static void cpu_notify_map_clients(void)
+     }
+ }
+ 
++/* Helper function returning the contiguous segment containing
++ * a guest physical address (gpaddr).
++ * Return 0 if not existing, otherwise the segment covers the
++ * guest physical region *gpa_low .. *gpa_high - 1, and the
++ * guest-physical to host-virtual mapping is obtained as
++ *         host_virtual_addr = gp_addr + *g2h_ofs
++ */
++int address_space_mappable(AddressSpace *as, hwaddr gp_addr,
++    uint64_t *gpa_lo, uint64_t *gpa_hi, uint64_t *g2h_ofs)
++{
++    AddressSpaceDispatch *d = as->dispatch;
++    MemoryRegionSection *section;
++    RAMBlock *block;
++
++    section = phys_page_find(d, gp_addr >> TARGET_PAGE_BITS);
++    if (memory_region_is_ram(section->mr) && !section->readonly) {
++        QTAILQ_FOREACH(block, &ram_list.blocks, next) {
++            if (gp_addr - block->offset < block->length) {
++                *gpa_lo = block->offset;
++                *gpa_hi = block->offset + block->length;
++                *g2h_ofs = (uintptr_t)block->host - block->offset;
++                return 1;
++            }
++        }
++    }
++    *gpa_lo = *gpa_hi = *g2h_ofs = 0;
++    return 0;    /* cannot map */
++}
++
+ /* Map a physical memory region into a host virtual address.
+  * May map a subset of the requested range, given by and returned in *plen.
+  * May return NULL if resources needed to perform the mapping are exhausted.
+diff --git a/hmp-commands.hx b/hmp-commands.hx
+index 9cea415..1c86a48 100644
+--- a/hmp-commands.hx
++++ b/hmp-commands.hx
+@@ -1137,7 +1137,7 @@ ETEXI
+     {
+         .name       = "host_net_add",
+         .args_type  = "device:s,opts:s?",
+-        .params     = "tap|user|socket|vde|dump [options]",
++        .params     = "tap|user|socket|vde|netmap|dump [options]",
+         .help       = "add host VLAN client",
+         .mhandler.cmd = net_host_device_add,
+     },
+@@ -1165,7 +1165,7 @@ ETEXI
+     {
+         .name       = "netdev_add",
+         .args_type  = "netdev:O",
+-        .params     = "[user|tap|socket|hubport],id=str[,prop=value][,...]",
++        .params     = "[user|tap|socket|hubport|netmap],id=str[,prop=value][,...]",
+         .help       = "add host network device",
+         .mhandler.cmd = hmp_netdev_add,
+     },
+diff --git a/hw/net/e1000.c b/hw/net/e1000.c
+index e6f46f0..172bdc6 100644
+--- a/hw/net/e1000.c
++++ b/hw/net/e1000.c
+@@ -24,6 +24,7 @@
+  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#define WITH_D /* include debugging macros from qemu-common.h */
+ 
+ #include "hw/hw.h"
+ #include "hw/pci/pci.h"
+@@ -35,6 +36,28 @@
+ 
+ #include "e1000_regs.h"
+ 
++#define MAP_RING        /* map the buffers instead of pci_dma_rw() */
++#define RATE		/* debug rate monitor */
++
++#ifdef CONFIG_E1000_PARAVIRT
++/*
++ * Support for virtio-like communication:
++ * The VMM advertises virtio-like synchronization setting
++ * the subvendor id set to 0x1101 (E1000_PARA_SUBDEV).
++ */
++#define E1000_PARA_SUBDEV 0x1101
++/* Address registers for the Communication Status Block. */
++#define E1000_CSBAL       0x02830
++#define E1000_CSBAH       0x02834
++#include "net/paravirt.h"
++#endif /* CONFIG_E1000_PARAVIRT */
++
++#ifdef RATE
++#define IFRATE(x) x
++#else
++#define IFRATE(x)
++#endif /* RATE */
++
+ #define E1000_DEBUG
+ 
+ #ifdef E1000_DEBUG
+@@ -84,6 +107,20 @@ enum {
+                    /* default to E1000_DEV_ID_82540EM */	0xc20
+ };
+ 
++#ifdef MAP_RING
++/*
++ * map a guest region into a host region
++ * if the pointer is within the region, ofs gives the displacement.
++ * valid = 0 means we should try to map it.
++ */
++struct guest_memreg_map {
++        int      valid;
++        uint64_t lo;
++        uint64_t hi;
++        uint64_t ofs;
++};
++#endif /* MAP_RING */
++
+ typedef struct E1000State_st {
+     PCIDevice dev;
+     NICState *nic;
+@@ -136,6 +173,32 @@ typedef struct E1000State_st {
+ #define E1000_FLAG_AUTONEG_BIT 0
+ #define E1000_FLAG_AUTONEG (1 << E1000_FLAG_AUTONEG_BIT)
+     uint32_t compat_flags;
++
++    QEMUTimer *mit_timer;      /* handle for the timer           */
++    bool mit_timer_on;         /* mitigation timer active        */
++    bool mit_irq_level;        /* track the interrupt pin level  */
++    bool mit_on;               /* mitigation enable              */
++    uint32_t mit_ide;          /* old tx mitigation TXD_CMD_IDE  */
++
++    uint32_t rxbufs;
++#ifdef MAP_RING
++    /* used for map ring */
++    uint64_t txring_phi, rxring_phi;         /* phisical address */
++    struct e1000_tx_desc *txring;
++    struct e1000_rx_desc *rxring;
++    struct guest_memreg_map mbufs;
++#endif /* MAP_RING */
++
++#ifdef CONFIG_E1000_PARAVIRT
++    /* used for the communication block */
++    struct paravirt_csb *csb;
++    QEMUBH *tx_bh;
++    uint32_t tx_count;	    /* TX processed in last start_xmit round */
++    uint32_t txcycles;	    /* TX bottom half spinning counter */
++    uint32_t txcycles_lim;  /* Snapshot of s->csb->host_txcycles_lim */
++#endif /* CONFIG_E1000_PARAVIRT */
++    uint32_t next_tdh;
++    IFRATE(QEMUTimer * rate_timer);
+ } E1000State;
+ 
+ #define	defreg(x)	x = (E1000_##x>>2)
+@@ -151,8 +214,139 @@ enum {
+     defreg(TPR),	defreg(TPT),	defreg(TXDCTL),	defreg(WUFC),
+     defreg(RA),		defreg(MTA),	defreg(CRCERRS),defreg(VFTA),
+     defreg(VET),
++    defreg(RDTR),       defreg(RADV),   defreg(TADV),   defreg(ITR),
++#ifdef CONFIG_E1000_PARAVIRT
++    defreg(CSBAL),      defreg(CSBAH),
++#endif /* CONFIG_E1000_PARAVIRT */
+ };
+ 
++/* Rate monitor: shows the communication statistics. */
++#ifdef RATE
++static int64_t rate_last_timestamp = 0;
++static int rate_interval_ms = 1000;
++
++/* rate mmio accesses */
++static int rate_mmio_write = 0;
++static int rate_mmio_read = 0;
++
++/* rate interrupts */
++static int rate_irq_int = 0;
++static int rate_ntfy_txfull = 0;
++
++/* rate guest notifications */
++static int rate_ntfy_tx = 0;    // new TX descriptors
++static int rate_ntfy_ic = 0;    // interrupt acknowledge (interrupt clear)
++static int rate_ntfy_rx = 0;
++
++/* rate tx packets */
++static int rate_tx = 0;
++static int64_t rate_txb = 0;
++
++/* rate rx packet */
++static int rate_rx = 0;  // received packet counter
++static int64_t rate_rxb = 0;
++
++static int rate_tx_bh_len = 0;
++static int rate_tx_bh_count = 0;
++static int rate_txsync = 0;
++
++#ifdef CONFIG_E1000_PARAVIRT
++static void csb_dump(E1000State * s) {
++    if (s->csb) {
++	printf("guest_csb_on = %X\n", s->csb->guest_csb_on);
++	printf("guest_tdt = %X\n", s->csb->guest_tdt);
++	printf("guest_rdt = %X\n", s->csb->guest_rdt);
++	printf("guest_need_txkick = %X\n", s->csb->guest_need_txkick);
++	printf("guest_need_rxkick = %X\n", s->csb->guest_need_rxkick);
++	printf("host_tdh = %X\n", s->csb->host_tdh);
++	printf("host_rdh = %X\n", s->csb->host_rdh);
++	printf("host_need_txkick = %X\n", s->csb->host_need_txkick);
++	printf("host_need_rxkick = %X\n", s->csb->host_need_rxkick);
++	printf("host_rxkick_at = %X\n", s->csb->host_rxkick_at);
++	printf("host_txcycles_lim = %X\n", s->csb->host_txcycles_lim);
++    }
++}
++#endif /* CONFIG_E1000_PARAVIRT */
++
++static void rate_callback(void * opaque)
++{
++    E1000State* s = opaque;
++    int64_t delta;
++
++#ifdef CONFIG_E1000_PARAVIRT
++    csb_dump(s);
++#endif /* CONFIG_E1000_PARAVIRT */
++
++    delta = qemu_get_clock_ms(vm_clock) - rate_last_timestamp;
++    printf("Interrupt:           %4.3f KHz\n", (double)rate_irq_int/delta);
++    printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
++    printf("Tx stream:           %4.3f Mbps\n", (double)(rate_txb*8)/delta/1000.0);
++    if (rate_tx_bh_count)
++	printf("Avg BH work:         %4.3f\n", (double)rate_tx_bh_len/(double)rate_tx_bh_count);
++    printf("Rx packets:          %4.3f Kpps\n", (double)rate_rx/delta);
++    printf("Rx stream:           %4.3f Mbps\n", (double)(rate_rxb*8)/delta/1000.0);
++    printf("Tx notifications:    %4.3f KHz\n", (double)rate_ntfy_tx/delta);
++    printf("TX full notif.:      %4.3f KHz\n", (double)rate_ntfy_txfull/delta);
++    printf("Rx notifications:    %4.3f KHz\n", (double)rate_ntfy_rx/delta);
++    printf("MMIO writes:         %4.3f KHz\n", (double)rate_mmio_write/delta);
++    printf("MMIO reads:          %4.3f KHz\n", (double)rate_mmio_read/delta);
++    printf("TXSYNC:		%4.3f KHz\n", (double)rate_txsync/delta);
++    printf("\n");
++    rate_irq_int = 0;
++    rate_ntfy_txfull = 0;
++    rate_ntfy_tx = rate_ntfy_ic = rate_ntfy_rx = 0;
++    rate_mmio_read = rate_mmio_write = 0;
++    rate_rx = rate_rxb = 0;
++    rate_tx = rate_txb = 0;
++    rate_tx_bh_len = rate_tx_bh_count = 0;
++    rate_txsync = 0;
++
++    qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock) +
++		    rate_interval_ms);
++    rate_last_timestamp = qemu_get_clock_ms(vm_clock);
++}
++#endif /* RATE */
++
++#ifdef MAP_RING
++/*
++ * try to extract an mbuf region
++ */
++static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
++{
++    struct guest_memreg_map *mb = &s->mbufs;
++    uint64_t a = addr;
++    DMAContext *dma;
++
++    for (;;) {
++        if (mb->valid && a >= mb->lo && a < mb->hi) {
++            return (const uint8_t *)(uintptr_t)(a + mb->ofs);
++        }
++        dma = pci_dma_context(&s->dev);
++        mb->valid = 1;
++
++        D("mapping %p is unset", (void *)(uintptr_t)addr);
++        if (dma_has_iommu(dma)) {
++            D("iommu range, cannot set");
++            break;
++        }
++        if (!address_space_mappable(dma->as, addr,
++                  &mb->lo, &mb->hi, &mb->ofs)) {
++            D("not mappable, cannot set");
++            break;
++        }
++        D("segment [%p .. %p] delta %p",
++             (void *)(uintptr_t)mb->lo,
++             (void *)(uintptr_t)mb->hi,
++             (void *)(uintptr_t)mb->ofs);
++
++        D("mapping txring correct %p computed %p",
++            s->txring, (void *)(uintptr_t)(s->txring_phi + mb->ofs));
++    }
++    mb->hi = mb->lo = 0; /* empty mapping */
++    return NULL;
++}
++#endif /* MAP_RING */
++
+ static void
+ e1000_link_down(E1000State *s)
+ {
+@@ -237,9 +431,20 @@ static const uint32_t mac_reg_init[] = {
+                 E1000_MANC_RMCP_EN,
+ };
+ 
++/* helper function, *curr == 0 means the value is not set */
++static inline void
++mit_update_delay(uint32_t *curr, uint32_t value)
++{
++    if (value && (*curr == 0 || value < *curr)) {
++        *curr = value;
++    }
++}
++
+ static void
+ set_interrupt_cause(E1000State *s, int index, uint32_t val)
+ {
++    uint32_t pending_ints;
++
+     if (val && (E1000_DEVID >= E1000_DEV_ID_82547EI_MOBILE)) {
+         /* Only for 8257x */
+         val |= E1000_ICR_INT_ASSERTED;
+@@ -256,10 +461,80 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
+      */
+     s->mac_reg[ICS] = val;
+ 
+-    qemu_set_irq(s->dev.irq[0], (s->mac_reg[IMS] & s->mac_reg[ICR]) != 0);
++    pending_ints = (s->mac_reg[IMS] & s->mac_reg[ICR]);
++    if (!s->mit_irq_level && pending_ints) {
++	/*
++	 * Here we detect a potential raising edge. We may want to postpone
++	 * raising the interrupt line. We let the interrupt fire in the
++	 * following cases:
++	 *  1) We're out of the mitigation delay window (s->mit_timer_on == 1)
++	 *  2) In CSB mode we have a pending TX interrupt and the guest wants
++	 *    to be interrupted for an TX event.
++	 *  3) In CSB mode we have a pending RX interrupt and the guest wants
++	 *    to be interrupted for an RX event.
++	 *  4) XXX Other interrupt events.
++	 */
++	if (s->mit_timer_on) {
++	    return;
++	}
++#ifdef CONFIG_E1000_PARAVIRT
++#define E1000_PARAVIRT_INTR_OTHER (~(E1000_ICS_RXT0 | E1000_ICS_RXDMT0 | E1000_ICR_TXQE | E1000_ICR_TXDW | E1000_ICR_INT_ASSERTED))
++	if (s->csb && s->csb->guest_csb_on && 
++		!(pending_ints & E1000_PARAVIRT_INTR_OTHER) &&
++		!(s->csb->guest_need_txkick && 
++		    (pending_ints & (E1000_ICR_TXQE | E1000_ICR_TXDW))) && 
++		!(s->csb->guest_need_rxkick &&
++				(pending_ints & (E1000_ICS_RXT0)))) {
++		return;
++	}
++#endif
++	if (s->mit_on) {
++	    uint32_t mit_delay = 0;
++
++	    /* Compute the next mitigation delay according to pending
++	     * interrupts and the current values of RADV (provided
++	     * RDTR!=0), TADV and ITR.
++	     * Then rearm the timer.
++	     */
++	    if (s->mit_ide &&
++		    (pending_ints & (E1000_ICR_TXQE | E1000_ICR_TXDW)))
++		mit_update_delay(&mit_delay, s->mac_reg[TADV] * 4);
++	    if (s->mac_reg[RDTR] && (pending_ints & E1000_ICS_RXT0))
++		mit_update_delay(&mit_delay, s->mac_reg[RADV] * 4);
++	    mit_update_delay(&mit_delay, s->mac_reg[ITR]);
++
++	    if (mit_delay) {
++		s->mit_timer_on = 1;
++		qemu_mod_timer(s->mit_timer,
++			qemu_get_clock_ns(vm_clock) + mit_delay * 256);
++	    }
++	    s->mit_ide = 0;
++	}
++	IFRATE(rate_irq_int++);
++    }
++
++    s->mit_irq_level = (pending_ints != 0);
++    qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
+ }
+ 
++/*
++ * Clear s->mit_timer_on and call set_interrupt_cause to update the
++ * irq level (if necessary).
++ * We provide a partial implementation of interrupt mitigation,
++ * emulating only RADV, TADV and ITR (lower 16 bits, 1024ns units for
++ * RADV and TADV, 256ns units for ITR). RDTR is only used to enable RADV;
++ * relative timers based on TIDV and RDTR are not implemented.
++ */
+ static void
++e1000_mit_timer(void *opaque)
++{
++    E1000State *s = opaque;
++
++    s->mit_timer_on = 0;
++    set_interrupt_cause(s, 0, s->mac_reg[ICR]);
++}
++
++static inline void
+ set_ics(E1000State *s, int index, uint32_t val)
+ {
+     DBGOUT(INTERRUPT, "set_ics %x, ICR %x, IMR %x\n", val, s->mac_reg[ICR],
+@@ -297,6 +572,14 @@ static void e1000_reset(void *opaque)
+     int i;
+ 
+     qemu_del_timer(d->autoneg_timer);
++    qemu_del_timer(d->mit_timer);
++    d->mit_timer_on = 0;
++    d->mit_irq_level = 0;
++    d->mit_ide = 0;
++#ifdef CONFIG_E1000_PARAVIRT
++    d->csb = NULL;
++    qemu_bh_cancel(d->tx_bh);
++#endif /* CONFIG_E1000_PARAVIRT */
+     memset(d->phy_reg, 0, sizeof d->phy_reg);
+     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
+     memset(d->mac_reg, 0, sizeof d->mac_reg);
+@@ -322,6 +605,8 @@ set_ctrl(E1000State *s, int index, uint32_t val)
+ {
+     /* RST is self clearing */
+     s->mac_reg[CTRL] = val & ~E1000_CTRL_RST;
++    IFRATE(qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock)
++		+ 1000));
+ }
+ 
+ static void
+@@ -484,11 +769,15 @@ static void
+ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
+ {
+     NetClientState *nc = qemu_get_queue(s->nic);
++
+     if (s->phy_reg[PHY_CTRL] & MII_CR_LOOPBACK) {
+         nc->info->receive(nc, buf, size);
+     } else {
+-        qemu_send_packet(nc, buf, size);
++	qemu_send_packet_async_moreflags(nc, buf, size, NULL,
++	    (s->mac_reg[TDT] == s->next_tdh) ? 0: QEMU_NET_PACKET_FLAG_MORE);
++	IFRATE(rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0);
+     }
++    IFRATE(rate_tx++; rate_txb += size);
+ }
+ 
+ static void
+@@ -561,6 +850,7 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
+     struct e1000_context_desc *xp = (struct e1000_context_desc *)dp;
+     struct e1000_tx *tp = &s->tx;
+ 
++    s->mit_ide |= (txd_lower & E1000_TXD_CMD_IDE); // XXX check
+     if (dtype == E1000_TXD_CMD_DEXT) {	// context descriptor
+         op = le32_to_cpu(xp->cmd_and_length);
+         tp->ipcss = xp->lower_setup.ip_fields.ipcss;
+@@ -600,8 +890,27 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
+         cpu_to_be16wu((uint16_t *)(tp->vlan_header + 2),
+                       le16_to_cpu(dp->upper.fields.special));
+     }
+-        
++
+     addr = le64_to_cpu(dp->buffer_addr);
++
++#ifdef MAP_RING
++    if (!tp->tse && !tp->cptse && tp->size == 0 &&
++        !tp->vlan_needed && !tp->sum_needed &&
++        (txd_lower & E1000_TXD_CMD_EOP)) {
++            const uint8_t *x = map_mbufs(s, addr);
++        if (x) {
++            /* XXX optimization for netmap */
++            e1000_send_packet(s, x, split_size);
++            tp->tso_frames = 0;
++            tp->sum_needed = 0;
++            tp->vlan_needed = 0;
++            tp->size = 0;
++            tp->cptse = 0;
++            return ;
++        }
++    }
++#endif /* MAP_RING */
++
+     if (tp->tse && tp->cptse) {
+         hdr = tp->hdr_len;
+         msh = hdr + tp->mss;
+@@ -652,8 +961,12 @@ txdesc_writeback(E1000State *s, dma_addr_t base, struct e1000_tx_desc *dp)
+     txd_upper = (le32_to_cpu(dp->upper.data) | E1000_TXD_STAT_DD) &
+                 ~(E1000_TXD_STAT_EC | E1000_TXD_STAT_LC | E1000_TXD_STAT_TU);
+     dp->upper.data = cpu_to_le32(txd_upper);
++#ifdef MAP_RING
++    s->txring[s->mac_reg[TDH]].upper = dp->upper;
++#else /* !MAP_RING */
+     pci_dma_write(&s->dev, base + ((char *)&dp->upper - (char *)dp),
+                   &dp->upper, sizeof(dp->upper));
++#endif /* !MAP_RING */
+     return E1000_ICR_TXDW;
+ }
+ 
+@@ -670,27 +983,80 @@ start_xmit(E1000State *s)
+ {
+     dma_addr_t base;
+     struct e1000_tx_desc desc;
+-    uint32_t tdh_start = s->mac_reg[TDH], cause = E1000_ICS_TXQE;
++    uint32_t tdh_start = s->mac_reg[TDH], cause = 0;
+ 
+     if (!(s->mac_reg[TCTL] & E1000_TCTL_EN)) {
+         DBGOUT(TX, "tx disabled\n");
+         return;
+     }
+ 
++#ifdef MAP_RING
++    base = tx_desc_base(s);
++    if (base != s->txring_phi) {
++        hwaddr desclen = s->mac_reg[TDLEN];
++        s->txring_phi = base;
++        s->txring = address_space_map(pci_dma_context(&s->dev)->as,
++              base, &desclen, 0 /* is_write */);
++        D("region size is %ld", (long int)desclen);
++    }
++#endif /* MAP_RING */
++
++#ifdef CONFIG_E1000_PARAVIRT
++    /* hlim prevents staying here for too long */
++    uint32_t hlim = s->mac_reg[TDLEN] / sizeof(desc) / 2;
++    uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
++
++    for (;;) {
++        if (csb_mode) {
++            if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
++                /* we ran dry, exchange some notifications */
++                smp_mb(); /* read from guest ? */
++                s->mac_reg[TDT] = s->csb->guest_tdt;
++                tdh_start = s->mac_reg[TDH];
++            }
++            if (s->tx_count > hlim || s->mac_reg[TDH] == s->mac_reg[TDT]) {
++                /* still dry, we are done */
++                if (s->tx_count > 50) {
++                    ND("sent %d in this iteration", s->tx_count);
++                }
++                return;
++            }
++        } else if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
++            break;
++        }
++        s->tx_count++;
++#else /* !CONFIG_E1000_PARAVIRT */
+     while (s->mac_reg[TDH] != s->mac_reg[TDT]) {
++#endif /* CONFIG_E1000_PARAVIRT */
++#ifdef MAP_RING
++        desc = s->txring[s->mac_reg[TDH]];
++#else /* !MAP_RING */
+         base = tx_desc_base(s) +
+                sizeof(struct e1000_tx_desc) * s->mac_reg[TDH];
+         pci_dma_read(&s->dev, base, &desc, sizeof(desc));
++#endif /* MAP_RING */
+ 
+         DBGOUT(TX, "index %d: %p : %x %x\n", s->mac_reg[TDH],
+                (void *)(intptr_t)desc.buffer_addr, desc.lower.data,
+                desc.upper.data);
+ 
++	s->next_tdh = s->mac_reg[TDH];
++        if (++s->next_tdh * sizeof(desc) >= s->mac_reg[TDLEN])
++            s->next_tdh = 0;
++
+         process_tx_desc(s, &desc);
+         cause |= txdesc_writeback(s, base, &desc);
+ 
+-        if (++s->mac_reg[TDH] * sizeof(desc) >= s->mac_reg[TDLEN])
+-            s->mac_reg[TDH] = 0;
++	s->mac_reg[TDH] = s->next_tdh;
++#ifdef CONFIG_E1000_PARAVIRT
++        if (csb_mode) {
++            s->csb->host_tdh = s->mac_reg[TDH];
++	    if (s->mac_reg[TDH] == s->mac_reg[TDT])
++		cause |= E1000_ICS_TXQE;
++	    set_ics(s, 0, cause);
++	    cause = 0;
++        }
++#endif /* CONFIG_E1000_PARAVIRT */
+         /*
+          * the following could happen only if guest sw assigns
+          * bogus values to TDT/TDLEN.
+@@ -702,7 +1068,7 @@ start_xmit(E1000State *s)
+             break;
+         }
+     }
+-    set_ics(s, 0, cause);
++    set_ics(s, 0, cause | E1000_ICS_TXQE);
+ }
+ 
+ static int
+@@ -774,9 +1140,55 @@ e1000_set_link_status(NetClientState *nc)
+         set_ics(s, 0, E1000_ICR_LSC);
+ }
+ 
++//#define AVAIL_RXBUFS(s) (((int)(s)->mac_reg[RDT] -(int)(s)->mac_reg[RDH]) + (((s)->mac_reg[RDT] < (s)->mac_reg[RDH]) ? (s)->rxbufs : 0))
++#define AVAIL_RXBUFS(s) (((((s)->mac_reg[RDT] < (s)->mac_reg[RDH]) ? (s)->rxbufs : 0) + (s)->mac_reg[RDT]) -(s)->mac_reg[RDH])
++
+ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
+ {
++#ifdef CONFIG_E1000_PARAVIRT
++    /*
++     * called by set_rdt(), e1000_can_receive(), e1000_receive().
++     * If using the csb:
++     * - update the RDT value from there.
++     * - if there is space, clear csb->host_rxkick_at to
++     *   disable further kicks. This is needed mostly in
++     *   e1000_set_rdt(), and to clear the flag in the double check.
++     *   Otherwise, set csb->host_rxkick_at and do the double check,
++     *   possibly clearing the variable if we were wrong.
++     */
++    struct paravirt_csb *csb = s->csb && s->csb->guest_csb_on ? s->csb : NULL;
++    bool rxq_full = (total_size > AVAIL_RXBUFS(s) * s->rxbuf_size);
++    int avail;
++
++    if (csb) {
++	if (rxq_full) {
++	    /* Reload csb->guest_rdt only when necessary. */
++	    smp_mb();
++	    s->mac_reg[RDT] = csb->guest_rdt;
++	    avail = AVAIL_RXBUFS(s);
++	    if ((rxq_full = (total_size > avail * s->rxbuf_size))) {
++		csb->host_rxkick_at = (s->mac_reg[RDT] + 1 + 
++			(s->rxbufs - avail - 1) * 3/4) % s->rxbufs;
++		/* Doublecheck for more space to avoid race conditions. */
++		smp_mb();
++		s->mac_reg[RDT] = csb->guest_rdt;
++		rxq_full = (total_size > AVAIL_RXBUFS(s) * s->rxbuf_size);
++		if (unlikely(!rxq_full)) {
++		    csb->host_rxkick_at = NET_PARAVIRT_NONE;
++		}
++	    }
++	} else if (csb->host_rxkick_at != NET_PARAVIRT_NONE) {
++	    /* try to minimize writes, be more cache friendly.
++	     * The guest (or the host) might have already
++	     * cleared the flag in a previous iteration.
++	     */
++	    csb->host_rxkick_at = NET_PARAVIRT_NONE;
++	}
++    }
++    return !rxq_full;
++#else /* !CONFIG_E1000_PARAVIRT */
+     int bufs;
++
+     /* Fast-path short packets */
+     if (total_size <= s->rxbuf_size) {
+         return s->mac_reg[RDH] != s->mac_reg[RDT];
+@@ -790,6 +1202,7 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
+         return false;
+     }
+     return total_size <= bufs * s->rxbuf_size;
++#endif /* !CONFIG_E1000_PARAVIRT */
+ }
+ 
+ static int
+@@ -823,6 +1236,9 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
+     size_t desc_offset;
+     size_t desc_size;
+     size_t total_size;
++#ifdef CONFIG_E1000_PARAVIRT
++    uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
++#endif
+ 
+     if (!(s->mac_reg[STATUS] & E1000_STATUS_LU)) {
+         return -1;
+@@ -859,6 +1275,13 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
+         size -= 4;
+     }
+ 
++#ifdef CONFIG_E1000_PARAVIRT
++    if (csb_mode) {
++        smp_mb();
++        s->mac_reg[RDT] = s->csb->guest_rdt;
++    }
++#endif /* CONFIG_E1000_PARAVIRT */
++
+     rdh_start = s->mac_reg[RDH];
+     desc_offset = 0;
+     total_size = size + fcs_len(s);
+@@ -866,13 +1289,27 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
+             set_ics(s, 0, E1000_ICS_RXO);
+             return -1;
+     }
++    IFRATE(rate_rx++; rate_rxb += size);
++#ifdef MAP_RING
++    base = rx_desc_base(s);
++    if (base != s->rxring_phi) {
++        hwaddr desclen = s->mac_reg[RDLEN];
++        s->rxring_phi = base;
++        s->rxring = address_space_map(pci_dma_context(&s->dev)->as,
++                base, &desclen, 0 /* is_write */);
++    }
++#endif /* MAP_RING */
+     do {
+         desc_size = total_size - desc_offset;
+         if (desc_size > s->rxbuf_size) {
+             desc_size = s->rxbuf_size;
+         }
+         base = rx_desc_base(s) + sizeof(desc) * s->mac_reg[RDH];
++#ifdef MAP_RING
++        desc = s->rxring[s->mac_reg[RDH]];
++#else /* !MAP_RING */
+         pci_dma_read(&s->dev, base, &desc, sizeof(desc));
++#endif /* !MAP_RING */
+         desc.special = vlan_special;
+         desc.status |= (vlan_status | E1000_RXD_STAT_DD);
+         if (desc.buffer_addr) {
+@@ -896,10 +1333,20 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
+         } else { // as per intel docs; skip descriptors with null buf addr
+             DBGOUT(RX, "Null RX descriptor!!\n");
+         }
++#ifdef MAP_RING
++        s->rxring[s->mac_reg[RDH]] = desc;
++        /* XXX a barrier ? */
++#else
+         pci_dma_write(&s->dev, base, &desc, sizeof(desc));
++#endif /* !MAP_RING */
+ 
+         if (++s->mac_reg[RDH] * sizeof(desc) >= s->mac_reg[RDLEN])
+             s->mac_reg[RDH] = 0;
++#ifdef CONFIG_E1000_PARAVIRT
++	if (csb_mode) {
++	    s->csb->host_rdh = s->mac_reg[RDH];
++	}
++#endif /* CONFIG_E1000_PARAVIRT */
+         /* see comment in start_xmit; same here */
+         if (s->mac_reg[RDH] == rdh_start) {
+             DBGOUT(RXERR, "RDH wraparound @%x, RDT %x, RDLEN %x\n",
+@@ -945,6 +1392,7 @@ mac_icr_read(E1000State *s, int index)
+ 
+     DBGOUT(INTERRUPT, "ICR read: %x\n", ret);
+     set_interrupt_cause(s, 0, 0);
++    IFRATE(rate_ntfy_ic++);
+     return ret;
+ }
+ 
+@@ -973,10 +1421,63 @@ mac_writereg(E1000State *s, int index, uint32_t val)
+     s->mac_reg[index] = val;
+ }
+ 
++
++#ifdef CONFIG_E1000_PARAVIRT
++static void
++set_32bit(E1000State *s, int index, uint32_t val)
++{
++    s->mac_reg[index] = val;
++    if (index == CSBAL) {
++	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
++				s->tx_bh, pci_dma_context(&s->dev)->as);
++	if (s->csb) {
++	    s->txcycles_lim = s->csb->host_txcycles_lim;
++	    s->txcycles = 0;
++	}
++    }
++}
++
++static void
++e1000_tx_bh(void *opaque)
++{
++    E1000State *s = opaque;
++    struct paravirt_csb *csb = s->csb;
++
++    if (!csb) {
++	D("This is not happening!!");
++	start_xmit(s);
++	return;
++    }
++
++    ND("starting tdt %d sent %d in prev.round ", csb->guest_tdt, s->tx_count);
++    s->mac_reg[TDT] = csb->guest_tdt;
++    s->tx_count = 0;
++    start_xmit(s);
++    IFRATE(rate_tx_bh_count++; rate_tx_bh_len += s->tx_count);
++    s->txcycles = (s->tx_count > 0) ? 0 : s->txcycles+1;
++    if (s->txcycles >= s->txcycles_lim) {
++        /* prepare to sleep, with race avoidance */
++        s->txcycles = 0;
++        csb->host_need_txkick = 1;
++	ND("tx bh going to sleep, set txkick");
++        smp_mb();
++        s->mac_reg[TDT] = csb->guest_tdt;
++        if (s->mac_reg[TDH] != s->mac_reg[TDT]) {
++	    ND("tx bh race avoidance, clear txkick");
++            csb->host_need_txkick = 0;
++        }
++    }
++    if (csb->host_need_txkick == 0) {
++        qemu_bh_schedule(s->tx_bh);
++    }
++}
++#endif /* CONFIG_E1000_PARAVIRT */
++
+ static void
+ set_rdt(E1000State *s, int index, uint32_t val)
+ {
+     s->mac_reg[index] = val & 0xffff;
++    IFRATE(rate_ntfy_rx++);
+     if (e1000_has_rxbufs(s, 1)) {
+         qemu_flush_queued_packets(qemu_get_queue(s->nic));
+     }
+@@ -992,6 +1493,9 @@ static void
+ set_dlen(E1000State *s, int index, uint32_t val)
+ {
+     s->mac_reg[index] = val & 0xfff80;
++    if (index == RDLEN) {
++        s->rxbufs = s->mac_reg[index] / sizeof(struct e1000_rx_desc);
++    }
+ }
+ 
+ static void
+@@ -999,6 +1503,17 @@ set_tctl(E1000State *s, int index, uint32_t val)
+ {
+     s->mac_reg[index] = val;
+     s->mac_reg[TDT] &= 0xffff;
++    IFRATE(rate_ntfy_tx++);
++#ifdef CONFIG_E1000_PARAVIRT
++    if (s->csb && s->csb->guest_csb_on) {
++	ND("kick accepted tdt %d guest-tdt %d",
++		s->mac_reg[TDT], s->csb->guest_tdt);
++        s->csb->host_need_txkick = 0; /* XXX could be done by the guest */
++        smp_mb(); /* XXX do we care ? */
++        qemu_bh_schedule(s->tx_bh);
++        return;
++    }
++#endif /* CONFIG_E1000_PARAVIRT */
+     start_xmit(s);
+ }
+ 
+@@ -1032,6 +1547,10 @@ static uint32_t (*macreg_readops[])(E1000State *, int) = {
+     getreg(RDH),	getreg(RDT),	getreg(VET),	getreg(ICS),
+     getreg(TDBAL),	getreg(TDBAH),	getreg(RDBAH),	getreg(RDBAL),
+     getreg(TDLEN),	getreg(RDLEN),
++    getreg(RDTR),       getreg(RADV),   getreg(TADV),   getreg(ITR),
++#ifdef CONFIG_E1000_PARAVIRT
++    getreg(CSBAL),      getreg(CSBAH),
++#endif /* CONFIG_E1000_PARAVIRT */
+ 
+     [TOTH] = mac_read_clr8,	[TORH] = mac_read_clr8,	[GPRC] = mac_read_clr4,
+     [GPTC] = mac_read_clr4,	[TPR] = mac_read_clr4,	[TPT] = mac_read_clr4,
+@@ -1048,6 +1567,11 @@ static void (*macreg_writeops[])(E1000State *, int, uint32_t) = {
+     putreg(PBA),	putreg(EERD),	putreg(SWSM),	putreg(WUFC),
+     putreg(TDBAL),	putreg(TDBAH),	putreg(TXDCTL),	putreg(RDBAH),
+     putreg(RDBAL),	putreg(LEDCTL), putreg(VET),
++    [RDTR] = set_16bit, [RADV] = set_16bit,     [TADV] = set_16bit,
++    [ITR] = set_16bit,
++#ifdef CONFIG_E1000_PARAVIRT
++    [CSBAL] = set_32bit, [CSBAH] = set_32bit,
++#endif /* CONFIG_E1000_PARAVIRT */
+     [TDLEN] = set_dlen,	[RDLEN] = set_dlen,	[TCTL] = set_tctl,
+     [TDT] = set_tctl,	[MDIC] = set_mdic,	[ICS] = set_ics,
+     [TDH] = set_16bit,	[RDH] = set_16bit,	[RDT] = set_rdt,
+@@ -1075,6 +1599,7 @@ e1000_mmio_write(void *opaque, hwaddr addr, uint64_t val,
+         DBGOUT(UNKNOWN, "MMIO unknown write addr=0x%08x,val=0x%08"PRIx64"\n",
+                index<<2, val);
+     }
++    IFRATE(rate_mmio_write++);
+ }
+ 
+ static uint64_t
+@@ -1083,6 +1608,7 @@ e1000_mmio_read(void *opaque, hwaddr addr, unsigned size)
+     E1000State *s = opaque;
+     unsigned int index = (addr & 0x1ffff) >> 2;
+ 
++    IFRATE(rate_mmio_read++);
+     if (index < NREADOPS && macreg_readops[index])
+     {
+         return macreg_readops[index](s, index);
+@@ -1300,6 +1826,12 @@ pci_e1000_uninit(PCIDevice *dev)
+ 
+     qemu_del_timer(d->autoneg_timer);
+     qemu_free_timer(d->autoneg_timer);
++    qemu_del_timer(d->mit_timer);
++    qemu_free_timer(d->mit_timer);
++#ifdef CONFIG_E1000_PARAVIRT
++    qemu_bh_delete(d->tx_bh);
++#endif /* CONFIG_E1000_PARAVIRT */
++    IFRATE(qemu_del_timer(d->rate_timer); qemu_free_timer(d->rate_timer));
+     memory_region_destroy(&d->mmio);
+     memory_region_destroy(&d->io);
+     qemu_del_nic(d->nic);
+@@ -1355,6 +1887,12 @@ static int pci_e1000_init(PCIDevice *pci_dev)
+ 
+     d->autoneg_timer = qemu_new_timer_ms(vm_clock, e1000_autoneg_timer, d);
+ 
++    d->mit_timer = qemu_new_timer_ns(vm_clock, e1000_mit_timer, d);
++    IFRATE(d->rate_timer = qemu_new_timer_ms(vm_clock, &rate_callback, d));
++
++#ifdef CONFIG_E1000_PARAVIRT
++    d->tx_bh = qemu_bh_new(e1000_tx_bh, d);
++#endif /* CONFIG_E1000_PARAVIRT */
+     return 0;
+ }
+ 
+@@ -1368,10 +1906,15 @@ static Property e1000_properties[] = {
+     DEFINE_NIC_PROPERTIES(E1000State, conf),
+     DEFINE_PROP_BIT("autonegotiation", E1000State,
+                     compat_flags, E1000_FLAG_AUTONEG_BIT, true),
++    DEFINE_PROP_BOOL("mit_on", E1000State, mit_on, true),
+     DEFINE_PROP_END_OF_LIST(),
+ };
+ 
++#ifdef CONFIG_E1000_PARAVIRT
++static void e1000_class_init_common(ObjectClass *klass, void *data, int paravirt)
++#else  /* CONFIG_E1000_PARAVIRT */
+ static void e1000_class_init(ObjectClass *klass, void *data)
++#endif /* CONFIG_E1000_PARAVIRT */
+ {
+     DeviceClass *dc = DEVICE_CLASS(klass);
+     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
+@@ -1381,6 +1924,10 @@ static void e1000_class_init(ObjectClass *klass, void *data)
+     k->romfile = "efi-e1000.rom";
+     k->vendor_id = PCI_VENDOR_ID_INTEL;
+     k->device_id = E1000_DEVID;
++#ifdef CONFIG_E1000_PARAVIRT
++    if (paravirt)
++	k->subsystem_id = E1000_PARA_SUBDEV;
++#endif /* CONFIG_E1000_PARAVIRT */
+     k->revision = 0x03;
+     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
+     dc->desc = "Intel Gigabit Ethernet";
+@@ -1389,6 +1936,24 @@ static void e1000_class_init(ObjectClass *klass, void *data)
+     dc->props = e1000_properties;
+ }
+ 
++#ifdef CONFIG_E1000_PARAVIRT
++static void e1000_class_init(ObjectClass *klass, void *data)
++{
++    e1000_class_init_common(klass, data, 0);
++}
++static void e1000_paravirt_class_init(ObjectClass *klass, void *data)
++{
++    e1000_class_init_common(klass, data, 1);
++}
++
++static const TypeInfo e1000_paravirt_info = {
++    .name          = "e1000-paravirt",
++    .parent        = TYPE_PCI_DEVICE,
++    .instance_size = sizeof(E1000State),
++    .class_init    = e1000_paravirt_class_init,
++};
++#endif /* CONFIG_E1000_PARAVIRT */
++
+ static const TypeInfo e1000_info = {
+     .name          = "e1000",
+     .parent        = TYPE_PCI_DEVICE,
+@@ -1399,6 +1964,9 @@ static const TypeInfo e1000_info = {
+ static void e1000_register_types(void)
+ {
+     type_register_static(&e1000_info);
++#ifdef CONFIG_E1000_PARAVIRT
++    type_register_static(&e1000_paravirt_info);
++#endif /* CONFIG_E1000_PARAVIRT */
+ }
+ 
+ type_init(e1000_register_types)
+diff --git a/hw/net/rtl8139.c b/hw/net/rtl8139.c
+index 9369507..2a78428 100644
+--- a/hw/net/rtl8139.c
++++ b/hw/net/rtl8139.c
+@@ -48,6 +48,8 @@
+  *  2011-Mar-22  Benjamin Poirier:  Implemented VLAN offloading
+  */
+ 
++#define WITH_D	/* include debugging macros from qemu-common.h */
++
+ /* For crc32 */
+ #include <zlib.h>
+ 
+@@ -60,6 +62,20 @@
+ #include "sysemu/sysemu.h"
+ #include "qemu/iov.h"
+ 
++#define PARAVIRT
++#ifdef PARAVIRT
++#define RTL8139CP_PARAVIRT_SUBDEV 0x1101
++#include "net/paravirt.h"
++#endif /* PARAVIRT */
++//#define RATE		/* debug rate monitor */
++
++#ifdef RATE
++#define IFRATE(x) x
++#else
++#define IFRATE(x) 
++#endif
++
++
+ /* debug RTL8139 card */
+ //#define DEBUG_RTL8139 1
+ 
+@@ -139,6 +155,10 @@ enum RTL8139_registers {
+     RxRingAddrLO    = 0xE4, /* 64-bit start addr of Rx ring */
+     RxRingAddrHI    = 0xE8, /* 64-bit start addr of Rx ring */
+     TxThresh    = 0xEC, /* Early Tx threshold */
++#ifdef PARAVIRT
++    CsbAddrLO   = 0xF0,
++    CsbAddrHI   = 0xF4,
++#endif /* PARAVIRT */
+ };
+ 
+ enum ClearBitMasks {
+@@ -493,6 +513,23 @@ typedef struct RTL8139State {
+     /* Tally counters */
+     RTL8139TallyCounters tally_counters;
+ 
++    uint16_t	IntrMitigate;
++#ifdef PARAVIRT
++    QEMUTimer	*mit_timer;
++    uint32_t	mit_timer_on;     /* mitigation timer active       */
++    uint32_t	mit_irq_level;
++
++    uint32_t	CsbAddrHI;
++    uint32_t	CsbAddrLO;
++    struct paravirt_csb * csb;
++    QEMUBH	*tx_bh;
++    uint32_t	tx_count;
++    uint32_t	txcycles;
++    uint32_t	txcycles_lim;
++    uint32_t	force_txkick;
++#endif /* PARAVIRT */
++    IFRATE(QEMUTimer * rate_timer);
++
+     /* Non-persistent data */
+     uint8_t   *cplus_txbuffer;
+     int        cplus_txbuffer_len;
+@@ -509,6 +546,93 @@ typedef struct RTL8139State {
+     int rtl8139_mmio_io_addr_dummy;
+ } RTL8139State;
+ 
++/* Rate monitor: shows the communication statistics. */
++#ifdef RATE
++static int64_t rate_last_timestamp = 0;
++static int rate_interval_ms = 1000;
++
++/* rate mmio accesses */
++static int rate_mmio_write = 0;
++static int rate_mmio_read = 0;
++
++/* rate interrupts */
++static int rate_irq_int = 0;
++static int rate_irq_level = 0;
++static int rate_ntfy_txfull = 0;
++
++/* rate guest notifications */
++static int rate_ntfy_tx = 0;    // new TX descriptors
++static int rate_ntfy_ic = 0;    // interrupt acknowledge (interrupt clear)
++static int rate_ntfy_rx = 0;
++
++/* rate tx packets */
++static int rate_tx = 0;
++static int64_t rate_txb = 0;
++
++/* rate rx packet */
++static int rate_rx = 0;  // received packet counter
++static int64_t rate_rxb = 0;
++
++static int rate_tx_bh_len = 0;
++static int rate_tx_bh_count = 0;
++
++#ifdef PARAVIRT
++static void csb_dump(RTL8139State * s) {
++    if (s->csb) {
++	printf("guest_csb_on = %X\n", s->csb->guest_csb_on);
++	printf("guest_tdt = %X\n", s->csb->guest_tdt);
++	printf("guest_rdt = %X\n", s->csb->guest_rdt);
++	printf("guest_need_txkick = %X\n", s->csb->guest_need_txkick);
++	printf("guest_need_rxkick = %X\n", s->csb->guest_need_rxkick);
++	printf("host_tdh = %X\n", s->csb->host_tdh);
++	printf("host_rdh = %X\n", s->csb->host_rdh);
++	printf("host_need_txkick = %X\n", s->csb->host_need_txkick);
++	printf("host_need_rxkick = %X\n", s->csb->host_need_rxkick);
++	printf("host_txcycles_lim = %X\n", s->csb->host_txcycles_lim);
++	printf("host_txcycles = %X\n", s->csb->host_txcycles);
++	printf("host_isr = %X\n", s->csb->host_isr);
++    }
++}
++#endif /* PARAVIRT */
++
++static void rate_callback(void * opaque)
++{
++    RTL8139State* s = opaque;
++    int64_t delta;
++
++#ifdef PARAVIRT
++    csb_dump(s);
++#endif /* PARAVIRT */
++
++    delta = qemu_get_clock_ms(vm_clock) - rate_last_timestamp;
++    printf("Interrupt:           %4.3f KHz\n", (double)rate_irq_int/delta);
++    printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
++    printf("Tx stream:           %4.3f Mbps\n", (double)(rate_txb*8)/delta/1000.0);
++    if (rate_tx_bh_count)
++	printf("Avg BH work:         %4.3f\n", (double)rate_tx_bh_len/(double)rate_tx_bh_count);
++    printf("Rx packets:          %4.3f Kpps\n", (double)rate_rx/delta);
++    printf("Rx stream:           %4.3f Mbps\n", (double)(rate_rxb*8)/delta/1000.0);
++    printf("Tx notifications:    %4.3f KHz\n", (double)rate_ntfy_tx/delta);
++    printf("TX full notif.:      %4.3f KHz\n", (double)rate_ntfy_txfull/delta);
++    printf("Rx notifications:    %4.3f KHz\n", (double)rate_ntfy_rx/delta);
++    printf("MMIO writes:         %4.3f KHz\n", (double)rate_mmio_write/delta);
++    printf("MMIO reads:          %4.3f KHz\n", (double)rate_mmio_read/delta);
++    printf("\n");
++    rate_irq_int = 0;
++    rate_ntfy_txfull = 0;
++    rate_ntfy_tx = rate_ntfy_ic = rate_ntfy_rx = 0;
++    rate_mmio_read = rate_mmio_write = 0;
++    rate_rx = rate_rxb = 0;
++    rate_tx = rate_txb = 0;
++    rate_tx_bh_len = rate_tx_bh_count = 0;
++
++    qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock) +
++		    rate_interval_ms);
++    rate_last_timestamp = qemu_get_clock_ms(vm_clock);
++}
++#endif /* RATE */
++
++
+ /* Writes tally counters to memory via DMA */
+ static void RTL8139TallyCounters_dma_write(RTL8139State *s, dma_addr_t tc_addr);
+ 
+@@ -704,10 +828,40 @@ static void rtl8139_update_irq(RTL8139State *s)
+     int isr;
+     isr = (s->IntrStatus & s->IntrMask) & 0xffff;
+ 
++#ifdef PARAVIRT
++    if (s->csb && s->csb->guest_csb_on) {
++	s->csb->host_isr = s->IntrStatus;
++	if (isr && !s->force_txkick && !(s->csb->guest_need_rxkick &&
++	    (s->IntrStatus & (RxOK | RxErr | RxOverflow | RxFIFOOver))) &&
++	    !(s->csb->guest_need_txkick && (s->IntrStatus & (TxOK | TxErr))))
++	    return;
++    }
++
++    if (!s->mit_irq_level && isr) {
++	/* Rising edge detected. */
++	if (s->mit_timer_on)  /* Filter out if we have a pending timer. */
++	    return;
++	else if (s->IntrMitigate) {
++	    /* Let the interrupt go, but start the mitigation timer. */
++	    s->mit_timer_on = 1;
++	    qemu_mod_timer(s->mit_timer,
++		    qemu_get_clock_ns(vm_clock) + s->IntrMitigate * 1000);
++	}
++    }
++    s->force_txkick = 0;
++    s->mit_irq_level = (isr != 0);
++#endif /* PARAVIRT */
++
+     DPRINTF("Set IRQ to %d (%04x %04x)\n", isr ? 1 : 0, s->IntrStatus,
+         s->IntrMask);
+ 
+     qemu_set_irq(s->dev.irq[0], (isr != 0));
++#ifdef RATE
++    if (!rate_irq_level && isr) {
++	rate_irq_int++;
++    }
++    rate_irq_level = (isr != 0);
++#endif
+ }
+ 
+ static int rtl8139_RxWrap(RTL8139State *s)
+@@ -806,6 +960,13 @@ static int rtl8139_can_receive(NetClientState *nc)
+     }
+ }
+ 
++struct CplusDesc {
++    uint32_t w0;
++    uint32_t w1;
++    uint32_t bufLO;
++    uint32_t bufHI;
++} CplusDesc;
++
+ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t size_, int do_interrupt)
+ {
+     RTL8139State *s = qemu_get_nic_opaque(nc);
+@@ -836,6 +997,8 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
+         return -1;
+     }
+ 
++    IFRATE(rate_rx++; rate_rxb += size);
++
+     /* XXX: check this */
+     if (s->RxConfig & AcceptAllPhys) {
+         /* promiscuous: receive all */
+@@ -971,21 +1134,19 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
+             "%08x %08x = "DMA_ADDR_FMT"\n", descriptor, s->RxRingAddrHI,
+             s->RxRingAddrLO, cplus_rx_ring_desc);
+ 
+-        uint32_t val, rxdw0,rxdw1,rxbufLO,rxbufHI;
++        uint32_t val;
++	struct CplusDesc rxd;
+ 
+-        pci_dma_read(&s->dev, cplus_rx_ring_desc, &val, 4);
+-        rxdw0 = le32_to_cpu(val);
+-        pci_dma_read(&s->dev, cplus_rx_ring_desc+4, &val, 4);
+-        rxdw1 = le32_to_cpu(val);
+-        pci_dma_read(&s->dev, cplus_rx_ring_desc+8, &val, 4);
+-        rxbufLO = le32_to_cpu(val);
+-        pci_dma_read(&s->dev, cplus_rx_ring_desc+12, &val, 4);
+-        rxbufHI = le32_to_cpu(val);
++        pci_dma_read(&s->dev, cplus_rx_ring_desc, &rxd, sizeof(struct CplusDesc));
++	rxd.w0 = le32_to_cpu(rxd.w0);
++	rxd.w1 = le32_to_cpu(rxd.w1);
++	rxd.bufLO = le32_to_cpu(rxd.bufLO);
++	rxd.bufHI = le32_to_cpu(rxd.bufHI);
+ 
+         DPRINTF("+++ C+ mode RX descriptor %d %08x %08x %08x %08x\n",
+-            descriptor, rxdw0, rxdw1, rxbufLO, rxbufHI);
++            descriptor, rxd.w0, rxd.w1, rxd.bufLO, rxd.bufHI);
+ 
+-        if (!(rxdw0 & CP_RX_OWN))
++        if (!(rxd.w0 & CP_RX_OWN))
+         {
+             DPRINTF("C+ Rx mode : descriptor %d is owned by host\n",
+                 descriptor);
+@@ -1001,7 +1162,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
+             return size_;
+         }
+ 
+-        uint32_t rx_space = rxdw0 & CP_RX_BUFFER_SIZE_MASK;
++        uint32_t rx_space = rxd.w0 & CP_RX_BUFFER_SIZE_MASK;
+ 
+         /* write VLAN info to descriptor variables. */
+         if (s->CpCmd & CPlusRxVLAN && be16_to_cpup((uint16_t *)
+@@ -1013,16 +1174,16 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
+                 size = MIN_BUF_SIZE;
+             }
+ 
+-            rxdw1 &= ~CP_RX_VLAN_TAG_MASK;
++            rxd.w1 &= ~CP_RX_VLAN_TAG_MASK;
+             /* BE + ~le_to_cpu()~ + cpu_to_le() = BE */
+-            rxdw1 |= CP_RX_TAVA | le16_to_cpup((uint16_t *)
++            rxd.w1 |= CP_RX_TAVA | le16_to_cpup((uint16_t *)
+                 &dot1q_buf[ETHER_TYPE_LEN]);
+ 
+             DPRINTF("C+ Rx mode : extracted vlan tag with tci: ""%u\n",
+                 be16_to_cpup((uint16_t *)&dot1q_buf[ETHER_TYPE_LEN]));
+         } else {
+             /* reset VLAN tag flag */
+-            rxdw1 &= ~CP_RX_TAVA;
++            rxd.w1 &= ~CP_RX_TAVA;
+         }
+ 
+         /* TODO: scatter the packet over available receive ring descriptors space */
+@@ -1043,7 +1204,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
+             return size_;
+         }
+ 
+-        dma_addr_t rx_addr = rtl8139_addr64(rxbufLO, rxbufHI);
++        dma_addr_t rx_addr = rtl8139_addr64(rxd.bufLO, rxd.bufHI);
+ 
+         /* receive/copy to target memory */
+         if (dot1q_buf) {
+@@ -1086,37 +1247,36 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
+ #define CP_RX_STATUS_TCPF (1<<13)
+ 
+         /* transfer ownership to target */
+-        rxdw0 &= ~CP_RX_OWN;
++        rxd.w0 &= ~CP_RX_OWN;
+ 
+         /* set first segment bit */
+-        rxdw0 |= CP_RX_STATUS_FS;
++        rxd.w0 |= CP_RX_STATUS_FS;
+ 
+         /* set last segment bit */
+-        rxdw0 |= CP_RX_STATUS_LS;
++        rxd.w0 |= CP_RX_STATUS_LS;
+ 
+         /* set received packet type flags */
+         if (packet_header & RxBroadcast)
+-            rxdw0 |= CP_RX_STATUS_BAR;
++            rxd.w0 |= CP_RX_STATUS_BAR;
+         if (packet_header & RxMulticast)
+-            rxdw0 |= CP_RX_STATUS_MAR;
++            rxd.w0 |= CP_RX_STATUS_MAR;
+         if (packet_header & RxPhysical)
+-            rxdw0 |= CP_RX_STATUS_PAM;
++            rxd.w0 |= CP_RX_STATUS_PAM;
+ 
+         /* set received size */
+-        rxdw0 &= ~CP_RX_BUFFER_SIZE_MASK;
+-        rxdw0 |= (size+4);
++        rxd.w0 &= ~CP_RX_BUFFER_SIZE_MASK;
++        rxd.w0 |= (size+4);
+ 
+         /* update ring data */
+-        val = cpu_to_le32(rxdw0);
+-        pci_dma_write(&s->dev, cplus_rx_ring_desc, (uint8_t *)&val, 4);
+-        val = cpu_to_le32(rxdw1);
+-        pci_dma_write(&s->dev, cplus_rx_ring_desc+4, (uint8_t *)&val, 4);
++        rxd.w0 = cpu_to_le32(rxd.w0);
++        rxd.w1 = cpu_to_le32(rxd.w1);
++        pci_dma_write(&s->dev, cplus_rx_ring_desc, (uint8_t *)&rxd, sizeof(rxd.w0) + sizeof(rxd.w1));
+ 
+         /* update tally counter */
+         ++s->tally_counters.RxOk;
+ 
+         /* seek to next Rx descriptor */
+-        if (rxdw0 & CP_RX_EOR)
++        if (rxd.w0 & CP_RX_EOR)
+         {
+             s->currCPlusRxDesc = 0;
+         }
+@@ -1206,6 +1366,12 @@ static void rtl8139_reset(DeviceState *d)
+     /* reset interrupt mask */
+     s->IntrStatus = 0;
+     s->IntrMask = 0;
++#ifdef PARAVIRT
++    if (s->csb)
++	s->csb->host_isr = 0;
++#endif /* PARAVIRT */
++    IFRATE(qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock)
++		+ 1000));
+ 
+     rtl8139_update_irq(s);
+ 
+@@ -1272,6 +1438,13 @@ static void rtl8139_reset(DeviceState *d)
+ 
+     /* reset tally counters */
+     RTL8139TallyCounters_clear(&s->tally_counters);
++
++    s->IntrMitigate = 0;
++#ifdef PARAVIRT
++    s->mit_timer_on = 0;
++    s->mit_irq_level = 0;
++    s->force_txkick = 0;
++#endif /* PARAVIRT */
+ }
+ 
+ static void RTL8139TallyCounters_clear(RTL8139TallyCounters* counters)
+@@ -1448,11 +1621,12 @@ static uint32_t rtl8139_CpCmd_read(RTL8139State *s)
+ static void rtl8139_IntrMitigate_write(RTL8139State *s, uint32_t val)
+ {
+     DPRINTF("C+ IntrMitigate register write(w) val=0x%04x\n", val);
++    s->IntrMitigate = val;
+ }
+ 
+ static uint32_t rtl8139_IntrMitigate_read(RTL8139State *s)
+ {
+-    uint32_t ret = 0;
++    uint32_t ret = s->IntrMitigate;
+ 
+     DPRINTF("C+ IntrMitigate register read(w) val=0x%04x\n", ret);
+ 
+@@ -1797,8 +1971,10 @@ static void rtl8139_transfer_frame(RTL8139State *s, uint8_t *buf, int size,
+     {
+         if (iov) {
+             qemu_sendv_packet(qemu_get_queue(s->nic), iov, 3);
++	    IFRATE(rate_tx++; rate_txb += iov_size(iov, 3));
+         } else {
+             qemu_send_packet(qemu_get_queue(s->nic), buf, size);
++	    IFRATE(rate_tx++; rate_txb += size);
+         }
+     }
+ }
+@@ -1957,19 +2133,17 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+         "%08x %08x = 0x"DMA_ADDR_FMT"\n", descriptor, s->TxAddr[1],
+         s->TxAddr[0], cplus_tx_ring_desc);
+ 
+-    uint32_t val, txdw0,txdw1,txbufLO,txbufHI;
+-
+-    pci_dma_read(&s->dev, cplus_tx_ring_desc,    (uint8_t *)&val, 4);
+-    txdw0 = le32_to_cpu(val);
+-    pci_dma_read(&s->dev, cplus_tx_ring_desc+4,  (uint8_t *)&val, 4);
+-    txdw1 = le32_to_cpu(val);
+-    pci_dma_read(&s->dev, cplus_tx_ring_desc+8,  (uint8_t *)&val, 4);
+-    txbufLO = le32_to_cpu(val);
+-    pci_dma_read(&s->dev, cplus_tx_ring_desc+12, (uint8_t *)&val, 4);
+-    txbufHI = le32_to_cpu(val);
++    uint32_t val;
++    struct CplusDesc txd;
+ 
++    pci_dma_read(&s->dev, cplus_tx_ring_desc, (uint8_t *)&txd, sizeof(CplusDesc));
++    txd.w0 = le32_to_cpu(txd.w0);
++    txd.w1 = le32_to_cpu(txd.w1);
++    txd.bufLO = le32_to_cpu(txd.bufLO);
++    txd.bufHI = le32_to_cpu(txd.bufHI);
++    
+     DPRINTF("+++ C+ mode TX descriptor %d %08x %08x %08x %08x\n", descriptor,
+-        txdw0, txdw1, txbufLO, txbufHI);
++        txd.w0, txd.w1, txd.bufLO, txd.bufHI);
+ 
+ /* w0 ownership flag */
+ #define CP_TX_OWN (1<<31)
+@@ -2013,15 +2187,22 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+ /* excessive collisions flag */
+ #define CP_TX_STATUS_EXC (1<<20)
+ 
+-    if (!(txdw0 & CP_TX_OWN))
++    if (!(txd.w0 & CP_TX_OWN))
+     {
+         DPRINTF("C+ Tx mode : descriptor %d is owned by host\n", descriptor);
+         return 0 ;
+     }
++#ifdef PARAVIRT
++    if (s->csb && s->csb->guest_csb_on && 
++		s->currCPlusTxDesc == s->csb->guest_txkick_at) {
++	s->force_txkick = 1;
++    }
++#endif
++    
+ 
+     DPRINTF("+++ C+ Tx mode : transmitting from descriptor %d\n", descriptor);
+ 
+-    if (txdw0 & CP_TX_FS)
++    if (txd.w0 & CP_TX_FS)
+     {
+         DPRINTF("+++ C+ Tx mode : descriptor %d is first segment "
+             "descriptor\n", descriptor);
+@@ -2030,14 +2211,15 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+         s->cplus_txbuffer_offset = 0;
+     }
+ 
+-    int txsize = txdw0 & CP_TX_BUFFER_SIZE_MASK;
+-    dma_addr_t tx_addr = rtl8139_addr64(txbufLO, txbufHI);
++    int txsize = txd.w0 & CP_TX_BUFFER_SIZE_MASK;
++    dma_addr_t tx_addr = rtl8139_addr64(txd.bufLO, txd.bufHI);
+ 
+     /* make sure we have enough space to assemble the packet */
+     if (!s->cplus_txbuffer)
+     {
+         s->cplus_txbuffer_len = CP_TX_BUFFER_SIZE;
+         s->cplus_txbuffer = g_malloc(s->cplus_txbuffer_len);
++printf("mallocing\n");
+         s->cplus_txbuffer_offset = 0;
+ 
+         DPRINTF("+++ C+ mode transmission buffer allocated space %d\n",
+@@ -2076,8 +2258,8 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+                  s->cplus_txbuffer + s->cplus_txbuffer_offset, txsize);
+     s->cplus_txbuffer_offset += txsize;
+ 
+-    /* seek to next Rx descriptor */
+-    if (txdw0 & CP_TX_EOR)
++    /* seek to next Tx descriptor */
++    if (txd.w0 & CP_TX_EOR)
+     {
+         s->currCPlusTxDesc = 0;
+     }
+@@ -2089,21 +2271,21 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+     }
+ 
+     /* transfer ownership to target */
+-    txdw0 &= ~CP_RX_OWN;
++    txd.w0 &= ~CP_TX_OWN;
+ 
+     /* reset error indicator bits */
+-    txdw0 &= ~CP_TX_STATUS_UNF;
+-    txdw0 &= ~CP_TX_STATUS_TES;
+-    txdw0 &= ~CP_TX_STATUS_OWC;
+-    txdw0 &= ~CP_TX_STATUS_LNKF;
+-    txdw0 &= ~CP_TX_STATUS_EXC;
++    txd.w0 &= ~CP_TX_STATUS_UNF;
++    txd.w0 &= ~CP_TX_STATUS_TES;
++    txd.w0 &= ~CP_TX_STATUS_OWC;
++    txd.w0 &= ~CP_TX_STATUS_LNKF;
++    txd.w0 &= ~CP_TX_STATUS_EXC;
+ 
+     /* update ring data */
+-    val = cpu_to_le32(txdw0);
++    val = cpu_to_le32(txd.w0);
+     pci_dma_write(&s->dev, cplus_tx_ring_desc, (uint8_t *)&val, 4);
+ 
+     /* Now decide if descriptor being processed is holding the last segment of packet */
+-    if (txdw0 & CP_TX_LS)
++    if (txd.w0 & CP_TX_LS)
+     {
+         uint8_t dot1q_buffer_space[VLAN_HLEN];
+         uint16_t *dot1q_buffer;
+@@ -2118,16 +2300,16 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+         int      saved_buffer_len = s->cplus_txbuffer_len;
+ 
+         /* create vlan tag */
+-        if (txdw1 & CP_TX_TAGC) {
++        if (txd.w1 & CP_TX_TAGC) {
+             /* the vlan tag is in BE byte order in the descriptor
+              * BE + le_to_cpu() + ~swap()~ = cpu */
+             DPRINTF("+++ C+ Tx mode : inserting vlan tag with ""tci: %u\n",
+-                bswap16(txdw1 & CP_TX_VLAN_TAG_MASK));
++                bswap16(txd.w1 & CP_TX_VLAN_TAG_MASK));
+ 
+             dot1q_buffer = (uint16_t *) dot1q_buffer_space;
+             dot1q_buffer[0] = cpu_to_be16(ETH_P_8021Q);
+             /* BE + le_to_cpu() + ~cpu_to_le()~ = BE */
+-            dot1q_buffer[1] = cpu_to_le16(txdw1 & CP_TX_VLAN_TAG_MASK);
++            dot1q_buffer[1] = cpu_to_le16(txd.w1 & CP_TX_VLAN_TAG_MASK);
+         } else {
+             dot1q_buffer = NULL;
+         }
+@@ -2137,7 +2319,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+         s->cplus_txbuffer_offset = 0;
+         s->cplus_txbuffer_len = 0;
+ 
+-        if (txdw0 & (CP_TX_IPCS | CP_TX_UDPCS | CP_TX_TCPCS | CP_TX_LGSEN))
++        if (txd.w0 & (CP_TX_IPCS | CP_TX_UDPCS | CP_TX_TCPCS | CP_TX_LGSEN))
+         {
+             DPRINTF("+++ C+ mode offloaded task checksum\n");
+ 
+@@ -2175,7 +2357,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+ 
+             if (ip)
+             {
+-                if (txdw0 & CP_TX_IPCS)
++                if (txd.w0 & CP_TX_IPCS)
+                 {
+                     DPRINTF("+++ C+ mode need IP checksum\n");
+ 
+@@ -2192,9 +2374,9 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+                     }
+                 }
+ 
+-                if ((txdw0 & CP_TX_LGSEN) && ip_protocol == IP_PROTO_TCP)
++                if ((txd.w0 & CP_TX_LGSEN) && ip_protocol == IP_PROTO_TCP)
+                 {
+-                    int large_send_mss = (txdw0 >> 16) & CP_TC_LGSEN_MSS_MASK;
++                    int large_send_mss = (txd.w0 >> 16) & CP_TC_LGSEN_MSS_MASK;
+ 
+                     DPRINTF("+++ C+ mode offloaded task TSO MTU=%d IP data %d "
+                         "frame data %d specified MSS=%d\n", ETH_MTU,
+@@ -2306,7 +2488,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+                     /* Stop sending this frame */
+                     saved_size = 0;
+                 }
+-                else if (txdw0 & (CP_TX_TCPCS|CP_TX_UDPCS))
++                else if (txd.w0 & (CP_TX_TCPCS|CP_TX_UDPCS))
+                 {
+                     DPRINTF("+++ C+ mode need TCP or UDP checksum\n");
+ 
+@@ -2321,7 +2503,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+                     /* copy IP source and destination fields */
+                     memcpy(data_to_checksum, saved_ip_header + 12, 8);
+ 
+-                    if ((txdw0 & CP_TX_TCPCS) && ip_protocol == IP_PROTO_TCP)
++                    if ((txd.w0 & CP_TX_TCPCS) && ip_protocol == IP_PROTO_TCP)
+                     {
+                         DPRINTF("+++ C+ mode calculating TCP checksum for "
+                             "packet with %d bytes data\n", ip_data_len);
+@@ -2341,7 +2523,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
+ 
+                         p_tcp_hdr->th_sum = tcp_checksum;
+                     }
+-                    else if ((txdw0 & CP_TX_UDPCS) && ip_protocol == IP_PROTO_UDP)
++                    else if ((txd.w0 & CP_TX_UDPCS) && ip_protocol == IP_PROTO_UDP)
+                     {
+                         DPRINTF("+++ C+ mode calculating UDP checksum for "
+                             "packet with %d bytes data\n", ip_data_len);
+@@ -2417,6 +2599,9 @@ static void rtl8139_cplus_transmit(RTL8139State *s)
+         s->IntrStatus |= TxOK;
+         rtl8139_update_irq(s);
+     }
++#ifdef PARAVIRT
++    s->tx_count = txcount;
++#endif /* PARAVIRT */
+ }
+ 
+ static void rtl8139_transmit(RTL8139State *s)
+@@ -2552,6 +2737,48 @@ static uint16_t rtl8139_CSCR_read(RTL8139State *s)
+     return ret;
+ }
+ 
++#ifdef PARAVIRT
++static void rtl8139_tx_bh(void * opaque)
++{
++    RTL8139State *s = opaque;
++    struct paravirt_csb *csb = s->csb;
++    uint32_t w0;
++
++    s->tx_count = 0;
++    rtl8139_cplus_transmit(s);
++    IFRATE(rate_tx_bh_count++; rate_tx_bh_len += s->tx_count);
++    s->txcycles = (s->tx_count > 0) ? 0 : s->txcycles+1;
++    if (s->txcycles >= s->txcycles_lim) {
++        /* Prepare to sleep, with race avoidance */
++        s->txcycles = 0;
++        csb->host_need_txkick = 1;
++	ND("tx bh going to sleep, set txkick");
++        smp_mb();
++	pci_dma_read(&s->dev, rtl8139_addr64(s->TxAddr[0], s->TxAddr[1]) +
++		16 * s->currCPlusTxDesc, (uint8_t *)&w0, 4);
++	if (le32_to_cpu(w0) & CP_TX_OWN) {
++	    ND("tx bh race avoidance, clear txkick");
++            csb->host_need_txkick = 0;
++	}
++    }
++    if (csb->host_need_txkick == 0) {
++        qemu_bh_schedule(s->tx_bh);
++    }
++}
++
++static void rtl8139_mit_timer(void *opaque)
++{
++    RTL8139State *s = opaque;
++
++    s->mit_timer_on = 0;
++    if (s->IntrStatus == 0) { /* no events pending, we are done */
++        return;
++    }
++
++    rtl8139_update_irq(s);
++}
++#endif
++
+ static void rtl8139_TxAddr_write(RTL8139State *s, uint32_t txAddrOffset, uint32_t val)
+ {
+     DPRINTF("TxAddr write offset=0x%x val=0x%08x\n", txAddrOffset, val);
+@@ -2671,6 +2898,7 @@ static void rtl8139_IntrStatus_write(RTL8139State *s, uint32_t val)
+     rtl8139_update_irq(s);
+ 
+ #endif
++    IFRATE(rate_ntfy_ic++);
+ }
+ 
+ static uint32_t rtl8139_IntrStatus_read(RTL8139State *s)
+@@ -2785,8 +3013,17 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
+             if (val & (1 << 6))
+             {
+                 DPRINTF("C+ TxPoll normal priority transmission\n");
++#ifdef PARAVIRT
++		if (s->csb && s->csb->guest_csb_on) {
++		    s->csb->host_need_txkick = 0;
++		    smp_mb();
++		    qemu_bh_schedule(s->tx_bh);
++		    
++		} else
++#endif /* PARAVIRT */
+                 rtl8139_cplus_transmit(s);
+             }
++	    IFRATE(rate_ntfy_tx++);
+ 
+             break;
+ 
+@@ -2795,6 +3032,7 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
+                 val);
+             break;
+     }
++    IFRATE(rate_mmio_write++);
+ }
+ 
+ static void rtl8139_io_writew(void *opaque, uint8_t addr, uint32_t val)
+@@ -2853,6 +3091,7 @@ static void rtl8139_io_writew(void *opaque, uint8_t addr, uint32_t val)
+             rtl8139_io_writeb(opaque, addr + 1, (val >> 8) & 0xff);
+             break;
+     }
++    IFRATE(rate_mmio_write++);
+ }
+ 
+ static void rtl8139_set_next_tctr_time(RTL8139State *s, int64_t current_time)
+@@ -2949,7 +3188,22 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
+                 rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
+             }
+             break;
+-
++#ifdef PARAVIRT
++	case CsbAddrHI:
++	    s->CsbAddrHI = val;
++	    break;
++
++	case CsbAddrLO:
++	    s->CsbAddrLO = val;
++	    paravirt_configure_csb(&s->csb, s->CsbAddrLO, s->CsbAddrHI,
++				    s->tx_bh, pci_dma_context(&s->dev)->as);
++	    if (s->csb) {
++		s->txcycles_lim = s->csb->host_txcycles_lim;
++		s->txcycles = 0;
++	    }
++	    break;
++
++#endif /* PARAVIRT */
+         default:
+             DPRINTF("ioport write(l) addr=0x%x val=0x%08x via write(b)\n",
+                 addr, val);
+@@ -2959,6 +3213,7 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
+             rtl8139_io_writeb(opaque, addr + 3, (val >> 24) & 0xff);
+             break;
+     }
++    IFRATE(rate_mmio_write++);
+ }
+ 
+ static uint32_t rtl8139_io_readb(void *opaque, uint8_t addr)
+@@ -3034,6 +3289,7 @@ static uint32_t rtl8139_io_readb(void *opaque, uint8_t addr)
+             ret = 0;
+             break;
+     }
++    IFRATE(rate_mmio_read++);
+ 
+     return ret;
+ }
+@@ -3112,6 +3368,7 @@ static uint32_t rtl8139_io_readw(void *opaque, uint8_t addr)
+             DPRINTF("ioport read(w) addr=0x%x val=0x%04x\n", addr, ret);
+             break;
+     }
++    IFRATE(rate_mmio_read++);
+ 
+     return ret;
+ }
+@@ -3182,6 +3439,7 @@ static uint32_t rtl8139_io_readl(void *opaque, uint8_t addr)
+             DPRINTF("read(l) addr=0x%x val=%08x\n", addr, ret);
+             break;
+     }
++    IFRATE(rate_mmio_read++);
+ 
+     return ret;
+ }
+@@ -3446,6 +3704,12 @@ static void pci_rtl8139_uninit(PCIDevice *dev)
+     }
+     qemu_del_timer(s->timer);
+     qemu_free_timer(s->timer);
++#ifdef PARAVIRT
++    qemu_del_timer(s->mit_timer);
++    qemu_free_timer(s->mit_timer);
++    qemu_bh_delete(s->tx_bh);
++#endif /* PARAVIRT */
++    IFRATE(qemu_del_timer(s->rate_timer); qemu_free_timer(s->rate_timer));
+     qemu_del_nic(s->nic);
+ }
+ 
+@@ -3512,6 +3776,12 @@ static int pci_rtl8139_init(PCIDevice *dev)
+     s->TimerExpire = 0;
+     s->timer = qemu_new_timer_ns(vm_clock, rtl8139_timer, s);
+     rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
++#ifdef PARAVIRT
++    s->mit_timer = qemu_new_timer_ns(vm_clock, rtl8139_mit_timer, s);
++    s->csb = NULL;
++    s->tx_bh = qemu_bh_new(rtl8139_tx_bh, s);
++#endif /* PARAVIRT */
++    IFRATE(s->rate_timer = qemu_new_timer_ms(vm_clock, &rate_callback, s));
+ 
+     add_boot_device_path(s->conf.bootindex, &dev->qdev, "/ethernet-phy@0");
+ 
+@@ -3533,6 +3803,9 @@ static void rtl8139_class_init(ObjectClass *klass, void *data)
+     k->romfile = "efi-rtl8139.rom";
+     k->vendor_id = PCI_VENDOR_ID_REALTEK;
+     k->device_id = PCI_DEVICE_ID_REALTEK_8139;
++#ifdef PARAVIRT
++    k->subsystem_id = RTL8139CP_PARAVIRT_SUBDEV;
++#endif /* PARAVIRT */
+     k->revision = RTL8139_PCI_REVID; /* >=0x20 is for 8139C+ */
+     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
+     dc->reset = rtl8139_reset;
+diff --git a/include/exec/memory.h b/include/exec/memory.h
+index 9e88320..faa2b73 100644
+--- a/include/exec/memory.h
++++ b/include/exec/memory.h
+@@ -828,6 +828,23 @@ void address_space_init(AddressSpace *as, MemoryRegion *root);
+ void address_space_destroy(AddressSpace *as);
+ 
+ /**
++ * address_space_mappable: return region containing a guest address.
++ *
++ * If the guest physical address is mappable in host virtual memory,
++ * the function returns the containing region for which the
++ * mapping is valid, and the offset to be added to the gpa
++ * to generate a host virtual address.
++ *
++ * @as: #AddressSpace to be accessed
++ * @addr: address within that address space
++ * @lo: pointer to the initial address in the range
++ * @hi: pointer after the final address in the range
++ * @ofs: pointer to the delta between the two addresses
++ */
++int address_space_mappable(AddressSpace *as, hwaddr addr, uint64_t *lo,
++        uint64_t *hi, uint64_t *ofs);
++
++/**
+  * address_space_rw: read from or write to an address space.
+  *
+  * @as: #AddressSpace to be accessed
+diff --git a/include/net/net.h b/include/net/net.h
+index 43d85a1..ddaf6c4 100644
+--- a/include/net/net.h
++++ b/include/net/net.h
+@@ -45,6 +45,7 @@ typedef struct NICConf {
+ typedef void (NetPoll)(NetClientState *, bool enable);
+ typedef int (NetCanReceive)(NetClientState *);
+ typedef ssize_t (NetReceive)(NetClientState *, const uint8_t *, size_t);
++typedef ssize_t (NetReceiveFlags)(NetClientState *, const uint8_t *, size_t, uint32_t flags);
+ typedef ssize_t (NetReceiveIOV)(NetClientState *, const struct iovec *, int);
+ typedef void (NetCleanup) (NetClientState *);
+ typedef void (LinkStatusChanged)(NetClientState *);
+@@ -55,6 +56,7 @@ typedef struct NetClientInfo {
+     size_t size;
+     NetReceive *receive;
+     NetReceive *receive_raw;
++    NetReceiveFlags *receive_flags;
+     NetReceiveIOV *receive_iov;
+     NetCanReceive *can_receive;
+     NetCleanup *cleanup;
+@@ -114,6 +116,8 @@ void qemu_send_packet(NetClientState *nc, const uint8_t *buf, int size);
+ ssize_t qemu_send_packet_raw(NetClientState *nc, const uint8_t *buf, int size);
+ ssize_t qemu_send_packet_async(NetClientState *nc, const uint8_t *buf,
+                                int size, NetPacketSent *sent_cb);
++ssize_t qemu_send_packet_async_moreflags(NetClientState *nc, const uint8_t *buf,
++                               int size, NetPacketSent *sent_cb, unsigned more);
+ void qemu_purge_queued_packets(NetClientState *nc);
+ void qemu_flush_queued_packets(NetClientState *nc);
+ void qemu_format_nic_info_str(NetClientState *nc, uint8_t macaddr[6]);
+diff --git a/include/net/queue.h b/include/net/queue.h
+index fc02b33..da4d640 100644
+--- a/include/net/queue.h
++++ b/include/net/queue.h
+@@ -33,6 +33,7 @@ typedef void (NetPacketSent) (NetClientState *sender, ssize_t ret);
+ 
+ #define QEMU_NET_PACKET_FLAG_NONE  0
+ #define QEMU_NET_PACKET_FLAG_RAW  (1<<0)
++#define QEMU_NET_PACKET_FLAG_MORE (1<<1)
+ 
+ NetQueue *qemu_new_net_queue(void *opaque);
+ 
+diff --git a/include/qemu-common.h b/include/qemu-common.h
+index b9057d1..0bdbae9 100644
+--- a/include/qemu-common.h
++++ b/include/qemu-common.h
+@@ -487,4 +487,33 @@ size_t buffer_find_nonzero_offset(const void *buf, size_t len);
+  */
+ int parse_debug_env(const char *name, int max, int initial);
+ 
++
++#if defined(WITH_D) && !defined(ND)
++#define ND(fd, ...)    /* debugging */
++#define D(format, ...)                                          \
++        do {                                                    \
++                struct timeval __xxts;                          \
++                gettimeofday(&__xxts, NULL);                    \
++                printf("%03d.%06d %s [%d] " format "\n",        \
++                (int)__xxts.tv_sec % 1000, (int)__xxts.tv_usec, \
++                __func__, __LINE__, ##__VA_ARGS__);         \
++        } while (0)
++
++/* rate limited, lps indicates how many per second */
++#define RD(lps, format, ...)                                    \
++        do {                                                    \
++                static int t0, __cnt;                           \
++                struct timeval __xxts;                          \
++                gettimeofday(&__xxts, NULL);                    \
++                if (t0 != __xxts.tv_sec) {                      \
++                        t0 = __xxts.tv_sec;                     \
++                        __cnt = 0;                              \
++                }                                               \
++                if (__cnt++ < lps) {                            \
++                        D(format, ##__VA_ARGS__);               \
++                }                                               \
++        } while (0)
++#endif
++
++
+ #endif
+diff --git a/net/Makefile.objs b/net/Makefile.objs
+index 4854a14..e9cfa89 100644
+--- a/net/Makefile.objs
++++ b/net/Makefile.objs
+@@ -11,3 +11,5 @@ common-obj-$(CONFIG_AIX) += tap-aix.o
+ common-obj-$(CONFIG_HAIKU) += tap-haiku.o
+ common-obj-$(CONFIG_SLIRP) += slirp.o
+ common-obj-$(CONFIG_VDE) += vde.o
++common-obj-$(CONFIG_NETMAP) += netmap.o
++common-obj-y += paravirt.o
+diff --git a/net/clients.h b/net/clients.h
+index 7793294..952d076 100644
+--- a/net/clients.h
++++ b/net/clients.h
+@@ -52,4 +52,8 @@ int net_init_vde(const NetClientOptions *opts, const char *name,
+                  NetClientState *peer);
+ #endif
+ 
++#ifdef CONFIG_NETMAP
++int net_init_netmap(const NetClientOptions *opts, const char *name,
++                    NetClientState *peer);
++#endif
+ #endif /* QEMU_NET_CLIENTS_H */
+diff --git a/net/net.c b/net/net.c
+index 43a74e4..cf844d0 100644
+--- a/net/net.c
++++ b/net/net.c
+@@ -411,7 +411,9 @@ ssize_t qemu_deliver_packet(NetClientState *sender,
+         return 0;
+     }
+ 
+-    if (flags & QEMU_NET_PACKET_FLAG_RAW && nc->info->receive_raw) {
++    if (nc->info->receive_flags) {
++        ret = nc->info->receive_flags(nc, data, size, flags);
++    } else if (flags & QEMU_NET_PACKET_FLAG_RAW && nc->info->receive_raw) {
+         ret = nc->info->receive_raw(nc, data, size);
+     } else {
+         ret = nc->info->receive(nc, data, size);
+@@ -485,6 +487,14 @@ void qemu_send_packet(NetClientState *nc, const uint8_t *buf, int size)
+     qemu_send_packet_async(nc, buf, size, NULL);
+ }
+ 
++ssize_t qemu_send_packet_async_moreflags(NetClientState *sender,
++                               const uint8_t *buf, int size,
++                               NetPacketSent *sent_cb, unsigned more)
++{
++    return qemu_send_packet_async_with_flags(sender, QEMU_NET_PACKET_FLAG_NONE | more,
++                                             buf, size, sent_cb);
++}
++
+ ssize_t qemu_send_packet_raw(NetClientState *nc, const uint8_t *buf, int size)
+ {
+     return qemu_send_packet_async_with_flags(nc, QEMU_NET_PACKET_FLAG_RAW,
+@@ -725,6 +735,9 @@ static int (* const net_client_init_fun[NET_CLIENT_OPTIONS_KIND_MAX])(
+         [NET_CLIENT_OPTIONS_KIND_BRIDGE]    = net_init_bridge,
+ #endif
+         [NET_CLIENT_OPTIONS_KIND_HUBPORT]   = net_init_hubport,
++#ifdef CONFIG_NETMAP
++        [NET_CLIENT_OPTIONS_KIND_NETMAP]    = net_init_netmap,
++#endif
+ };
+ 
+ 
+@@ -751,6 +764,9 @@ static int net_client_init1(const void *object, int is_netdev, Error **errp)
+ #ifdef CONFIG_VDE
+         case NET_CLIENT_OPTIONS_KIND_VDE:
+ #endif
++#ifdef CONFIG_NETMAP
++        case NET_CLIENT_OPTIONS_KIND_NETMAP:
++#endif
+ #ifdef CONFIG_NET_BRIDGE
+         case NET_CLIENT_OPTIONS_KIND_BRIDGE:
+ #endif
+diff --git a/qapi-schema.json b/qapi-schema.json
+index 9302e7d..de5c582 100644
+--- a/qapi-schema.json
++++ b/qapi-schema.json
+@@ -2714,6 +2714,23 @@
+     'hubid':     'int32' } }
+ 
+ ##
++# @NetdevNetmapOptions
++#
++# Connect two or more net clients through a VALE switch
++#
++# @ifname: optional name of the VALE port
++#
++# @devname: optional path of the netmap device
++#
++# Since 1.2
++##
++{ 'type': 'NetdevNetmapOptions',
++  'data': {
++    '*ifname':     'str',
++    '*devname':    'str' } }
++
++
++##
+ # @NetClientOptions
+ #
+ # A discriminated record of network device traits.
+@@ -2730,7 +2747,8 @@
+     'vde':      'NetdevVdeOptions',
+     'dump':     'NetdevDumpOptions',
+     'bridge':   'NetdevBridgeOptions',
+-    'hubport':  'NetdevHubPortOptions' } }
++    'hubport':  'NetdevHubPortOptions',
++    'netmap':   'NetdevNetmapOptions' } }
+ 
+ ##
+ # @NetLegacy
+diff --git a/qemu-options.hx b/qemu-options.hx
+index fb62b75..56956d9 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -1401,6 +1401,11 @@ DEF("net", HAS_ARG, QEMU_OPTION_net,
+     "                Use group 'groupname' and mode 'octalmode' to change default\n"
+     "                ownership and permissions for communication port.\n"
+ #endif
++#ifdef CONFIG_NETMAP
++    "-net netmap[,vlan=n][,ifname=name][,devname=name]\n"
++    "                connect the vlan 'n' to VALE port 'name'\n"
++    "                ('devname' is name of the netmap device, defaults to '/dev/netmap')\n"
++#endif
+     "-net dump[,vlan=n][,file=f][,len=n]\n"
+     "                dump traffic on vlan 'n' to file 'f' (max n bytes per packet)\n"
+     "-net none       use it alone to have zero network devices. If no -net option\n"
+@@ -1415,6 +1420,9 @@ DEF("netdev", HAS_ARG, QEMU_OPTION_netdev,
+ #ifdef CONFIG_VDE
+     "vde|"
+ #endif
++#ifdef CONFIG_NETMAP
++    "netmap|"
++#endif
+     "socket|"
+     "hubport],id=str[,option][,option][,...]\n", QEMU_ARCH_ALL)
+ STEXI
