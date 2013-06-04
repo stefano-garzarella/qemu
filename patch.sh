@@ -9,7 +9,7 @@ ENDCOMMIT="paravirt"
 OUTPUT=patch.diff
 
 EXCLUDED_FILES="e1000-paravirt-README"
-PATCHED_FILES=$(git diff --stat $STARTCOMMIT $ENDCOMMIT | awk '{print $1}' | sed '/BSD/d' | sed '/virtio/d' | sed '/[0-9]\+/d' | tr "\n" " ")
+PATCHED_FILES=$(git diff --stat $STARTCOMMIT $ENDCOMMIT | awk '{print $1}' | sed '$d' |  sed '/BSD/d' | sed '/virtio/d' | tr "\n" " ")
 
 # remove excluded files from "PATCHED_FILES"
 for f in ${EXCLUDED_FILES}; do
