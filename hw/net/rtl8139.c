@@ -72,7 +72,7 @@
 #ifdef RATE
 #define IFRATE(x) x
 #else
-#define IFRATE(x) 
+#define IFRATE(x)
 #endif
 
 
@@ -2141,7 +2141,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
     txd.w1 = le32_to_cpu(txd.w1);
     txd.bufLO = le32_to_cpu(txd.bufLO);
     txd.bufHI = le32_to_cpu(txd.bufHI);
-    
+
     DPRINTF("+++ C+ mode TX descriptor %d %08x %08x %08x %08x\n", descriptor,
         txd.w0, txd.w1, txd.bufLO, txd.bufHI);
 
@@ -2193,7 +2193,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         return 0 ;
     }
 #ifdef PARAVIRT
-    if (s->csb && s->csb->guest_csb_on && 
+    if (s->csb && s->csb->guest_csb_on &&
 		s->currCPlusTxDesc == s->csb->guest_txkick_at) {
 	s->force_txkick = 1;
     }
@@ -3018,7 +3018,6 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
 		    s->csb->host_need_txkick = 0;
 		    smp_mb();
 		    qemu_bh_schedule(s->tx_bh);
-		    
 		} else
 #endif /* PARAVIRT */
                 rtl8139_cplus_transmit(s);

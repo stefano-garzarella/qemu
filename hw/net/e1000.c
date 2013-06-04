@@ -479,10 +479,10 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	}
 #ifdef CONFIG_E1000_PARAVIRT
 #define E1000_PARAVIRT_INTR_OTHER (~(E1000_ICS_RXT0 | E1000_ICS_RXDMT0 | E1000_ICR_TXQE | E1000_ICR_TXDW | E1000_ICR_INT_ASSERTED))
-	if (s->csb && s->csb->guest_csb_on && 
+	if (s->csb && s->csb->guest_csb_on &&
 		!(pending_ints & E1000_PARAVIRT_INTR_OTHER) &&
-		!(s->csb->guest_need_txkick && 
-		    (pending_ints & (E1000_ICR_TXQE | E1000_ICR_TXDW))) && 
+		!(s->csb->guest_need_txkick &&
+		    (pending_ints & (E1000_ICR_TXQE | E1000_ICR_TXDW))) &&
 		!(s->csb->guest_need_rxkick &&
 				(pending_ints & (E1000_ICS_RXT0)))) {
 		return;
@@ -1167,7 +1167,7 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
 	    s->mac_reg[RDT] = csb->guest_rdt;
 	    avail = AVAIL_RXBUFS(s);
 	    if ((rxq_full = (total_size > avail * s->rxbuf_size))) {
-		csb->host_rxkick_at = (s->mac_reg[RDT] + 1 + 
+		csb->host_rxkick_at = (s->mac_reg[RDT] + 1 +
 			(s->rxbufs - avail - 1) * 3/4) % s->rxbufs;
 		/* Doublecheck for more space to avoid race conditions. */
 		smp_mb();
