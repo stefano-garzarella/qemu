@@ -37,7 +37,7 @@
 #include "e1000_regs.h"
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
-//#define RATE		/* debug rate monitor */
+#define RATE		/* debug rate monitor */
 
 #ifdef CONFIG_E1000_PARAVIRT
 /*

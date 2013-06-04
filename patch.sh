@@ -2,10 +2,19 @@
 
 set -x
 
+# make a QEMU-PATCH
 
 STARTCOMMIT="96fbd7de3656583d647c204c"
 ENDCOMMIT="paravirt"
 OUTPUT=patch.diff
 
-PATCHED_FILES=$(git diff --stat $STARTCOMMIT $ENDCOMMIT | awk '{print $1}' | sed '/BSD/d' | tr "\n" " ")
+EXCLUDED_FILES="e1000-paravirt-README"
+PATCHED_FILES=$(git diff --stat $STARTCOMMIT $ENDCOMMIT | awk '{print $1}' | sed '/BSD/d' | sed '/virtio/d' | sed '/[0-9]\+/d' | tr "\n" " ")
+
+# remove excluded files from "PATCHED_FILES"
+for f in ${EXCLUDED_FILES}; do
+    PATCHED_FILES=$(echo ${PATCHED_FILES} | sed "s/$f//")
+done
+
+# generate the patch
 git diff $STARTCOMMIT $ENDCOMMIT -- ${PATCHED_FILES} > $OUTPUT
