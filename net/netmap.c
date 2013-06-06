@@ -40,6 +40,10 @@
 #include <net/netmap_user.h>
 
 
+/* XXX Use at your own risk: a bug somewhere can freeze your (host) machine.
+ */
+//#define USE_INDIRECT_BUFFERS
+
 /*
  * private netmap device info
  */
@@ -232,9 +236,12 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
         uint8_t *dst = (uint8_t *)NETMAP_BUF(ring, idx);
 
         ring->slot[i].len = size;
+#ifdef USE_INDIRECT_BUFFERS
 	ring->slot[i].flags = NS_INDIRECT;
-        //pkt_copy(buf, dst, size);
 	*((const uint8_t **)dst) = buf;
+#else
+        pkt_copy(buf, dst, size);
+#endif
         ring->cur = NETMAP_RING_NEXT(ring, i);
         ring->avail--;
         if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
