@@ -141,6 +141,7 @@ typedef struct E1000State_st {
         unsigned char vlan[4];
         unsigned char data[0x10000];
         uint16_t size;
+        unsigned char * data_ptr;
         unsigned char sum_needed;
         unsigned char vlan_needed;
         uint8_t ipcss;
@@ -313,7 +314,7 @@ static void rate_callback(void * opaque)
 /*
  * try to extract an mbuf region
  */
-static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
+static uint8_t *map_mbufs(E1000State *s, hwaddr addr)
 {
     struct guest_memreg_map *mb = &s->mbufs;
     uint64_t a = addr;
@@ -321,7 +322,7 @@ static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
 
     for (;;) {
         if (mb->valid && a >= mb->lo && a < mb->hi) {
-            return (const uint8_t *)(uintptr_t)(a + mb->ofs);
+            return (uint8_t *)(uintptr_t)(a + mb->ofs);
         }
         dma = pci_dma_context(&s->dev);
         mb->valid = 1;
@@ -832,17 +833,19 @@ xmit_seg(E1000State *s)
         tp->tso_frames++;
     }
 
+    len = tp->size;
     if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
-        putsum(tp->data, tp->size, tp->tucso, tp->tucss, tp->tucse);
+        putsum(tp->data_ptr, tp->size, tp->tucso, tp->tucss, tp->tucse);
     if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
-        putsum(tp->data, tp->size, tp->ipcso, tp->ipcss, tp->ipcse);
+        putsum(tp->data_ptr, tp->size, tp->ipcso, tp->ipcss, tp->ipcse);
     if (tp->vlan_needed) {
         memmove(tp->vlan, tp->data, 4);
         memmove(tp->data, tp->data + 4, 8);
         memcpy(tp->data + 8, tp->vlan_header, 4);
-        e1000_send_packet(s, tp->vlan, tp->size + 4);
-    } else
-        e1000_send_packet(s, tp->data, tp->size);
+	tp->data_ptr = tp->vlan;
+	len = tp->size + 4;
+    }
+    e1000_send_packet(s, tp->data_ptr, len);
     s->mac_reg[TPT]++;
     s->mac_reg[GPTC]++;
     n = s->mac_reg[TOTL];
@@ -903,24 +906,7 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
     }
 
     addr = le64_to_cpu(dp->buffer_addr);
-
-#ifdef MAP_RING
-    if (!tp->tse && !tp->cptse && tp->size == 0 &&
-        !tp->vlan_needed && !tp->sum_needed &&
-        (txd_lower & E1000_TXD_CMD_EOP)) {
-            const uint8_t *x = map_mbufs(s, addr);
-        if (x) {
-            /* XXX optimization for netmap */
-            e1000_send_packet(s, x, split_size);
-            tp->tso_frames = 0;
-            tp->sum_needed = 0;
-            tp->vlan_needed = 0;
-            tp->size = 0;
-            tp->cptse = 0;
-            return ;
-        }
-    }
-#endif /* MAP_RING */
+    tp->data_ptr = tp->data;
 
     if (tp->tse && tp->cptse) {
         hdr = tp->hdr_len;
@@ -946,9 +932,27 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
         // context descriptor TSE is not set, while data descriptor TSE is set
         DBGOUT(TXERR, "TCP segmentation error\n");
     } else {
+#ifdef MAP_RING
+	uint8_t *buf = NULL;
+
+	if (!tp->vlan_needed && tp->size == 0 &&
+				(txd_lower & E1000_TXD_CMD_EOP)) {
+	    /* Simple optimization for non-SG buffers: avoid one copy. */
+	    buf = map_mbufs(s, addr);
+	}
+	if (buf) {
+	    tp->data_ptr = buf;
+	}
+	else {
+	    split_size = MIN(sizeof(tp->data) - tp->size, split_size);
+	    pci_dma_read(&s->dev, addr, tp->data + tp->size, split_size);
+	}
+	tp->size += split_size;
+#else
         split_size = MIN(sizeof(tp->data) - tp->size, split_size);
         pci_dma_read(&s->dev, addr, tp->data + tp->size, split_size);
         tp->size += split_size;
+#endif	/* MAP_RING */
     }
 
     if (!(txd_lower & E1000_TXD_CMD_EOP))
