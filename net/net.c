@@ -1006,6 +1006,17 @@ void do_info_network(Monitor *mon, const QDict *qdict)
     }
 }
 
+int qemu_register_peer_async_callback(NetClientState * nc, 
+				    PeerAsyncCallback* cb, void *opaque)
+{
+    if (!nc->peer || !nc->peer->info->register_peer_async_callback)
+	return -1;
+
+    nc->peer->info->register_peer_async_callback(nc->peer, cb, opaque);
+
+    return 0;
+}
+
 void qmp_set_link(const char *name, bool up, Error **errp)
 {
     NetClientState *ncs[MAX_QUEUE_NUM];

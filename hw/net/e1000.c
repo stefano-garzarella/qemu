@@ -37,7 +37,7 @@
 #include "e1000_regs.h"
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
-#define RATE		/* debug rate monitor */
+//#define RATE		/* debug rate monitor */
 
 #ifdef CONFIG_E1000_PARAVIRT
 /*
@@ -196,6 +196,9 @@ typedef struct E1000State_st {
     uint32_t tx_count;	    /* TX processed in last start_xmit round */
     uint32_t txcycles;	    /* TX bottom half spinning counter */
     uint32_t txcycles_lim;  /* Snapshot of s->csb->host_txcycles_lim */
+    bool peer_async;
+    uint32_t sync_tdh;
+    uint32_t tdw;   /* TxDescriptorWriteback */
 #endif /* CONFIG_E1000_PARAVIRT */
     uint32_t next_tdh;
     IFRATE(QEMUTimer * rate_timer);
@@ -565,6 +568,13 @@ rxbufsize(uint32_t v)
     return 2048;
 }
 
+static void e1000_peer_async_callback(void *opaque)
+{
+    E1000State *s = opaque;
+
+    D("e1000_peer_async_callback (%p)\n", s);
+}
+
 static void e1000_reset(void *opaque)
 {
     E1000State *d = opaque;
@@ -579,6 +589,13 @@ static void e1000_reset(void *opaque)
 #ifdef CONFIG_E1000_PARAVIRT
     d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
+    d->peer_async = (qemu_register_peer_async_callback(d->nic->ncs,
+				    &e1000_peer_async_callback, d) == 0);
+    d->tdw = d->sync_tdh = 0;
+    if (d->peer_async)
+	D("qemu_register_peer_async_callback SUCCESS\n");
+    else
+	D("qemu_register_peer_async_callback FAILED\n");
 #endif /* CONFIG_E1000_PARAVIRT */
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);

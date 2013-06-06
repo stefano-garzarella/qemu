@@ -50,6 +50,8 @@ typedef ssize_t (NetReceiveIOV)(NetClientState *, const struct iovec *, int);
 typedef void (NetCleanup) (NetClientState *);
 typedef void (LinkStatusChanged)(NetClientState *);
 typedef void (NetClientDestructor)(NetClientState *);
+typedef void (PeerAsyncCallback)(void *);
+typedef void (RegisterPeerAsyncCallback)(NetClientState *, PeerAsyncCallback*, void *);
 
 typedef struct NetClientInfo {
     NetClientOptionsKind type;
@@ -61,6 +63,7 @@ typedef struct NetClientInfo {
     NetCanReceive *can_receive;
     NetCleanup *cleanup;
     LinkStatusChanged *link_status_changed;
+    RegisterPeerAsyncCallback *register_peer_async_callback;
     NetPoll *poll;
 } NetClientInfo;
 
@@ -140,6 +143,8 @@ ssize_t qemu_deliver_packet_iov(NetClientState *sender,
 
 void print_net_client(Monitor *mon, NetClientState *nc);
 void do_info_network(Monitor *mon, const QDict *qdict);
+int qemu_register_peer_async_callback(NetClientState * nc,
+				PeerAsyncCallback* cb, void *opaque);
 
 /* NIC info */
 

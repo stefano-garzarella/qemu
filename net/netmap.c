@@ -59,6 +59,8 @@ struct nm_state {
     struct netmap_state me;
     unsigned int        read_poll;
     unsigned int        write_poll;
+    PeerAsyncCallback	*txsync_callback;
+    void		*txsync_callback_arg;
 };
 
 #ifndef __FreeBSD__
@@ -233,8 +235,15 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
         pkt_copy(buf, dst, size);
         ring->cur = NETMAP_RING_NEXT(ring, i);
         ring->avail--;
-        if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE))
+        if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
+	    /* XXX should we require s->txsync_callback != NULL when
+		QEMU_NET_PACKET_FLAG_MORE is set? There could be semantic
+		problems, because the frontend expects the packet to be gone?
+	    */
             ioctl(s->me.fd, NIOCTXSYNC, NULL);
+	    if (s->txsync_callback)
+		s->txsync_callback(s->txsync_callback_arg);
+	}
     }
     return size;
 }
@@ -287,6 +296,15 @@ static void netmap_send(void *opaque)
 }
 
 
+static void netmap_register_peer_async_callback(NetClientState *nc,
+		    PeerAsyncCallback *cb, void *opaque)
+{
+    struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
+
+    s->txsync_callback = cb;
+    s->txsync_callback_arg = opaque;
+}
+
 /* flush and close */
 static void netmap_cleanup(NetClientState *nc)
 {
@@ -315,6 +333,7 @@ static NetClientInfo net_netmap_info = {
     .receive_iov = netmap_receive_iov,
 #endif
     .poll = netmap_poll,
+    .register_peer_async_callback = netmap_register_peer_async_callback,
     .cleanup = netmap_cleanup,
 };
 
@@ -344,6 +363,7 @@ int net_init_netmap(const NetClientOptions *opts,
     s = DO_UPCAST(struct nm_state, nc, nc);
     s->me = me;
     netmap_read_poll(s, true); /* initially only poll for reads. */
+    s->txsync_callback = s->txsync_callback_arg = NULL;
 
     return 0;
 }
