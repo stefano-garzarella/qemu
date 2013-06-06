@@ -197,8 +197,7 @@ typedef struct E1000State_st {
     uint32_t txcycles;	    /* TX bottom half spinning counter */
     uint32_t txcycles_lim;  /* Snapshot of s->csb->host_txcycles_lim */
     bool peer_async;
-    uint32_t sync_tdh;
-    uint32_t tdw;   /* TxDescriptorWriteback */
+    uint32_t sync_tdh;	/* TDH register value (exposed to the guest) */
 #endif /* CONFIG_E1000_PARAVIRT */
     uint32_t next_tdh;
     IFRATE(QEMUTimer * rate_timer);
@@ -568,12 +567,7 @@ rxbufsize(uint32_t v)
     return 2048;
 }
 
-static void e1000_peer_async_callback(void *opaque)
-{
-    E1000State *s = opaque;
-
-    D("e1000_peer_async_callback (%p)\n", s);
-}
+static void e1000_peer_async_callback(void *opaque);
 
 static void e1000_reset(void *opaque)
 {
@@ -589,14 +583,14 @@ static void e1000_reset(void *opaque)
 #ifdef CONFIG_E1000_PARAVIRT
     d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
+#endif /* CONFIG_E1000_PARAVIRT */
     d->peer_async = (qemu_register_peer_async_callback(d->nic->ncs,
 				    &e1000_peer_async_callback, d) == 0);
-    d->tdw = d->sync_tdh = 0;
+    d->sync_tdh = 0;
     if (d->peer_async)
 	D("qemu_register_peer_async_callback SUCCESS\n");
     else
 	D("qemu_register_peer_async_callback FAILED\n");
-#endif /* CONFIG_E1000_PARAVIRT */
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
     memset(d->mac_reg, 0, sizeof d->mac_reg);
@@ -979,7 +973,7 @@ txdesc_writeback(E1000State *s, dma_addr_t base, struct e1000_tx_desc *dp)
                 ~(E1000_TXD_STAT_EC | E1000_TXD_STAT_LC | E1000_TXD_STAT_TU);
     dp->upper.data = cpu_to_le32(txd_upper);
 #ifdef MAP_RING
-    s->txring[s->mac_reg[TDH]].upper = dp->upper;
+    s->txring[s->sync_tdh].upper = dp->upper;
 #else /* !MAP_RING */
     pci_dma_write(&s->dev, base + ((char *)&dp->upper - (char *)dp),
                   &dp->upper, sizeof(dp->upper));
@@ -1033,9 +1027,6 @@ start_xmit(E1000State *s)
             }
             if (s->tx_count > hlim || s->mac_reg[TDH] == s->mac_reg[TDT]) {
                 /* still dry, we are done */
-                if (s->tx_count > 50) {
-                    ND("sent %d in this iteration", s->tx_count);
-                }
                 return;
             }
         } else if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
@@ -1062,18 +1053,25 @@ start_xmit(E1000State *s)
             s->next_tdh = 0;
 
         process_tx_desc(s, &desc);
-        cause |= txdesc_writeback(s, base, &desc);
-
-	s->mac_reg[TDH] = s->next_tdh;
+	if (!s->peer_async) {
+	    /* If the network backend is synchronous w.r.t. transmission,
+	       we do the descriptor writeback now and update s->sync_tdh
+	       (exposed to the guest). Otherwise these operations will
+	       be done by e1000_peer_async_callback(). */
+	    cause |= txdesc_writeback(s, base, &desc);
+	    s->sync_tdh = s->next_tdh;
 #ifdef CONFIG_E1000_PARAVIRT
-        if (csb_mode) {
-            s->csb->host_tdh = s->mac_reg[TDH];
-	    if (s->mac_reg[TDH] == s->mac_reg[TDT])
-		cause |= E1000_ICS_TXQE;
-	    set_ics(s, 0, cause);
-	    cause = 0;
-        }
+	    if (csb_mode) {
+		s->csb->host_tdh = s->next_tdh;
+		if (s->next_tdh == s->mac_reg[TDT])
+		    cause |= E1000_ICS_TXQE;
+		set_ics(s, 0, cause);
+		cause = 0;
+	    }
 #endif /* CONFIG_E1000_PARAVIRT */
+	}
+	s->mac_reg[TDH] = s->next_tdh;
+
         /*
          * the following could happen only if guest sw assigns
          * bogus values to TDT/TDLEN.
@@ -1086,6 +1084,35 @@ start_xmit(E1000State *s)
         }
     }
     set_ics(s, 0, cause | E1000_ICS_TXQE);
+}
+
+static void e1000_peer_async_callback(void *opaque)
+{
+    E1000State *s = opaque;
+    uint32_t cause = 0;
+    struct e1000_tx_desc desc;
+    dma_addr_t base = 0;
+
+    while (s->sync_tdh != s->next_tdh) {
+#ifdef MAP_RING
+        desc = s->txring[s->sync_tdh];
+#else /* !MAP_RING */
+        base = tx_desc_base(s) + sizeof(struct e1000_tx_desc) * s->sync_tdh;
+        pci_dma_read(&s->dev, base, &desc, sizeof(desc));
+#endif /* MAP_RING */
+	cause |= txdesc_writeback(s, base, &desc);
+        if (++s->sync_tdh * sizeof(desc) >= s->mac_reg[TDLEN])
+            s->sync_tdh = 0;
+    }
+    ND("sync_tdh %d, TDH %d, TDT %d\n", s->sync_tdh, s->mac_reg[TDH], s->mac_reg[TDT]);
+#ifdef CONFIG_E1000_PARAVIRT
+    if (s->csb && s->csb->guest_csb_on) {
+	s->csb->host_tdh = s->next_tdh;
+    }
+#endif	/* CONFIG_E1000_PARAVIRT */
+    if (s->next_tdh == s->mac_reg[TDT])
+	cause |= E1000_ICS_TXQE;
+    set_ics(s, 0, cause);
 }
 
 static int
@@ -1504,6 +1531,9 @@ static void
 set_16bit(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val & 0xffff;
+    if (index == TDH) {
+	s->sync_tdh = s->mac_reg[index];
+    }
 }
 
 static void
@@ -1555,9 +1585,15 @@ set_ims(E1000State *s, int index, uint32_t val)
     set_ics(s, 0, 0);
 }
 
+static uint32_t
+rd_tdh(E1000State *s, int index)
+{
+    return s->sync_tdh;
+}
+
 #define getreg(x)	[x] = mac_readreg
 static uint32_t (*macreg_readops[])(E1000State *, int) = {
-    getreg(PBA),	getreg(RCTL),	getreg(TDH),	getreg(TXDCTL),
+    getreg(PBA),	getreg(RCTL),	[TDH] = rd_tdh,	getreg(TXDCTL),
     getreg(WUFC),	getreg(TDT),	getreg(CTRL),	getreg(LEDCTL),
     getreg(MANC),	getreg(MDIC),	getreg(SWSM),	getreg(STATUS),
     getreg(TORL),	getreg(TOTL),	getreg(IMS),	getreg(TCTL),

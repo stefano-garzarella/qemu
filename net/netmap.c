@@ -232,7 +232,9 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
         uint8_t *dst = (uint8_t *)NETMAP_BUF(ring, idx);
 
         ring->slot[i].len = size;
-        pkt_copy(buf, dst, size);
+	ring->slot[i].flags = NS_INDIRECT;
+        //pkt_copy(buf, dst, size);
+	*((const uint8_t **)dst) = buf;
         ring->cur = NETMAP_RING_NEXT(ring, i);
         ring->avail--;
         if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
@@ -241,8 +243,9 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
 		problems, because the frontend expects the packet to be gone?
 	    */
             ioctl(s->me.fd, NIOCTXSYNC, NULL);
-	    if (s->txsync_callback)
+	    if (s->txsync_callback) {
 		s->txsync_callback(s->txsync_callback_arg);
+	    }
 	}
     }
     return size;
