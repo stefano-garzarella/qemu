@@ -37,7 +37,10 @@
 #include "e1000_regs.h"
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
-//#define RATE		/* debug rate monitor */
+#define RATE		/* debug rate monitor */
+
+//#define RXD_STATUS_EOP	E1000_RXD_STAT_IXSM
+#define RXD_STATUS_EOP	(E1000_RXD_STAT_TCPCS | E1000_RXD_STAT_UDPCS | E1000_RXD_STAT_IPCS)
 
 #ifdef CONFIG_E1000_PARAVIRT
 /*
@@ -1372,7 +1375,7 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
             desc_offset += desc_size;
             desc.length = cpu_to_le16(desc_size);
             if (desc_offset >= total_size) {
-                desc.status |= E1000_RXD_STAT_EOP | E1000_RXD_STAT_IXSM;
+                desc.status |= E1000_RXD_STAT_EOP | RXD_STATUS_EOP;
             } else {
                 /* Guest zeroing out status is not a hardware requirement.
                    Clear EOP in case guest didn't do it. */
