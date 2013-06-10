@@ -302,8 +302,12 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
 	    net_checksum_calculate(dst, size); */
         ring->cur = NETMAP_RING_NEXT(ring, i);
         ring->avail--;
-        if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE))
+        if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
             ioctl(s->me.fd, NIOCTXSYNC, NULL);
+	    if (s->txsync_callback) {
+		s->txsync_callback(s->txsync_callback_arg);
+	    }
+	}
     }
     return size;
 }
