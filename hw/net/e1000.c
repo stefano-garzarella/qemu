@@ -193,6 +193,7 @@ typedef struct E1000State_st {
     struct guest_memreg_map mbufs;
     bool iov_on;
     uint32_t iovcnt;
+    uint32_t iovsize;
     struct iovec iov[128]; //XXX maximum size?
 #endif /* MAP_RING */
 
@@ -249,6 +250,7 @@ static int rate_ntfy_rx = 0;
 
 /* rate tx packets */
 static int rate_tx = 0;
+static int rate_tx_iov = 0;
 static int64_t rate_txb = 0;
 
 /* rate rx packet */
@@ -289,6 +291,7 @@ static void rate_callback(void * opaque)
     delta = qemu_get_clock_ms(vm_clock) - rate_last_timestamp;
     printf("Interrupt:           %4.3f KHz\n", (double)rate_irq_int/delta);
     printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
+    printf("Tx iov packets:      %4.3f KHz\n", (double)rate_tx_iov/delta);
     printf("Tx stream:           %4.3f Mbps\n", (double)(rate_txb*8)/delta/1000.0);
     if (rate_tx_bh_count)
 	printf("Avg BH work:         %4.3f\n", (double)rate_tx_bh_len/(double)rate_tx_bh_count);
@@ -306,7 +309,7 @@ static void rate_callback(void * opaque)
     rate_ntfy_tx = rate_ntfy_ic = rate_ntfy_rx = 0;
     rate_mmio_read = rate_mmio_write = 0;
     rate_rx = rate_rxb = 0;
-    rate_tx = rate_txb = 0;
+    rate_tx = rate_tx_iov = rate_txb = 0;
     rate_tx_bh_len = rate_tx_bh_count = 0;
     rate_txsync = 0;
 
@@ -753,6 +756,36 @@ putsum(uint8_t *data, uint32_t n, uint32_t sloc, uint32_t css, uint32_t cse)
     }
 }
 
+#ifdef MAP_RING
+static void
+putsum_iov(struct iovec *iov, uint32_t iovcnt, uint32_t n,
+		uint32_t sloc, uint32_t css, uint32_t cse)
+{
+    uint32_t sum;
+
+    if (cse && cse < n)
+        n = cse + 1;
+    if (sloc < n-1) {
+	sum = net_checksum_add_iov(iov, iovcnt, css, n-css);
+	while (iovcnt && sloc > iov->iov_len) {
+	    sloc -= iov->iov_len;
+	    iov++;
+	    iovcnt--;
+	}
+	if (iovcnt) {
+	    /* TODO Handle the incredible special case where the
+	       checksum must be inserted at the boundary of two
+	       iovec fragments. */
+	    cpu_to_be16wu((uint16_t *)(iov->iov_base + sloc),
+		    net_checksum_finish(sum));
+	} else {
+	    D("ecceded!\n");
+	    exit(1);
+	}
+    }
+}
+#endif /* MAP_RING */
+
 static inline int
 vlan_enabled(E1000State *s)
 {
@@ -811,16 +844,11 @@ e1000_sendv_packet(E1000State *s)
 	D("e1000_sendv_packet.loopback still to be implemented\n");
 	exit(-1);
     } else {
-	/* If necessary, tell the backend to compute the checksum. */
-	unsigned flags = 0;
-
-	if (s->next_tdh != s->mac_reg[TDT])
-	    flags |= QEMU_NET_PACKET_FLAG_MORE;
 	qemu_sendv_packet_async_moreflags(nc, s->iov, s->iovcnt, NULL,
-					    flags);
+	    (s->mac_reg[TDT] == s->next_tdh) ? 0: QEMU_NET_PACKET_FLAG_MORE);
 	IFRATE(rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0);
     }
-    IFRATE(rate_tx++; rate_txb += iov_size(s->iov, s->iovcnt));
+    IFRATE(rate_tx_iov++; rate_txb += s->iovsize);
 }
 
 static void
@@ -866,25 +894,26 @@ xmit_seg(E1000State *s)
     }
 
 #ifdef MAP_RING
-    if (s->iov_on && (s->iovcnt == 1 || !tp->sum_needed)) {
-	/* At the moment we are only able to compute the checksum
-	   in the 1-slot-iovec case. TODO extend to the N-slot-iovec
-	   case. */
-	if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
-	    putsum(s->iov[0].iov_base, s->iov[0].iov_len, tp->tucso,
-		    tp->tucss, tp->tucse);
-	if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
-	    putsum(s->iov[0].iov_base, s->iov[0].iov_len, tp->ipcso,
-		    tp->ipcss, tp->ipcse);
-	len = iov_size(s->iov, s->iovcnt);
-	e1000_sendv_packet(s);
-    } else {
-	if (s->iov_on) {
-	    /* For now linearize and compute the checksum.
-	       TODO: don't linearize */
-	    tp->size = iov_size(s->iov, s->iovcnt);
-	    iov_to_buf(s->iov, s->iovcnt, 0, tp->data, tp->size);
+    if (s->iov_on) {
+	if (s->iovcnt == 1) {
+	    /* TODO use only putsum_iov(), if convenient. */
+	    if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
+		putsum(s->iov[0].iov_base, s->iov[0].iov_len, tp->tucso,
+			tp->tucss, tp->tucse);
+	    if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
+		putsum(s->iov[0].iov_base, s->iov[0].iov_len, tp->ipcso,
+			tp->ipcss, tp->ipcse);
+	} else {
+	    if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
+		putsum_iov(s->iov, s->iovcnt, s->iovsize, tp->tucso,
+			    tp->tucss, tp->tucse);
+	    if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
+		putsum_iov(s->iov, s->iovcnt, s->iovsize, tp->ipcso,
+			    tp->ipcss, tp->ipcse);
 	}
+	e1000_sendv_packet(s);
+	len = s->iovsize;
+    } else {
 #else
     if (1) {
 #endif
@@ -1006,6 +1035,7 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
 	    s->iov[s->iovcnt].iov_base = buf;
 	    s->iov[s->iovcnt].iov_len = split_size;
 	    s->iovcnt++;
+	    s->iovsize += split_size;
 	} else {
 #else /* MAP_RING */
 	if (1) {
@@ -1026,8 +1056,9 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
     tp->size = 0;
     tp->cptse = 0;
 #ifdef MAP_RING
-    s->iovcnt = 0;
     s->iov_on = false;
+    s->iovcnt = 0;
+    s->iovsize = 0;
 #endif
 }
 
