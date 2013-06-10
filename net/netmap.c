@@ -38,6 +38,8 @@
 #include <sys/mman.h>
 #include <net/netmap.h>
 #include <net/netmap_user.h>
+#include <net/checksum.h>
+#include <qemu/iov.h>
 
 
 /* XXX Use at your own risk: a bug somewhere can freeze your (host) machine.
@@ -213,7 +215,7 @@ static void netmap_writable(void *opaque)
  * new data guest --> backend
  */
 static ssize_t netmap_receive_flags(NetClientState *nc,
-      const uint8_t *buf, size_t size, uint32_t flags)
+      const uint8_t *buf, size_t size, unsigned flags)
 {
     struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
     struct netmap_ring *ring = s->me.tx;
@@ -254,6 +256,54 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
 		s->txsync_callback(s->txsync_callback_arg);
 	    }
 	}
+    }
+    return size;
+}
+
+static ssize_t netmap_receive_iov_flags(NetClientState * nc,
+	    const struct iovec * iov, int iovcnt, unsigned flags)
+{
+    struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
+    struct netmap_ring *ring = s->me.tx;
+    size_t size = iov_size(iov, iovcnt);
+
+    if (size > ring->nr_buf_size) {
+        RD(5, "drop packet of size %d > %d", (int)size, ring->nr_buf_size);
+        return size;
+    }
+
+    if (ring) {
+        /* request an early notification to avoid running dry */
+        if (ring->avail < ring->num_slots / 2 && s->write_poll == false) {
+            netmap_write_poll(s, true);
+        }
+        if (ring->avail == 0) { /* cannot write */
+            return 0;
+        }
+        uint32_t i = ring->cur;
+        uint32_t idx = ring->slot[i].buf_idx;
+        uint8_t *dst = (uint8_t *)NETMAP_BUF(ring, idx);
+
+        ring->slot[i].len = size;
+
+#ifdef USE_INDIRECT_BUFFERS
+	if (iovcnt == 1) {
+	    /* For now supporting only non-SG buffers. */
+	    ring->slot[i].flags = NS_INDIRECT;
+	    *((const uint8_t **)dst) = iov[0].iov_base;
+	} else {
+	    iov_to_buf(iov, iovcnt, 0, dst, size);
+	}
+#else
+	iov_to_buf(iov, iovcnt, 0, dst, size);
+#endif
+	/* Compute the checksum if necessary.
+	if (flags & QEMU_NET_PACKET_FLAG_NEED_CHECKSUM)
+	    net_checksum_calculate(dst, size); */
+        ring->cur = NETMAP_RING_NEXT(ring, i);
+        ring->avail--;
+        if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE))
+            ioctl(s->me.fd, NIOCTXSYNC, NULL);
     }
     return size;
 }
@@ -338,6 +388,7 @@ static NetClientInfo net_netmap_info = {
     .size = sizeof(struct nm_state),
     .receive_flags = netmap_receive_flags,
     .receive = netmap_receive_raw,
+    .receive_iov_flags = netmap_receive_iov_flags,
 #if 0 /* not implemented */
     .receive_raw = netmap_receive_raw,
     .receive_iov = netmap_receive_iov,

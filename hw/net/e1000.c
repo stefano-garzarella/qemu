@@ -33,6 +33,7 @@
 #include "hw/loader.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/dma.h"
+#include <qemu/iov.h>
 
 #include "e1000_regs.h"
 
@@ -144,7 +145,6 @@ typedef struct E1000State_st {
         unsigned char vlan[4];
         unsigned char data[0x10000];
         uint16_t size;
-        unsigned char * data_ptr;
         unsigned char sum_needed;
         unsigned char vlan_needed;
         uint8_t ipcss;
@@ -191,6 +191,9 @@ typedef struct E1000State_st {
     struct e1000_tx_desc *txring;
     struct e1000_rx_desc *rxring;
     struct guest_memreg_map mbufs;
+    bool iov_on;
+    uint32_t iovcnt;
+    struct iovec iov[128]; //XXX maximum size?
 #endif /* MAP_RING */
 
 #ifdef CONFIG_E1000_PARAVIRT
@@ -478,7 +481,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	 *    to be interrupted for an TX event.
 	 *  3) In CSB mode we have a pending RX interrupt and the guest wants
 	 *    to be interrupted for an RX event.
-	 *  4) XXX Other interrupt events.
+	 *  4) Other interrupt events.
 	 */
 	if (s->mit_timer_on) {
 	    return;
@@ -595,6 +598,10 @@ static void e1000_reset(void *opaque)
 	D("qemu_register_peer_async_callback SUCCESS\n");
     else
 	D("qemu_register_peer_async_callback FAILED\n");
+#ifdef MAP_RING
+    d->iovcnt = 0;
+    d->iov_on = false;
+#endif /* MAP_RING */
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
     memset(d->mac_reg, 0, sizeof d->mac_reg);
@@ -796,11 +803,33 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
 }
 
 static void
+e1000_sendv_packet(E1000State *s)
+{
+    NetClientState *nc = qemu_get_queue(s->nic);
+
+    if (s->phy_reg[PHY_CTRL] & MII_CR_LOOPBACK) {
+	D("e1000_sendv_packet.loopback still to be implemented\n");
+	exit(-1);
+    } else {
+	/* If necessary, tell the backend to compute the checksum. */
+	unsigned flags = 0;
+
+	if (s->next_tdh != s->mac_reg[TDT])
+	    flags |= QEMU_NET_PACKET_FLAG_MORE;
+	qemu_sendv_packet_async_moreflags(nc, s->iov, s->iovcnt, NULL,
+					    flags);
+	IFRATE(rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0);
+    }
+    IFRATE(rate_tx++; rate_txb += iov_size(s->iov, s->iovcnt));
+}
+
+static void
 xmit_seg(E1000State *s)
 {
     uint16_t len, *sp;
     unsigned int frames = s->tx.tso_frames, css, sofar, n;
     struct e1000_tx *tp = &s->tx;
+    uint8_t * buf;
 
     if (tp->tse && tp->cptse) {
         css = tp->ipcss;
@@ -836,23 +865,48 @@ xmit_seg(E1000State *s)
         tp->tso_frames++;
     }
 
-    len = tp->size;
-    if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
-        putsum(tp->data_ptr, tp->size, tp->tucso, tp->tucss, tp->tucse);
-    if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
-        putsum(tp->data_ptr, tp->size, tp->ipcso, tp->ipcss, tp->ipcse);
-    if (tp->vlan_needed) {
-        memmove(tp->vlan, tp->data, 4);
-        memmove(tp->data, tp->data + 4, 8);
-        memcpy(tp->data + 8, tp->vlan_header, 4);
-	tp->data_ptr = tp->vlan;
-	len = tp->size + 4;
+#ifdef MAP_RING
+    if (s->iov_on && (s->iovcnt == 1 || !tp->sum_needed)) {
+	/* At the moment we are only able to compute the checksum
+	   in the 1-slot-iovec case. TODO extend to the N-slot-iovec
+	   case. */
+	if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
+	    putsum(s->iov[0].iov_base, s->iov[0].iov_len, tp->tucso,
+		    tp->tucss, tp->tucse);
+	if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
+	    putsum(s->iov[0].iov_base, s->iov[0].iov_len, tp->ipcso,
+		    tp->ipcss, tp->ipcse);
+	len = iov_size(s->iov, s->iovcnt);
+	e1000_sendv_packet(s);
+    } else {
+	if (s->iov_on) {
+	    /* For now linearize and compute the checksum.
+	       TODO: don't linearize */
+	    tp->size = iov_size(s->iov, s->iovcnt);
+	    iov_to_buf(s->iov, s->iovcnt, 0, tp->data, tp->size);
+	}
+#else
+    if (1) {
+#endif
+	len = tp->size;
+	buf = tp->data;
+	if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
+	    putsum(tp->data, tp->size, tp->tucso, tp->tucss, tp->tucse);
+	if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
+	    putsum(tp->data, tp->size, tp->ipcso, tp->ipcss, tp->ipcse);
+	if (tp->vlan_needed) {
+	    memmove(tp->vlan, tp->data, 4);
+	    memmove(tp->data, tp->data + 4, 8);
+	    memcpy(tp->data + 8, tp->vlan_header, 4);
+	    buf = tp->vlan;
+	    len = tp->size + 4;
+	}
+	e1000_send_packet(s, buf, len);
     }
-    e1000_send_packet(s, tp->data_ptr, len);
     s->mac_reg[TPT]++;
     s->mac_reg[GPTC]++;
     n = s->mac_reg[TOTL];
-    if ((s->mac_reg[TOTL] += s->tx.size) < n)
+    if ((s->mac_reg[TOTL] += len) < n)
         s->mac_reg[TOTH]++;
 }
 
@@ -909,7 +963,12 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
     }
 
     addr = le64_to_cpu(dp->buffer_addr);
-    tp->data_ptr = tp->data;
+#ifdef MAP_RING
+    if (!tp->tse && !tp->cptse && tp->size == 0 &&
+	    !tp->vlan_needed) {
+	s->iov_on = 1;
+    }
+#endif /* MAP_RING */
 
     if (tp->tse && tp->cptse) {
         hdr = tp->hdr_len;
@@ -936,26 +995,25 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
         DBGOUT(TXERR, "TCP segmentation error\n");
     } else {
 #ifdef MAP_RING
-	uint8_t *buf = NULL;
+	uint8_t *buf;
 
-	if (!tp->vlan_needed && tp->size == 0 &&
-				(txd_lower & E1000_TXD_CMD_EOP)) {
-	    /* Simple optimization for non-SG buffers: avoid one copy. */
+	if (s->iov_on) {
 	    buf = map_mbufs(s, addr);
-	}
-	if (buf) {
-	    tp->data_ptr = buf;
-	}
-	else {
+	    if (!buf) {
+		D("SG mapping failed! (still not handled)\n");
+		exit(-1);
+	    }
+	    s->iov[s->iovcnt].iov_base = buf;
+	    s->iov[s->iovcnt].iov_len = split_size;
+	    s->iovcnt++;
+	} else {
+#else /* MAP_RING */
+	if (1) {
+#endif /* MAP_RING */
 	    split_size = MIN(sizeof(tp->data) - tp->size, split_size);
 	    pci_dma_read(&s->dev, addr, tp->data + tp->size, split_size);
+	    tp->size += split_size;
 	}
-	tp->size += split_size;
-#else
-        split_size = MIN(sizeof(tp->data) - tp->size, split_size);
-        pci_dma_read(&s->dev, addr, tp->data + tp->size, split_size);
-        tp->size += split_size;
-#endif	/* MAP_RING */
     }
 
     if (!(txd_lower & E1000_TXD_CMD_EOP))
@@ -967,6 +1025,10 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
     tp->vlan_needed = 0;
     tp->size = 0;
     tp->cptse = 0;
+#ifdef MAP_RING
+    s->iovcnt = 0;
+    s->iov_on = false;
+#endif
 }
 
 static uint32_t

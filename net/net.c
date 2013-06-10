@@ -532,7 +532,9 @@ ssize_t qemu_deliver_packet_iov(NetClientState *sender,
         return 0;
     }
 
-    if (nc->info->receive_iov) {
+    if (nc->info->receive_iov_flags) {
+	ret = nc->info->receive_iov_flags(nc, iov, iovcnt, flags);
+    } else if (nc->info->receive_iov) {
         ret = nc->info->receive_iov(nc, iov, iovcnt);
     } else {
         ret = nc_sendv_compat(nc, iov, iovcnt);
@@ -559,6 +561,23 @@ ssize_t qemu_sendv_packet_async(NetClientState *sender,
 
     return qemu_net_queue_send_iov(queue, sender,
                                    QEMU_NET_PACKET_FLAG_NONE,
+                                   iov, iovcnt, sent_cb);
+}
+
+ssize_t qemu_sendv_packet_async_moreflags(NetClientState *sender,
+                                const struct iovec *iov, int iovcnt,
+                                NetPacketSent *sent_cb, unsigned more)
+{
+    NetQueue *queue;
+
+    if (sender->link_down || !sender->peer) {
+        return iov_size(iov, iovcnt);
+    }
+
+    queue = sender->peer->send_queue;
+
+    return qemu_net_queue_send_iov(queue, sender,
+                                   QEMU_NET_PACKET_FLAG_NONE | more,
                                    iov, iovcnt, sent_cb);
 }
 
