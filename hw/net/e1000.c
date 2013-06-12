@@ -293,8 +293,7 @@ static void rate_callback(void * opaque)
     printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
     printf("Tx iov packets:      %4.3f KHz\n", (double)rate_tx_iov/delta);
     printf("Tx stream:           %4.3f Mbps\n", (double)(rate_txb*8)/delta/1000.0);
-    if (rate_tx_bh_count)
-	printf("Avg BH work:         %4.3f\n", (double)rate_tx_bh_len/(double)rate_tx_bh_count);
+    printf("Avg BH work:         %4.3f\n", rate_tx_bh_count ? (double)rate_tx_bh_len/(double)rate_tx_bh_count : 0);
     printf("Rx packets:          %4.3f Kpps\n", (double)rate_rx/delta);
     printf("Rx stream:           %4.3f Mbps\n", (double)(rate_rxb*8)/delta/1000.0);
     printf("Tx notifications:    %4.3f KHz\n", (double)rate_ntfy_tx/delta);
