@@ -89,7 +89,11 @@ static int debugflags = DBGBIT(TXERR) | DBGBIT(GENERAL);
 /* this is the size past which hardware will drop packets when setting LPE=0 */
 #define MAXIMUM_ETHERNET_VLAN_SIZE 1522
 /* this is the size past which hardware will drop packets when setting LPE=1 */
+#ifdef MAP_RING
+#define MAXIMUM_ETHERNET_LPE_SIZE 65536
+#else	/* MAP_RING */
 #define MAXIMUM_ETHERNET_LPE_SIZE 16384
+#endif	/* MAP_RING */
 
 /*
  * HW models:
