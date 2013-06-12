@@ -38,7 +38,7 @@
 #include "e1000_regs.h"
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
-#define RATE		/* debug rate monitor */
+//#define RATE		/* debug rate monitor */
 
 //#define RXD_STATUS_EOP	E1000_RXD_STAT_IXSM
 #define RXD_STATUS_EOP	(E1000_RXD_STAT_TCPCS | E1000_RXD_STAT_UDPCS | E1000_RXD_STAT_IPCS)
@@ -1287,7 +1287,6 @@ e1000_set_link_status(NetClientState *nc)
         set_ics(s, 0, E1000_ICR_LSC);
 }
 
-//#define AVAIL_RXBUFS(s) (((int)(s)->mac_reg[RDT] -(int)(s)->mac_reg[RDH]) + (((s)->mac_reg[RDT] < (s)->mac_reg[RDH]) ? (s)->rxbufs : 0))
 #define AVAIL_RXBUFS(s) (((((s)->mac_reg[RDT] < (s)->mac_reg[RDH]) ? (s)->rxbufs : 0) + (s)->mac_reg[RDT]) -(s)->mac_reg[RDH])
 
 static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
@@ -1386,6 +1385,9 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 #ifdef CONFIG_E1000_PARAVIRT
     uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
 #endif
+#ifdef MAP_RING
+    uint8_t *guest_buf;
+#endif
 
     if (!(s->mac_reg[STATUS] & E1000_STATUS_LU)) {
         return -1;
@@ -1421,13 +1423,6 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         vlan_offset = 4;
         size -= 4;
     }
-
-#ifdef CONFIG_E1000_PARAVIRT
-    if (csb_mode) {
-        smp_mb();
-        s->mac_reg[RDT] = s->csb->guest_rdt;
-    }
-#endif /* CONFIG_E1000_PARAVIRT */
 
     rdh_start = s->mac_reg[RDH];
     desc_offset = 0;
@@ -1465,8 +1460,19 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
                 if (copy_size > s->rxbuf_size) {
                     copy_size = s->rxbuf_size;
                 }
-                pci_dma_write(&s->dev, le64_to_cpu(desc.buffer_addr),
-                              buf + desc_offset + vlan_offset, copy_size);
+#ifdef MAP_RING
+		guest_buf = map_mbufs(s, desc.buffer_addr);
+		if (guest_buf) {
+		    memcpy(guest_buf, buf + desc_offset + vlan_offset,
+			    copy_size);
+		} else
+#else	/* !MAP_RING */
+		if (1)
+#endif	/* MAP_RING */
+		{
+		    pci_dma_write(&s->dev, le64_to_cpu(desc.buffer_addr),
+			    buf + desc_offset + vlan_offset, copy_size);
+		}
             }
             desc_offset += desc_size;
             desc.length = cpu_to_le16(desc_size);
