@@ -238,10 +238,12 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
         uint8_t *dst = (uint8_t *)NETMAP_BUF(ring, idx);
 
         ring->slot[i].len = size;
+
 #ifdef USE_INDIRECT_BUFFERS
 	ring->slot[i].flags = NS_INDIRECT;
 	*((const uint8_t **)dst) = buf;
 #else
+	ring->slot[i].flags = 0;    /* XXX useless? */
         pkt_copy(buf, dst, size);
 #endif
         ring->cur = NETMAP_RING_NEXT(ring, i);
@@ -267,41 +269,47 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
     struct netmap_ring *ring = s->me.tx;
     size_t size = iov_size(iov, iovcnt);
 
-    if (size > ring->nr_buf_size) {
-        RD(5, "drop packet of size %d > %d", (int)size, ring->nr_buf_size);
-        return size;
-    }
-
     if (ring) {
         /* request an early notification to avoid running dry */
         if (ring->avail < ring->num_slots / 2 && s->write_poll == false) {
             netmap_write_poll(s, true);
         }
-        if (ring->avail == 0) { /* cannot write */
+        if (ring->avail < iovcnt) { /* cannot write */
             return 0;
         }
-        uint32_t i = ring->cur;
-        uint32_t idx = ring->slot[i].buf_idx;
-        uint8_t *dst = (uint8_t *)NETMAP_BUF(ring, idx);
+        uint32_t i = 0;
+        uint32_t idx;
+        uint8_t *dst;
+	int j;
+	int frag_size;
 
-        ring->slot[i].len = size;
+	for (j=0; j<iovcnt; j++) {
+	    frag_size = iov[j].iov_len;
 
-#ifdef USE_INDIRECT_BUFFERS
-	if (iovcnt == 1) {
-	    /* For now supporting only non-SG buffers. */
-	    ring->slot[i].flags = NS_INDIRECT;
-	    *((const uint8_t **)dst) = iov[0].iov_base;
-	} else {
-	    iov_to_buf(iov, iovcnt, 0, dst, size);
+	    if (frag_size > ring->nr_buf_size) {
+		/* TODO recover descriptors (if possible) */
+		RD(5, "drop packet of size %d > %d", (int)size, ring->nr_buf_size);
+		return size;
+	    }
+
+	    i = ring->cur;
+	    idx = ring->slot[i].buf_idx;
+	    dst = (uint8_t *)NETMAP_BUF(ring, idx);
+
+	    ring->slot[i].len = frag_size;
+	    ring->slot[i].flags = NS_MOREFRAG;
+	    pkt_copy(iov[j].iov_base, dst, frag_size);
+
+	    ring->cur = NETMAP_RING_NEXT(ring, i);
+	    ring->avail--;
 	}
-#else
-	iov_to_buf(iov, iovcnt, 0, dst, size);
-#endif
+	/* The last slot must not have NS_MOREFRAG set. */
+	ring->slot[i].flags = 0;
+
 	/* Compute the checksum if necessary.
 	if (flags & QEMU_NET_PACKET_FLAG_NEED_CHECKSUM)
 	    net_checksum_calculate(dst, size); */
-        ring->cur = NETMAP_RING_NEXT(ring, i);
-        ring->avail--;
+
         if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
             ioctl(s->me.fd, NIOCTXSYNC, NULL);
 	    if (s->txsync_callback) {
@@ -334,21 +342,40 @@ static void netmap_send(void *opaque)
 {
     struct nm_state *s = opaque;
     struct netmap_ring *ring = s->me.rx;
+    struct iovec iov[64]; /* XXX max size? */
 
     /* only check ring->avail, let the packet be queued
      * with qemu_send_packet_async() if needed
      * XXX until we fix the propagation on the bridge we need to stop early
      */
     while (ring->avail > 0 && qemu_can_send_packet(&s->nc)) {
-        uint32_t i = ring->cur;
-        uint32_t idx = ring->slot[i].buf_idx;
-        uint8_t *src = (u_char *)NETMAP_BUF(ring, idx);
-        int size = ring->slot[i].len;
+        uint32_t i;
+        uint32_t idx;
+	bool morefrag;
+	int iovcnt = 0;
+        int iovsize = 0;
 
-        ring->cur = NETMAP_RING_NEXT(ring, i);
-        ring->avail--;
-        size = qemu_send_packet_async(&s->nc, src, size, netmap_send_completed);
-        if (size == 0) {
+	do {
+	    i = ring->cur;
+	    idx = ring->slot[i].buf_idx;
+	    morefrag = (ring->slot[i].flags & NS_MOREFRAG);
+	    iov[iovcnt].iov_base = (u_char *)NETMAP_BUF(ring, idx);
+	    iov[iovcnt].iov_len = ring->slot[i].len;
+	    iovsize += iov[iovcnt].iov_len;
+	    iovcnt++;
+
+	    ring->cur = NETMAP_RING_NEXT(ring, i);
+	    ring->avail--;
+	} while (ring->avail && morefrag);
+
+	if (unlikely(!ring->avail && morefrag)) {
+	    D("no more slot, but incomplete packet\n");
+	}
+
+	iovsize = qemu_sendv_packet_async(&s->nc, iov, iovcnt,
+						    netmap_send_completed);
+
+        if (iovsize == 0) {
             /* the guest does not receive anymore. Packet is queued, stop
              * reading from the backend until netmap_send_completed()
              */
