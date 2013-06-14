@@ -267,8 +267,8 @@
 
 #ifdef NIC_PARAVIRT
 #define	E1000_PARA_SUBDEV	0x1101		/* special id */
-#define	E1000_CSBAL		0x02830		/* csb physical address */
-#define	E1000_CSBAH		0x02834
+#define	E1000_CSBAL		0x02830		/* csb phys. addr. low */
+#define	E1000_CSBAH		0x02834		/* csb phys. addr. hi */
 #include <net/paravirt.h>
 #endif /* NIC_PARAVIRT */
 
@@ -451,6 +451,9 @@ struct adapter {
 	uint32_t shadow_tdt;
 	uint32_t sc_enable;
 #endif /* NIC_SEND_COMBINING */
+#ifdef BATCH_DISPATCH
+	uint32_t batch_enable;
+#endif /* BATCH_DISPATCH */
 
 #ifdef NIC_PARAVIRT
 	struct em_dma_alloc	csb_mem;	/* phys address */
