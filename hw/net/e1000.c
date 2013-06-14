@@ -900,6 +900,7 @@ xmit_seg(E1000State *s)
 
 #ifdef MAP_RING
     if (s->iov_on) {
+#if 1  /* Build the checksum */
 	if (s->iovcnt == 1) {
 	    /* TODO use only putsum_iov(), if convenient. */
 	    if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
@@ -916,6 +917,7 @@ xmit_seg(E1000State *s)
 		putsum_iov(s->iov, s->iovcnt, s->iovsize, tp->ipcso,
 			    tp->ipcss, tp->ipcse);
 	}
+#endif	/* Build the checksum */
 	e1000_sendv_packet(s);
 	len = s->iovsize;
     } else {
