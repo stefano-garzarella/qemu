@@ -22,7 +22,7 @@
  * THE SOFTWARE.
  */
 
-#define WITH_D /* include debugging macros from qemu-common.h */
+#define WITH_D	/* include debugging macros from qemu-common.h */
 
 #include "config-host.h"
 
