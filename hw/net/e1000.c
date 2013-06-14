@@ -38,7 +38,7 @@
 #include "e1000_regs.h"
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
-#define RATE		/* debug rate monitor */
+//#define RATE		/* debug rate monitor */
 
 //#define RXD_STATUS_EOP	E1000_RXD_STAT_IXSM
 #define RXD_STATUS_EOP	(E1000_RXD_STAT_TCPCS | E1000_RXD_STAT_UDPCS | E1000_RXD_STAT_IPCS)
@@ -210,9 +210,9 @@ typedef struct E1000State_st {
     uint32_t tx_count;	    /* TX processed in last start_xmit round */
     uint32_t txcycles;	    /* TX bottom half spinning counter */
     uint32_t txcycles_lim;  /* Snapshot of s->csb->host_txcycles_lim */
+#endif /* CONFIG_E1000_PARAVIRT */
     bool peer_async;
     uint32_t sync_tdh;	/* TDH register value (exposed to the guest) */
-#endif /* CONFIG_E1000_PARAVIRT */
     uint32_t next_tdh;
     IFRATE(QEMUTimer * rate_timer);
 } E1000State;
@@ -837,7 +837,7 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
 	    (s->mac_reg[TDT] == s->next_tdh) ? 0: QEMU_NET_PACKET_FLAG_MORE);
 	IFRATE(rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0);
     }
-    IFRATE(rate_tx++; rate_txb += size);
+    IFRATE(rate_tx++; rate_txb += size; rate_tx_bh_len++);
 }
 
 static void
@@ -853,7 +853,7 @@ e1000_sendv_packet(E1000State *s)
 	    (s->mac_reg[TDT] == s->next_tdh) ? 0: QEMU_NET_PACKET_FLAG_MORE);
 	IFRATE(rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0);
     }
-    IFRATE(rate_tx_iov++; rate_txb += s->iovsize);
+    IFRATE(rate_tx_iov++; rate_txb += s->iovsize; rate_tx_bh_len++);
 }
 
 static void
@@ -1777,7 +1777,7 @@ e1000_tx_bh(void *opaque)
     s->mac_reg[TDT] = csb->guest_tdt;
     s->tx_count = 0;
     start_xmit(s);
-    IFRATE(rate_tx_bh_count++; rate_tx_bh_len += s->tx_count);
+    IFRATE(rate_tx_bh_count++);
     s->txcycles = (s->tx_count > 0) ? 0 : s->txcycles+1;
     if (s->txcycles >= s->txcycles_lim) {
         /* prepare to sleep, with race avoidance */
