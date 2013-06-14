@@ -52,6 +52,6 @@ void paravirt_configure_csb(struct paravirt_csb** csb, uint32_t csbbal,
     }
     if (base) {
 	*csb = address_space_map(as, base, &len, 1 /* is_write */);
-	printf("CSB (re)mapping\n");
+	// printf("CSB (re)mapping\n");
     }
 }
