@@ -330,7 +330,7 @@ static void rate_callback(void * opaque)
 /*
  * try to extract an mbuf region
  */
-static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
+static uint8_t *map_mbufs(E1000State *s, hwaddr addr) // XXX maybe const ?
 {
     struct guest_memreg_map *mb = &s->mbufs;
     uint64_t a = addr;
@@ -338,7 +338,7 @@ static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
 
     for (;;) {
         if (mb->lo < mb->hi && mb->lo <= a && a < mb->hi) {
-            return (const uint8_t *)(uintptr_t)(a + mb->ofs);
+            return (uint8_t *)(uintptr_t)(a + mb->ofs);
         }
         dma = pci_dma_context(&s->dev);
 
