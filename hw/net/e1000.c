@@ -38,7 +38,7 @@
 #include "e1000_regs.h"
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
-//#define RATE		/* debug rate monitor */
+#define RATE		/* debug rate monitor */
 
 //#define RXD_STATUS_EOP	E1000_RXD_STAT_IXSM
 #define RXD_STATUS_EOP	(E1000_RXD_STAT_TCPCS | E1000_RXD_STAT_UDPCS | E1000_RXD_STAT_IPCS)
@@ -90,6 +90,8 @@ static int debugflags = DBGBIT(TXERR) | DBGBIT(GENERAL);
 #define MAXIMUM_ETHERNET_VLAN_SIZE 1522
 /* this is the size past which hardware will drop packets when setting LPE=1 */
 #ifdef MAP_RING
+/* TODO this should not be decided at compile time, but depending on the
+   user requires "e1000" or "e1000-paravirt". */
 #define MAXIMUM_ETHERNET_LPE_SIZE 65536
 #else	/* MAP_RING */
 #define MAXIMUM_ETHERNET_LPE_SIZE 16384
@@ -1532,6 +1534,175 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
     return size;
 }
 
+#ifdef MAP_RING
+static ssize_t
+e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
+{
+    E1000State *s = qemu_get_nic_opaque(nc);
+    struct e1000_rx_desc desc;
+    dma_addr_t base;
+    unsigned int n, rdt;
+    uint32_t rdh_start;
+    uint16_t vlan_special = 0;
+    uint8_t vlan_status = 0, vlan_offset = 0;
+    uint8_t min_buf[MIN_BUF_SIZE];
+    size_t desc_offset;
+    size_t desc_size;
+    size_t total_size;
+    size_t size = iov_size(iov, iovcnt);
+    struct iovec iov1;
+    uint8_t filter_buf[18];  /* Max ethernet header length */
+    uint8_t * filter_buf_ptr = &filter_buf[0];
+#ifdef CONFIG_E1000_PARAVIRT
+    uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
+#endif
+    uint8_t *guest_buf;
+
+    if (!(s->mac_reg[STATUS] & E1000_STATUS_LU)) {
+        return -1;
+    }
+
+    if (!(s->mac_reg[RCTL] & E1000_RCTL_EN)) {
+        return -1;
+    }
+
+    /* Pad to minimum Ethernet frame length */
+    if (size < sizeof(min_buf)) {
+	iov_to_buf(iov, iovcnt, 0, min_buf, size);
+        memset(&min_buf[size], 0, sizeof(min_buf) - size);
+        iov1.iov_base = min_buf;
+	size = iov1.iov_len = sizeof(min_buf);
+	iov = &iov1;
+	iovcnt = 1;
+    }
+
+    /* Discard oversized packets if !LPE and !SBP. */
+    if ((size > MAXIMUM_ETHERNET_LPE_SIZE ||
+        (size > MAXIMUM_ETHERNET_VLAN_SIZE
+        && !(s->mac_reg[RCTL] & E1000_RCTL_LPE)))
+        && !(s->mac_reg[RCTL] & E1000_RCTL_SBP)) {
+        return size;
+    }
+
+    /* If the first fragment is shorter than 18 bytes, we make a copy for
+       filtering, so that we can use the routines receive_filter()
+       and is_vlan_packet() without any modifications. */
+    if (iov[0].iov_len >= 18)
+	filter_buf_ptr = iov[0].iov_base;
+    else
+	iov_to_buf(iov, iovcnt, 0, filter_buf, 18);
+
+    if (!receive_filter(s, filter_buf_ptr, size))
+        return size;
+
+    if (vlan_enabled(s) && is_vlan_packet(s, filter_buf_ptr)) {
+        vlan_special = cpu_to_le16(be16_to_cpup((uint16_t *)(
+						    filter_buf_ptr + 14)));
+	//TODO report the memmove onto the iovec when iov[0].iov_len < 18
+        memmove((uint8_t *)filter_buf_ptr + 4, filter_buf_ptr, 12);
+        vlan_status = E1000_RXD_STAT_VP;
+        vlan_offset = 4;
+        size -= 4;
+    }
+
+    rdh_start = s->mac_reg[RDH];
+    desc_offset = 0;
+    total_size = size + fcs_len(s);
+    if (!e1000_has_rxbufs(s, total_size)) {
+            set_ics(s, 0, E1000_ICS_RXO);
+            return -1;
+    }
+    IFRATE(rate_rx++; rate_rxb += size);
+
+    base = rx_desc_base(s);
+    if (base != s->rxring_phi) {
+        hwaddr desclen = s->mac_reg[RDLEN];
+        s->rxring_phi = base;
+        s->rxring = address_space_map(pci_dma_context(&s->dev)->as,
+                base, &desclen, 0 /* is_write */);
+    }
+
+    do {
+        desc_size = total_size - desc_offset;
+        if (desc_size > s->rxbuf_size) {
+            desc_size = s->rxbuf_size;
+        }
+        desc = s->rxring[s->mac_reg[RDH]];
+        desc.special = vlan_special;
+        desc.status |= (vlan_status | E1000_RXD_STAT_DD);
+        if (desc.buffer_addr) {
+            if (desc_offset < size) {
+                size_t copy_size = size - desc_offset;
+                if (copy_size > s->rxbuf_size) {
+                    copy_size = s->rxbuf_size;
+                }
+		guest_buf = map_mbufs(s, desc.buffer_addr);
+		if (guest_buf) {
+		    iov_to_buf(iov, iovcnt, desc_offset + vlan_offset,
+						    guest_buf, copy_size);
+		} else {
+		    // TODO support fallback pci_dma_write
+		    D("pci_dma_write not supported\n");
+		    exit(-1);
+		    /*pci_dma_write(&s->dev, le64_to_cpu(desc.buffer_addr),
+			    buf + desc_offset + vlan_offset, copy_size);*/
+		}
+            }
+            desc_offset += desc_size;
+            desc.length = cpu_to_le16(desc_size);
+            if (desc_offset >= total_size) {
+                desc.status |= E1000_RXD_STAT_EOP | RXD_STATUS_EOP;
+            } else {
+                /* Guest zeroing out status is not a hardware requirement.
+                   Clear EOP in case guest didn't do it. */
+                desc.status &= ~E1000_RXD_STAT_EOP;
+            }
+        } else { // as per intel docs; skip descriptors with null buf addr
+            DBGOUT(RX, "Null RX descriptor!!\n");
+        }
+        s->rxring[s->mac_reg[RDH]] = desc;
+        /* XXX a barrier ? */
+
+        if (++s->mac_reg[RDH] * sizeof(desc) >= s->mac_reg[RDLEN])
+            s->mac_reg[RDH] = 0;
+#ifdef CONFIG_E1000_PARAVIRT
+	if (csb_mode) {
+	    s->csb->host_rdh = s->mac_reg[RDH];
+	}
+#endif /* CONFIG_E1000_PARAVIRT */
+        /* see comment in start_xmit; same here */
+        if (s->mac_reg[RDH] == rdh_start) {
+            DBGOUT(RXERR, "RDH wraparound @%x, RDT %x, RDLEN %x\n",
+                   rdh_start, s->mac_reg[RDT], s->mac_reg[RDLEN]);
+            set_ics(s, 0, E1000_ICS_RXO);
+            return -1;
+        }
+    } while (desc_offset < total_size);
+
+    s->mac_reg[GPRC]++;
+    s->mac_reg[TPR]++;
+    /* TOR - Total Octets Received:
+     * This register includes bytes received in a packet from the <Destination
+     * Address> field through the <CRC> field, inclusively.
+     */
+    n = s->mac_reg[TORL] + size + /* Always include FCS length. */ 4;
+    if (n < s->mac_reg[TORL])
+        s->mac_reg[TORH]++;
+    s->mac_reg[TORL] = n;
+
+    n = E1000_ICS_RXT0;
+    if ((rdt = s->mac_reg[RDT]) < s->mac_reg[RDH])
+        rdt += s->mac_reg[RDLEN] / sizeof(desc);
+    if (((rdt - s->mac_reg[RDH]) * sizeof(desc)) <= s->mac_reg[RDLEN] >>
+        s->rxbuf_min_shift)
+        n |= E1000_ICS_RXDMT0;
+
+    set_ics(s, 0, n);
+
+    return size;
+}
+#endif	/* MAP_RING */
+
 static uint32_t
 mac_readreg(E1000State *s, int index)
 {
@@ -2004,6 +2175,9 @@ static NetClientInfo net_e1000_info = {
     .size = sizeof(NICState),
     .can_receive = e1000_can_receive,
     .receive = e1000_receive,
+#ifdef MAP_RING
+    .receive_iov = e1000_receive_iov,
+#endif	/* MAP_RING */
     .cleanup = e1000_cleanup,
     .link_status_changed = e1000_set_link_status,
 };

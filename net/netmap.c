@@ -42,8 +42,8 @@
 #include <qemu/iov.h>
 
 
-/* XXX Use at your own risk: a bug somewhere can freeze your (host) machine.
- */
+/* XXX Use at your own risk: a synchronization problem in the netmap module
+   can freeze your (host) machine. */
 //#define USE_INDIRECT_BUFFERS
 
 /*
@@ -297,14 +297,19 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
 	    dst = (uint8_t *)NETMAP_BUF(ring, idx);
 
 	    ring->slot[i].len = frag_size;
+#ifdef USE_INDIRECT_BUFFERS
+	    ring->slot[i].flags = NS_MOREFRAG | NS_INDIRECT;
+	    *((const uint8_t **)dst) = iov[j].iov_base;
+#else	/* !MAP_RING */
 	    ring->slot[i].flags = NS_MOREFRAG;
 	    pkt_copy(iov[j].iov_base, dst, frag_size);
+#endif	/* !MAP_RING */
 
 	    ring->cur = NETMAP_RING_NEXT(ring, i);
 	    ring->avail--;
 	}
 	/* The last slot must not have NS_MOREFRAG set. */
-	ring->slot[i].flags = 0;
+	ring->slot[i].flags &= ~NS_MOREFRAG;
 
 	/* Compute the checksum if necessary.
 	if (flags & QEMU_NET_PACKET_FLAG_NEED_CHECKSUM)
