@@ -24,8 +24,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
-#define WITH_D /* include debugging macros from qemu-common.h */
-
+#define WITH_D	/* include debugging macros from qemu-common.h */
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
 #include "net/net.h"
@@ -106,6 +105,10 @@ static int debugflags = DBGBIT(TXERR) | DBGBIT(GENERAL);
  *  Others never tested
  */
 enum { E1000_DEVID = E1000_DEV_ID_82540EM };
+// E1000_DEV_ID_82540EM uses microwire
+//enum { E1000_DEVID = E1000_DEV_ID_82573L }; // eeprom eerd
+// enum { E1000_DEVID = E1000_DEV_ID_82571EB_COPPER }; // eeprom eerd
+
 
 /*
  * May need to specify additional MAC-to-PHY entries --
@@ -121,10 +124,9 @@ enum {
 /*
  * map a guest region into a host region
  * if the pointer is within the region, ofs gives the displacement.
- * valid = 0 means we should try to map it.
+ * hi >= lo means we should try to map it.
  */
 struct guest_memreg_map {
-        int      valid;
         uint64_t lo;
         uint64_t hi;
         uint64_t ofs;
@@ -328,35 +330,34 @@ static void rate_callback(void * opaque)
 /*
  * try to extract an mbuf region
  */
-static uint8_t *map_mbufs(E1000State *s, hwaddr addr)
+static const uint8_t *map_mbufs(E1000State *s, hwaddr addr)
 {
     struct guest_memreg_map *mb = &s->mbufs;
     uint64_t a = addr;
     DMAContext *dma;
 
     for (;;) {
-        if (mb->valid && a >= mb->lo && a < mb->hi) {
-            return (uint8_t *)(uintptr_t)(a + mb->ofs);
+        if (mb->lo < mb->hi && mb->lo <= a && a < mb->hi) {
+            return (const uint8_t *)(uintptr_t)(a + mb->ofs);
         }
         dma = pci_dma_context(&s->dev);
-        mb->valid = 1;
 
-        D("mapping %p is unset", (void *)(uintptr_t)addr);
+        ND("mapping %p is unset", (void *)(uintptr_t)addr);
         if (dma_has_iommu(dma)) {
             D("iommu range, cannot set");
             break;
         }
         if (!address_space_mappable(dma->as, addr,
-                  &mb->lo, &mb->hi, &mb->ofs)) {
+                  &mb->lo, &mb->hi, &mb->ofs) || mb->hi <= mb->lo) {
             D("not mappable, cannot set");
             break;
         }
-        D("segment [%p .. %p] delta %p",
+        ND("segment [%p .. %p] delta %p",
              (void *)(uintptr_t)mb->lo,
              (void *)(uintptr_t)mb->hi,
              (void *)(uintptr_t)mb->ofs);
 
-        D("mapping txring correct %p computed %p",
+        ND("mapping txring correct %p computed %p",
             s->txring, (void *)(uintptr_t)(s->txring_phi + mb->ofs));
     }
     mb->hi = mb->lo = 0; /* empty mapping */
@@ -1113,7 +1114,7 @@ start_xmit(E1000State *s)
         s->txring_phi = base;
         s->txring = address_space_map(pci_dma_context(&s->dev)->as,
               base, &desclen, 0 /* is_write */);
-        D("region size is %ld", (long int)desclen);
+        ND("region size is %ld", (long int)desclen);
     }
 #endif /* MAP_RING */
 
