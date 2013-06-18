@@ -231,6 +231,7 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
             netmap_write_poll(s, true);
         }
         if (ring->avail == 0) { /* cannot write */
+	    // XXX useless??? see TXSYNC below
             return 0;
         }
         uint32_t i = ring->cur;
@@ -270,52 +271,77 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
     size_t size = iov_size(iov, iovcnt);
 
     if (ring) {
-        /* request an early notification to avoid running dry */
-        if (ring->avail < ring->num_slots / 2 && s->write_poll == false) {
-            netmap_write_poll(s, true);
-        }
-        if (ring->avail < iovcnt) { /* cannot write */
-            return 0;
-        }
         uint32_t i = 0;
         uint32_t idx;
         uint8_t *dst;
 	int j;
-	int frag_size;
+	uint32_t cur = ring->cur, avail = ring->avail;
+	int iov_frag_size;
+	int nm_frag_size;
+	int offset;
+
+        /* request an early notification to avoid running dry */
+	/* XXX if TXSYNC is synchronous, can we avoid at all having
+	   netmap_write_poll == true?? probably yes!! */
+        if (avail < ring->num_slots / 2 && s->write_poll == false) {
+            netmap_write_poll(s, true);
+        }
+
+	if (avail < iovcnt) {
+	    /* Not enough netmap slots. */
+	    size = 0;
+	    goto txsync;
+	}
 
 	for (j=0; j<iovcnt; j++) {
-	    frag_size = iov[j].iov_len;
+	    iov_frag_size = iov[j].iov_len;
+	    offset = 0;
 
-	    if (frag_size > ring->nr_buf_size) {
-		/* TODO recover descriptors (if possible) */
-		RD(5, "drop packet of size %d > %d", (int)size, ring->nr_buf_size);
-		return size;
-	    }
+	    /* Split each iovec fragment over more netmap slots, if
+	       necessary (without performing data copy). */
+	    while (iov_frag_size) {
+		nm_frag_size = MIN(iov_frag_size, ring->nr_buf_size);
 
-	    i = ring->cur;
-	    idx = ring->slot[i].buf_idx;
-	    dst = (uint8_t *)NETMAP_BUF(ring, idx);
+		if (unlikely(avail == 0)) {
+		    /* We run out of netmap slots while splitting the
+		       iovec fragments. */
+		    size = 0;
+		    goto txsync;
+		}
 
-	    ring->slot[i].len = frag_size;
+		i = cur;
+		idx = ring->slot[i].buf_idx;
+		dst = (uint8_t *)NETMAP_BUF(ring, idx);
+
+		ring->slot[i].len = nm_frag_size;
 #ifdef USE_INDIRECT_BUFFERS
-	    ring->slot[i].flags = NS_MOREFRAG | NS_INDIRECT;
-	    *((const uint8_t **)dst) = iov[j].iov_base;
+		ring->slot[i].flags = NS_MOREFRAG | NS_INDIRECT;
+		*((const uint8_t **)dst) = iov[j].iov_base + offset;
 #else	/* !MAP_RING */
-	    ring->slot[i].flags = NS_MOREFRAG;
-	    pkt_copy(iov[j].iov_base, dst, frag_size);
+		ring->slot[i].flags = NS_MOREFRAG;
+		pkt_copy(iov[j].iov_base + offset, dst, nm_frag_size);
 #endif	/* !MAP_RING */
 
-	    ring->cur = NETMAP_RING_NEXT(ring, i);
-	    ring->avail--;
+		cur = NETMAP_RING_NEXT(ring, i);
+		avail--;
+
+		offset += nm_frag_size;
+		iov_frag_size -= nm_frag_size;
+	    }
 	}
 	/* The last slot must not have NS_MOREFRAG set. */
 	ring->slot[i].flags &= ~NS_MOREFRAG;
 
-	/* Compute the checksum if necessary.
+	/* Now update ring->cur and ring->avail. */
+	ring->cur = cur;
+	ring->avail = avail;
+
+	/* Compute the checksum if necessary. XXX don't do it here
 	if (flags & QEMU_NET_PACKET_FLAG_NEED_CHECKSUM)
 	    net_checksum_calculate(dst, size); */
 
-        if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
+        if (avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
+txsync:
             ioctl(s->me.fd, NIOCTXSYNC, NULL);
 	    if (s->txsync_callback) {
 		s->txsync_callback(s->txsync_callback_arg);

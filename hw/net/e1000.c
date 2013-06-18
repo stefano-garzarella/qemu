@@ -37,6 +37,7 @@
 #include "e1000_regs.h"
 
 #define MAP_RING        /* map the buffers instead of pci_dma_rw() */
+//#define DONT_BUILD_CHECKSUM   /* Don't build the hardware checksum. */
 //#define RATE		/* debug rate monitor */
 
 //#define RXD_STATUS_EOP	E1000_RXD_STAT_IXSM
@@ -762,6 +763,7 @@ putsum(uint8_t *data, uint32_t n, uint32_t sloc, uint32_t css, uint32_t cse)
     }
 }
 
+#ifndef DONT_BUILD_CHECKSUM
 #ifdef MAP_RING
 static void
 putsum_iov(struct iovec *iov, uint32_t iovcnt, uint32_t n,
@@ -791,6 +793,7 @@ putsum_iov(struct iovec *iov, uint32_t iovcnt, uint32_t n,
     }
 }
 #endif /* MAP_RING */
+#endif
 
 static inline int
 vlan_enabled(E1000State *s)
@@ -901,7 +904,7 @@ xmit_seg(E1000State *s)
 
 #ifdef MAP_RING
     if (s->iov_on) {
-#if 1  /* Build the checksum */
+#ifndef DONT_BUILD_CHECKSUM
 	if (s->iovcnt == 1) {
 	    /* TODO use only putsum_iov(), if convenient. */
 	    if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
@@ -918,13 +921,13 @@ xmit_seg(E1000State *s)
 		putsum_iov(s->iov, s->iovcnt, s->iovsize, tp->ipcso,
 			    tp->ipcss, tp->ipcse);
 	}
-#endif	/* Build the checksum */
+#endif	/* !DONT_BUILD_CHECKSUM */
 	e1000_sendv_packet(s);
 	len = s->iovsize;
     } else {
-#else
+#else	/* !MAP_RING */
     if (1) {
-#endif
+#endif	/* !MAP_RING */
 	len = tp->size;
 	buf = tp->data;
 	if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
