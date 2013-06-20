@@ -45,8 +45,11 @@ typedef struct NICConf {
 typedef void (NetPoll)(NetClientState *, bool enable);
 typedef int (NetCanReceive)(NetClientState *);
 typedef ssize_t (NetReceive)(NetClientState *, const uint8_t *, size_t);
-typedef ssize_t (NetReceiveFlags)(NetClientState *, const uint8_t *, size_t, uint32_t flags);
+typedef ssize_t (NetReceiveFlags)(NetClientState *, const uint8_t *, size_t,
+								    unsigned);
 typedef ssize_t (NetReceiveIOV)(NetClientState *, const struct iovec *, int);
+typedef ssize_t (NetReceiveIOVFlags)(NetClientState *, const struct iovec *,
+							int, unsigned);
 typedef void (NetCleanup) (NetClientState *);
 typedef void (LinkStatusChanged)(NetClientState *);
 typedef void (NetClientDestructor)(NetClientState *);
@@ -60,6 +63,7 @@ typedef struct NetClientInfo {
     NetReceive *receive_raw;
     NetReceiveFlags *receive_flags;
     NetReceiveIOV *receive_iov;
+    NetReceiveIOVFlags *receive_iov_flags;
     NetCanReceive *can_receive;
     NetCleanup *cleanup;
     LinkStatusChanged *link_status_changed;
@@ -115,6 +119,8 @@ ssize_t qemu_sendv_packet(NetClientState *nc, const struct iovec *iov,
                           int iovcnt);
 ssize_t qemu_sendv_packet_async(NetClientState *nc, const struct iovec *iov,
                                 int iovcnt, NetPacketSent *sent_cb);
+ssize_t qemu_sendv_packet_async_moreflags(NetClientState *nc, const struct iovec *iov,
+                                int iovcnt, NetPacketSent *sent_cb, unsigned more);
 void qemu_send_packet(NetClientState *nc, const uint8_t *buf, int size);
 ssize_t qemu_send_packet_raw(NetClientState *nc, const uint8_t *buf, int size);
 ssize_t qemu_send_packet_async(NetClientState *nc, const uint8_t *buf,

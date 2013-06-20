@@ -22,7 +22,7 @@
  * THE SOFTWARE.
  */
 
-#define WITH_D /* include debugging macros from qemu-common.h */
+#define WITH_D	/* include debugging macros from qemu-common.h */
 
 #include "config-host.h"
 
@@ -38,10 +38,12 @@
 #include <sys/mman.h>
 #include <net/netmap.h>
 #include <net/netmap_user.h>
+#include <net/checksum.h>
+#include <qemu/iov.h>
 
 
-/* XXX Use at your own risk: a bug somewhere can freeze your (host) machine.
- */
+/* XXX Use at your own risk: a synchronization problem in the netmap module
+   can freeze your (host) machine. */
 //#define USE_INDIRECT_BUFFERS
 
 /*
@@ -213,7 +215,7 @@ static void netmap_writable(void *opaque)
  * new data guest --> backend
  */
 static ssize_t netmap_receive_flags(NetClientState *nc,
-      const uint8_t *buf, size_t size, uint32_t flags)
+      const uint8_t *buf, size_t size, unsigned flags)
 {
     struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
     struct netmap_ring *ring = s->me.tx;
@@ -229,6 +231,7 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
             netmap_write_poll(s, true);
         }
         if (ring->avail == 0) { /* cannot write */
+	    // XXX useless??? see TXSYNC below
             return 0;
         }
         uint32_t i = ring->cur;
@@ -236,10 +239,12 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
         uint8_t *dst = (uint8_t *)NETMAP_BUF(ring, idx);
 
         ring->slot[i].len = size;
+
 #ifdef USE_INDIRECT_BUFFERS
 	ring->slot[i].flags = NS_INDIRECT;
 	*((const uint8_t **)dst) = buf;
 #else
+	ring->slot[i].flags = 0;    /* XXX useless? */
         pkt_copy(buf, dst, size);
 #endif
         ring->cur = NETMAP_RING_NEXT(ring, i);
@@ -249,6 +254,94 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
 		QEMU_NET_PACKET_FLAG_MORE is set? There could be semantic
 		problems, because the frontend expects the packet to be gone?
 	    */
+            ioctl(s->me.fd, NIOCTXSYNC, NULL);
+	    if (s->txsync_callback) {
+		s->txsync_callback(s->txsync_callback_arg);
+	    }
+	}
+    }
+    return size;
+}
+
+static ssize_t netmap_receive_iov_flags(NetClientState * nc,
+	    const struct iovec * iov, int iovcnt, unsigned flags)
+{
+    struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
+    struct netmap_ring *ring = s->me.tx;
+    size_t size = iov_size(iov, iovcnt);
+
+    if (ring) {
+        uint32_t i = 0;
+        uint32_t idx;
+        uint8_t *dst;
+	int j;
+	uint32_t cur = ring->cur, avail = ring->avail;
+	int iov_frag_size;
+	int nm_frag_size;
+	int offset;
+
+        /* request an early notification to avoid running dry */
+	/* XXX if TXSYNC is synchronous, can we avoid at all having
+	   netmap_write_poll == true?? probably yes!! */
+        if (avail < ring->num_slots / 2 && s->write_poll == false) {
+            netmap_write_poll(s, true);
+        }
+
+	if (avail < iovcnt) {
+	    /* Not enough netmap slots. */
+	    size = 0;
+	    goto txsync;
+	}
+
+	for (j=0; j<iovcnt; j++) {
+	    iov_frag_size = iov[j].iov_len;
+	    offset = 0;
+
+	    /* Split each iovec fragment over more netmap slots, if
+	       necessary (without performing data copy). */
+	    while (iov_frag_size) {
+		nm_frag_size = MIN(iov_frag_size, ring->nr_buf_size);
+
+		if (unlikely(avail == 0)) {
+		    /* We run out of netmap slots while splitting the
+		       iovec fragments. */
+		    size = 0;
+		    goto txsync;
+		}
+
+		i = cur;
+		idx = ring->slot[i].buf_idx;
+		dst = (uint8_t *)NETMAP_BUF(ring, idx);
+
+		ring->slot[i].len = nm_frag_size;
+#ifdef USE_INDIRECT_BUFFERS
+		ring->slot[i].flags = NS_MOREFRAG | NS_INDIRECT;
+		*((const uint8_t **)dst) = iov[j].iov_base + offset;
+#else	/* !MAP_RING */
+		ring->slot[i].flags = NS_MOREFRAG;
+		pkt_copy(iov[j].iov_base + offset, dst, nm_frag_size);
+#endif	/* !MAP_RING */
+
+		cur = NETMAP_RING_NEXT(ring, i);
+		avail--;
+
+		offset += nm_frag_size;
+		iov_frag_size -= nm_frag_size;
+	    }
+	}
+	/* The last slot must not have NS_MOREFRAG set. */
+	ring->slot[i].flags &= ~NS_MOREFRAG;
+
+	/* Now update ring->cur and ring->avail. */
+	ring->cur = cur;
+	ring->avail = avail;
+
+	/* Compute the checksum if necessary. XXX don't do it here
+	if (flags & QEMU_NET_PACKET_FLAG_NEED_CHECKSUM)
+	    net_checksum_calculate(dst, size); */
+
+        if (avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
+txsync:
             ioctl(s->me.fd, NIOCTXSYNC, NULL);
 	    if (s->txsync_callback) {
 		s->txsync_callback(s->txsync_callback_arg);
@@ -280,21 +373,40 @@ static void netmap_send(void *opaque)
 {
     struct nm_state *s = opaque;
     struct netmap_ring *ring = s->me.rx;
+    struct iovec iov[64]; /* XXX max size? */
 
     /* only check ring->avail, let the packet be queued
      * with qemu_send_packet_async() if needed
      * XXX until we fix the propagation on the bridge we need to stop early
      */
     while (ring->avail > 0 && qemu_can_send_packet(&s->nc)) {
-        uint32_t i = ring->cur;
-        uint32_t idx = ring->slot[i].buf_idx;
-        uint8_t *src = (u_char *)NETMAP_BUF(ring, idx);
-        int size = ring->slot[i].len;
+        uint32_t i;
+        uint32_t idx;
+	bool morefrag;
+	int iovcnt = 0;
+        int iovsize = 0;
 
-        ring->cur = NETMAP_RING_NEXT(ring, i);
-        ring->avail--;
-        size = qemu_send_packet_async(&s->nc, src, size, netmap_send_completed);
-        if (size == 0) {
+	do {
+	    i = ring->cur;
+	    idx = ring->slot[i].buf_idx;
+	    morefrag = (ring->slot[i].flags & NS_MOREFRAG);
+	    iov[iovcnt].iov_base = (u_char *)NETMAP_BUF(ring, idx);
+	    iov[iovcnt].iov_len = ring->slot[i].len;
+	    iovsize += iov[iovcnt].iov_len;
+	    iovcnt++;
+
+	    ring->cur = NETMAP_RING_NEXT(ring, i);
+	    ring->avail--;
+	} while (ring->avail && morefrag);
+
+	if (unlikely(!ring->avail && morefrag)) {
+	    D("no more slot, but incomplete packet\n");
+	}
+
+	iovsize = qemu_sendv_packet_async(&s->nc, iov, iovcnt,
+						    netmap_send_completed);
+
+        if (iovsize == 0) {
             /* the guest does not receive anymore. Packet is queued, stop
              * reading from the backend until netmap_send_completed()
              */
@@ -338,6 +450,7 @@ static NetClientInfo net_netmap_info = {
     .size = sizeof(struct nm_state),
     .receive_flags = netmap_receive_flags,
     .receive = netmap_receive_raw,
+    .receive_iov_flags = netmap_receive_iov_flags,
 #if 0 /* not implemented */
     .receive_raw = netmap_receive_raw,
     .receive_iov = netmap_receive_iov,

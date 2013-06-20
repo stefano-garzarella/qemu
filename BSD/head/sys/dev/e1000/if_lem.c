@@ -32,6 +32,7 @@
 ******************************************************************************/
 /*$FreeBSD: head/sys/dev/e1000/if_lem.c 250414 2013-05-09 17:07:30Z luigi $*/
 
+#define BATCH_DISPATCH
 #define NIC_SEND_COMBINING
 #define NIC_PARAVIRT	/* enable virtio-like synchronization */
 
@@ -291,8 +292,8 @@ static int lem_tx_int_delay_dflt = EM_TICKS_TO_USECS(EM_TIDV);
 static int lem_rx_int_delay_dflt = EM_TICKS_TO_USECS(EM_RDTR);
 static int lem_tx_abs_int_delay_dflt = EM_TICKS_TO_USECS(EM_TADV);
 static int lem_rx_abs_int_delay_dflt = EM_TICKS_TO_USECS(EM_RADV);
-static int lem_rxd = EM_DEFAULT_RXD;
-static int lem_txd = EM_DEFAULT_TXD;
+static int lem_rxd = 8* EM_DEFAULT_RXD;
+static int lem_txd = 8* EM_DEFAULT_TXD;
 static int lem_smart_pwr_down = FALSE;
 
 /* Controls whether promiscuous also shows bad packets */
@@ -465,6 +466,10 @@ lem_attach(device_t dev)
 	lem_add_rx_process_limit(adapter, "sc_enable",
 	    "driver TDT mitigation", &adapter->sc_enable, 0);
 #endif /* NIC_SEND_COMBINING */
+#ifdef BATCH_DISPATCH
+	lem_add_rx_process_limit(adapter, "batch_enable",
+	    "driver rx batch", &adapter->batch_enable, 0);
+#endif /* BATCH_DISPATCH */
 #ifdef NIC_PARAVIRT
 	lem_add_rx_process_limit(adapter, "rx_retries",
 	    "driver rx retries", &adapter->rx_retries, 0);
@@ -553,7 +558,7 @@ lem_attach(device_t dev)
 #define PA_SC(name, var, val)		\
 	lem_add_rx_process_limit(adapter, name, name, var, val)
 		PA_SC("host_need_txkick",&adapter->csb->host_need_txkick, 1);
-		PA_SC("host_need_rxkick",&adapter->csb->host_need_rxkick, 1);
+		PA_SC("host_rxkick_at",&adapter->csb->host_rxkick_at, ~0);
 		PA_SC("guest_need_txkick",&adapter->csb->guest_need_txkick, 0);
 		PA_SC("guest_need_rxkick",&adapter->csb->guest_need_rxkick, 1);
 		PA_SC("tdt_reg_count",&adapter->tdt_reg_count, 0);
@@ -1801,6 +1806,10 @@ lem_xmit(struct adapter *adapter, struct mbuf **m_headp)
 		/* XXX memory barrier ? */
  		if (adapter->csb->guest_csb_on &&
 		    !adapter->csb->host_need_txkick) {
+			/* XXX maybe useless
+			 * clean the ring. maybe do it before ?
+			 * maybe a little bit of histeresys ?
+			 */
 			if (adapter->num_tx_desc_avail <= 64) {// XXX
 				lem_txeof(adapter);
 			}
@@ -2112,7 +2121,11 @@ lem_local_timer(void *arg)
 	    (ticks - adapter->watchdog_time > EM_WATCHDOG) &&
 	    (adapter->num_tx_desc_avail != adapter->num_tx_desc) ) {
 		lem_txeof(adapter);
-		/* XXX should also recover from stalls ? */
+		/*
+		 * lem_txeof() normally (except when space in the queue
+		 * runs low XXX) cleans watchdog_check so that
+		 * we do not hung.
+		 */
 	}
 #endif /* NIC_PARAVIRT */
 	/*
@@ -3201,7 +3214,7 @@ lem_txeof(struct adapter *adapter)
         if (adapter->num_tx_desc_avail > EM_TX_CLEANUP_THRESHOLD) {                
                 ifp->if_drv_flags &= ~IFF_DRV_OACTIVE;
 #ifdef NIC_PARAVIRT
-		if (adapter->csb) {
+		if (adapter->csb) { // XXX also csb_on ?
 			adapter->csb->guest_need_txkick = 0;
 			// XXX memory barrier
 		}
@@ -3594,15 +3607,22 @@ lem_rxeof(struct adapter *adapter, int count, int *done)
 	u16 		len, desc_len, prev_len_adj;
 	int		i, rx_sent = 0;
 	struct e1000_rx_desc   *current_desc;
-	int retries;
 
+#ifdef BATCH_DISPATCH
+	struct mbuf *mh = NULL, *mt = NULL;
+#endif /* BATCH_DISPATCH */
 #ifdef NIC_PARAVIRT
+	int retries = 0;
 	struct paravirt_csb* csb = adapter->csb;
+	int csb_mode = csb && csb->guest_csb_on;
+
 	ND("clear guest_rxkick at %d", adapter->next_rx_desc_to_check);
-	if (csb)
+	if (csb_mode && csb->guest_need_rxkick)
 		csb->guest_need_rxkick = 0;
 #endif /* NIC_PARAVIRT */
 	EM_RX_LOCK(adapter);
+
+batch_again:
 	i = adapter->next_rx_desc_to_check;
 	current_desc = &adapter->rx_desc_base[i];
 	bus_dmamap_sync(adapter->rxdma.dma_tag, adapter->rxdma.dma_map,
@@ -3622,33 +3642,36 @@ lem_rxeof(struct adapter *adapter, int count, int *done)
 	}
 #endif /* 0 */
 
-	retries = 0;
 	while (count != 0 && ifp->if_drv_flags & IFF_DRV_RUNNING) {
 		struct mbuf *m = NULL;
 
 		status = current_desc->status;
 		if ((status & E1000_RXD_STAT_DD) == 0) {
 #ifdef NIC_PARAVIRT
-		
+		    if (csb_mode) {
+			/* buffer not ready yet. Retry a few times before giving up */
 			if (++retries <= adapter->rx_retries) {
 				continue;
 			}
-			if (csb && csb->guest_need_rxkick == 0) {
+			if (csb->guest_need_rxkick == 0) {
 				ND("set guest_rxkick at %d", adapter->next_rx_desc_to_check);
 				csb->guest_need_rxkick = 1;
-				continue;
+				// XXX memory barrier, status volatile ?
+				continue; /* double check */
 			}
+		    }
+		    /* no buffer ready, give up */
 #endif /* NIC_PARAVIRT */
 			break;
 		}
 #ifdef NIC_PARAVIRT
-		if (csb) {
+		if (csb_mode) {
 			if (csb->guest_need_rxkick)
 				ND("clear again guest_rxkick at %d", adapter->next_rx_desc_to_check);
 			csb->guest_need_rxkick = 0;
+			retries = 0;
 		}
 #endif /* NIC_PARAVIRT */
-		retries = 0;
 
 		mp = adapter->rx_buffer_area[i].m_head;
 		/*
@@ -3773,11 +3796,36 @@ discard:
 		bus_dmamap_sync(adapter->rxdma.dma_tag, adapter->rxdma.dma_map,
 		    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
 
+#ifdef NIC_PARAVIRT
+		if (csb_mode) {
+			/* the buffer at i has been already replaced by lem_get_buf()
+			 * so it is safe to set guest_rdt = i and possibly send a kick.
+			 * XXX see if we can optimize it later.
+			 */
+			csb->guest_rdt = i;
+			// XXX memory barrier
+			if (i == csb->host_rxkick_at)
+				E1000_WRITE_REG(&adapter->hw, E1000_RDT(0), i);
+		}
+#endif /* NIC_PARAVIRT */
 		/* Advance our pointers to the next descriptor. */
 		if (++i == adapter->num_rx_desc)
 			i = 0;
 		/* Call into the stack */
 		if (m != NULL) {
+#ifdef BATCH_DISPATCH
+		    if (adapter->batch_enable) {
+			if (mh == NULL)
+				mh = mt = m;
+			else
+				mt->m_nextpkt = m;
+			mt = m;
+			m->m_nextpkt = NULL;
+			rx_sent++;
+			current_desc = &adapter->rx_desc_base[i];
+			continue;
+		    }
+#endif /* BATCH_DISPATCH */
 			adapter->next_rx_desc_to_check = i;
 			EM_RX_UNLOCK(adapter);
 			(*ifp->if_input)(ifp, m);
@@ -3788,14 +3836,26 @@ discard:
 		current_desc = &adapter->rx_desc_base[i];
 	}
 	adapter->next_rx_desc_to_check = i;
+#ifdef BATCH_DISPATCH
+	if (mh) {
+		EM_RX_UNLOCK(adapter);
+		while ( (mt = mh) != NULL) {
+			mh = mh->m_nextpkt;
+			mt->m_nextpkt = NULL;
+			(*ifp->if_input)(ifp, mt);
+		}
+		EM_RX_LOCK(adapter);
+		i = adapter->next_rx_desc_to_check; /* in case of interrupts */
+		if (count > 0)
+			goto batch_again;
+	}
+#endif /* BATCH_DISPATCH */
 
 	/* Advance the E1000's Receive Queue #0  "Tail Pointer". */
 	if (--i < 0)
 		i = adapter->num_rx_desc - 1;
 #ifdef NIC_PARAVIRT
-	if (csb)
-		csb->guest_rdt = i;
-	if (!csb || !csb->guest_csb_on || csb->host_need_rxkick)
+	if (!csb_mode) /* filter out writes */
 #endif /* NIC_PARAVIRT */
 	E1000_WRITE_REG(&adapter->hw, E1000_RDT(0), i);
 	if (done != NULL)
