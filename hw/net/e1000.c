@@ -36,7 +36,7 @@
 
 #include "e1000_regs.h"
 
-#define RATE		/* debug rate monitor */
+//#define RATE		/* debug rate monitor */
 
 //#define RXD_STATUS_EOP	E1000_RXD_STAT_IXSM
 #define RXD_STATUS_EOP	(E1000_RXD_STAT_TCPCS | E1000_RXD_STAT_UDPCS | E1000_RXD_STAT_IPCS)
@@ -924,6 +924,12 @@ xmit_seg(E1000State *s)
 		s->vnet_hdr.gso_size = 0;
 		s->vnet_hdr.hdr_len = 0;
 	    }
+	    if (tp->sum_needed & E1000_TXD_POPTS_IXSM) {
+		//XXX assume is in the first segment
+		putsum(s->iov[s->vnet_hdr_ofs].iov_base,
+			s->iov[s->vnet_hdr_ofs].iov_len, tp->ipcso,
+			    tp->ipcss, tp->ipcse);
+	    }
 	} else {
 	    if (s->iovcnt == 1) {
 		/* TODO use only putsum_iov(), if convenient. */
@@ -1472,10 +1478,10 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
     }
 
     /* Discard oversized packets if !LPE and !SBP. */
-    if ((size - vnet_ofs > MAXIMUM_ETHERNET_LPE_SIZE ||
-        (size - vnet_ofs > MAXIMUM_ETHERNET_VLAN_SIZE
-        && !(s->mac_reg[RCTL] & E1000_RCTL_LPE)))
-        && !(s->mac_reg[RCTL] & E1000_RCTL_SBP)) {
+    if (size - vnet_ofs > MAXIMUM_ETHERNET_LPE_SIZE) {
+printf("size=%d,vnet_ofs=%d,METHLPE=%d, METHVL=%d, RCTL=%x\n",(int)size,
+vnet_ofs,MAXIMUM_ETHERNET_LPE_SIZE,MAXIMUM_ETHERNET_VLAN_SIZE,
+s->mac_reg[RCTL]);
         return size;
     }
 #else	/* !CONFIG_E1000_PARAVIRT */
