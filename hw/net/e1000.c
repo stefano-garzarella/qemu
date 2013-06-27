@@ -93,13 +93,7 @@ static int debugflags = DBGBIT(TXERR) | DBGBIT(GENERAL);
 /* this is the size past which hardware will drop packets when setting LPE=0 */
 #define MAXIMUM_ETHERNET_VLAN_SIZE 1522
 /* this is the size past which hardware will drop packets when setting LPE=1 */
-#ifdef CONFIG_E1000_PARAVIRT
-/* TODO this should not be decided at compile time, but depending on the
-   user requires "e1000" or "e1000-paravirt". */
-#define MAXIMUM_ETHERNET_LPE_SIZE 65536
-#else	/* CONFIG_E1000_PARAVIRT */
 #define MAXIMUM_ETHERNET_LPE_SIZE 16384
-#endif	/* CONFIG_E1000_PARAVIRT */
 
 /*
  * HW models:
@@ -1480,13 +1474,12 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         size = sizeof(min_buf);
     }
 
-#ifdef CONFIG_E1000_PARAVIRT
     /* Discard oversized packets */
-    if (size > MAXIMUM_ETHERNET_LPE_SIZE) {
+#ifdef CONFIG_E1000_PARAVIRT
+    if (size > 65536) {  /* Max GSO packet */
         return vnet_size;
     }
 #else	/* !CONFIG_E1000_PARAVIRT */
-    /* Discard oversized packets if !LPE and !SBP. */
     if ((size > MAXIMUM_ETHERNET_LPE_SIZE ||
         (size > MAXIMUM_ETHERNET_VLAN_SIZE
         && !(s->mac_reg[RCTL] & E1000_RCTL_LPE)))
@@ -1674,6 +1667,11 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
 	iovcnt = 1;
     }
 
+#ifdef CONFIG_E1000_PARAVIRT
+    if (size > 65536) {
+	return size;
+    }
+#else
     /* Discard oversized packets if !LPE and !SBP. */
     if ((size > MAXIMUM_ETHERNET_LPE_SIZE ||
         (size > MAXIMUM_ETHERNET_VLAN_SIZE
@@ -1681,6 +1679,7 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
         && !(s->mac_reg[RCTL] & E1000_RCTL_SBP)) {
         return size;
     }
+#endif
 
     /* If the first fragment is shorter than 18 bytes, we make a copy for
        filtering, so that we can use the routines receive_filter()
