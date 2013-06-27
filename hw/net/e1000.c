@@ -200,9 +200,10 @@ typedef struct E1000State_st {
     uint32_t rxbufs;
 #ifdef CONFIG_E1000_PARAVIRT
     /* used for map ring */
-    uint64_t txring_phi, rxring_phi;         /* phisical address */
+    uint64_t txring_phi, rxring_phi;  /* phisical address */
     struct e1000_tx_desc *txring;
     struct e1000_rx_desc *rxring;
+    struct virtio_net_hdr *vnet_hdr;
     struct guest_memreg_map mbufs;
     uint32_t iovcnt;
     uint32_t iovsize;
@@ -217,7 +218,7 @@ typedef struct E1000State_st {
     uint32_t txcycles;	    /* TX bottom half spinning counter */
     uint32_t txcycles_lim;  /* Snapshot of s->csb->host_txcycles_lim */
     int vnet_hdr_ofs;
-    struct virtio_net_hdr vnet_hdr;  /* TODO async_callback not supported */
+    struct virtio_net_hdr tx_vnet_hdr;  /* TODO async_callback not supported */
 #endif /* CONFIG_E1000_PARAVIRT */
     bool peer_async;
     uint32_t sync_tdh;	/* TDH register value (exposed to the guest) */
@@ -902,27 +903,27 @@ xmit_seg(E1000State *s)
 	    (s->vnet_hdr_ofs || !(tp->tse && tp->cptse))) {
 	if (s->vnet_hdr_ofs) {
 	    /* Fills in the virtio net header. */
-	    s->iov[0].iov_base = &s->vnet_hdr;
+	    s->iov[0].iov_base = &s->tx_vnet_hdr;
 	    s->iov[0].iov_len = sizeof(struct virtio_net_hdr);
 
-	    s->vnet_hdr.flags = (false ? VIRTIO_NET_HDR_F_DATA_VALID : 0); //XXX when?
+	    s->tx_vnet_hdr.flags = (false ? VIRTIO_NET_HDR_F_DATA_VALID : 0); //XXX when?
 	    if (tp->sum_needed & E1000_TXD_POPTS_TXSM) {
-		s->vnet_hdr.flags |= VIRTIO_NET_HDR_F_NEEDS_CSUM;
-		s->vnet_hdr.csum_start = tp->tucss;
-		s->vnet_hdr.csum_offset = tp->tucso - tp->tucss;
+		s->tx_vnet_hdr.flags |= VIRTIO_NET_HDR_F_NEEDS_CSUM;
+		s->tx_vnet_hdr.csum_start = tp->tucss;
+		s->tx_vnet_hdr.csum_offset = tp->tucso - tp->tucss;
 	    } else {
-		s->vnet_hdr.csum_start = 0;
-		s->vnet_hdr.csum_offset = 0;
+		s->tx_vnet_hdr.csum_start = 0;
+		s->tx_vnet_hdr.csum_offset = 0;
 	    }
 	    if (tp->tse && tp->cptse) {
-		s->vnet_hdr.gso_type = tp->ip ? VIRTIO_NET_HDR_GSO_TCPV4 :
+		s->tx_vnet_hdr.gso_type = tp->ip ? VIRTIO_NET_HDR_GSO_TCPV4 :
 		    VIRTIO_NET_HDR_GSO_TCPV6;
-		s->vnet_hdr.gso_size = tp->mss;
-		s->vnet_hdr.hdr_len = tp->hdr_len;
+		s->tx_vnet_hdr.gso_size = tp->mss;
+		s->tx_vnet_hdr.hdr_len = tp->hdr_len;
 	    } else {
-		s->vnet_hdr.gso_type = VIRTIO_NET_HDR_GSO_NONE;
-		s->vnet_hdr.gso_size = 0;
-		s->vnet_hdr.hdr_len = 0;
+		s->tx_vnet_hdr.gso_type = VIRTIO_NET_HDR_GSO_NONE;
+		s->tx_vnet_hdr.gso_size = 0;
+		s->tx_vnet_hdr.hdr_len = 0;
 	    }
 	    if (tp->sum_needed & E1000_TXD_POPTS_IXSM) {
 		//XXX assume is in the first segment
@@ -1453,10 +1454,14 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 #ifdef CONFIG_E1000_PARAVIRT
     uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
     uint8_t *guest_buf;
-    uint32_t vnet_ofs = s->vnet_hdr_ofs ? sizeof(struct virtio_net_hdr) : 0;
+    struct virtio_net_hdr * hdr;
     const uint8_t * vnet_buf = buf;
+    size_t vnet_size = size;
 
-    buf += vnet_ofs;
+    if (csb_mode && s->vnet_hdr_ofs) {
+	buf += sizeof(struct virtio_net_hdr);
+	size -= sizeof(struct virtio_net_hdr);
+    }
 #endif
 
     if (!(s->mac_reg[STATUS] & E1000_STATUS_LU)) {
@@ -1467,24 +1472,6 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         return -1;
     }
 
-#ifdef CONFIG_E1000_PARAVIRT
-    /* Pad to minimum Ethernet frame length */
-    if (size < sizeof(min_buf)) {
-        memcpy(min_buf, vnet_buf, size);
-        memset(&min_buf[size], 0, sizeof(min_buf) - size);
-        vnet_buf = min_buf;
-	buf = vnet_buf + vnet_ofs;
-        size = sizeof(min_buf);
-    }
-
-    /* Discard oversized packets if !LPE and !SBP. */
-    if (size - vnet_ofs > MAXIMUM_ETHERNET_LPE_SIZE) {
-printf("size=%d,vnet_ofs=%d,METHLPE=%d, METHVL=%d, RCTL=%x\n",(int)size,
-vnet_ofs,MAXIMUM_ETHERNET_LPE_SIZE,MAXIMUM_ETHERNET_VLAN_SIZE,
-s->mac_reg[RCTL]);
-        return size;
-    }
-#else	/* !CONFIG_E1000_PARAVIRT */
     /* Pad to minimum Ethernet frame length */
     if (size < sizeof(min_buf)) {
         memcpy(min_buf, buf, size);
@@ -1493,6 +1480,12 @@ s->mac_reg[RCTL]);
         size = sizeof(min_buf);
     }
 
+#ifdef CONFIG_E1000_PARAVIRT
+    /* Discard oversized packets */
+    if (size > MAXIMUM_ETHERNET_LPE_SIZE) {
+        return vnet_size;
+    }
+#else	/* !CONFIG_E1000_PARAVIRT */
     /* Discard oversized packets if !LPE and !SBP. */
     if ((size > MAXIMUM_ETHERNET_LPE_SIZE ||
         (size > MAXIMUM_ETHERNET_VLAN_SIZE
@@ -1503,7 +1496,11 @@ s->mac_reg[RCTL]);
 #endif	/* !CONFIG_E1000_PARAVIRT */
 
     if (!receive_filter(s, buf, size))
-        return size;
+#ifdef CONFIG_E1000_PARAVIRT
+        return vnet_size;
+#else
+	return size;
+#endif
 
     if (vlan_enabled(s) && is_vlan_packet(s, buf)) {
         vlan_special = cpu_to_le16(be16_to_cpup((uint16_t *)(buf + 14)));
@@ -1511,6 +1508,9 @@ s->mac_reg[RCTL]);
         vlan_status = E1000_RXD_STAT_VP;
         vlan_offset = 4;
         size -= 4;
+#ifdef CONFIG_E1000_PARAVIRT
+	vnet_size -= 4;
+#endif
     }
 
     rdh_start = s->mac_reg[RDH];
@@ -1529,13 +1529,19 @@ s->mac_reg[RCTL]);
         s->rxring = address_space_map(pci_dma_context(&s->dev)->as,
                 base, &desclen, 0 /* is_write */);
     }
+    if (csb_mode && s->vnet_hdr_ofs) {
+	/* Fills in the vnet header at the same index of the first RX
+	   descriptor used for the received frame. */
+	hdr = &s->vnet_hdr[s->mac_reg[RDH]];
+	memcpy(hdr, vnet_buf, sizeof(struct virtio_net_hdr));
+    }
 #endif /* CONFIG_E1000_PARAVIRT */
     do {
         desc_size = total_size - desc_offset;
         if (desc_size > s->rxbuf_size) {
             desc_size = s->rxbuf_size;
         }
-        base = rx_desc_base(s) + sizeof(desc) * s->mac_reg[RDH];
+        base = rx_desc_base(s) + sizeof(desc) * s->mac_reg[RDH]; // TODO move to #else
 #ifdef CONFIG_E1000_PARAVIRT
         desc = s->rxring[s->mac_reg[RDH]];
 #else /* !CONFIG_E1000_PARAVIRT */
@@ -1552,15 +1558,15 @@ s->mac_reg[RCTL]);
 #ifdef CONFIG_E1000_PARAVIRT
 		guest_buf = map_mbufs(s, desc.buffer_addr);
 		if (guest_buf) {
-		    memcpy(guest_buf, vnet_buf + desc_offset +
-				vlan_offset, copy_size);
+		    memcpy(guest_buf, buf + desc_offset + vlan_offset,
+			    copy_size);
 		} else
 #else	/* !CONFIG_E1000_PARAVIRT */
 		if (1)
 #endif	/* CONFIG_E1000_PARAVIRT */
 		{
 		    pci_dma_write(&s->dev, le64_to_cpu(desc.buffer_addr),
-			    vnet_buf + desc_offset + vlan_offset, copy_size);
+			    buf + desc_offset + vlan_offset, copy_size);
 		}
             }
             desc_offset += desc_size;
@@ -1618,10 +1624,15 @@ s->mac_reg[RCTL]);
 
     set_ics(s, 0, n);
 
+#ifdef CONFIG_E1000_PARAVIRT
+    return vnet_size;
+#else
     return size;
+#endif
 }
 
 #ifdef CONFIG_E1000_PARAVIRT
+// TODO add vnet-header support
 static ssize_t
 e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
 {
@@ -1839,11 +1850,23 @@ set_32bit(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val;
     if (index == CSBAL) {
+	hwaddr vnet_hdr_phi;
+	hwaddr len;
+
 	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
 				s->tx_bh, pci_dma_context(&s->dev)->as);
 	if (s->csb) {
 	    s->txcycles_lim = s->csb->host_txcycles_lim;
 	    s->txcycles = 0;
+
+	    if (s->vnet_hdr_ofs) {
+		/* Map the vnet-header ring. */
+		vnet_hdr_phi = ((uint64_t)s->csb->vnet_ring_high << 32) | s->csb->vnet_ring_low;
+		len = (s->mac_reg[RDLEN] / sizeof(struct e1000_rx_desc)) * sizeof(struct virtio_net_hdr);
+		s->vnet_hdr = address_space_map(pci_dma_context(&s->dev)->as,
+			vnet_hdr_phi, &len, 1 /* is_write */);
+		D("vnet-header ring mapped, phi = %lu\n", vnet_hdr_phi);
+	    }
 	}
     }
 }
