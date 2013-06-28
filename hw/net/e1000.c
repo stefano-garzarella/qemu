@@ -41,6 +41,7 @@
 //#define RXD_STATUS_EOP	E1000_RXD_STAT_IXSM
 #define RXD_STATUS_EOP	(E1000_RXD_STAT_TCPCS | E1000_RXD_STAT_UDPCS | E1000_RXD_STAT_IPCS)
 
+//#undef CONFIG_E1000_PARAVIRT
 #ifdef CONFIG_E1000_PARAVIRT
 /*
  * Support for virtio-like communication:
@@ -868,6 +869,7 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
     IFRATE(rate_tx++; rate_txb += size; rate_tx_bh_len++);
 }
 
+#ifdef CONFIG_E1000_PARAVIRT
 static void
 e1000_sendv_packet(E1000State *s)
 {
@@ -883,6 +885,7 @@ e1000_sendv_packet(E1000State *s)
     }
     IFRATE(rate_tx_iov++; rate_txb += s->iovsize; rate_tx_bh_len++);
 }
+#endif	/* CONFIG_E1000_PARAVIRT */
 
 static void
 xmit_seg(E1000State *s)
@@ -998,7 +1001,9 @@ xmit_seg(E1000State *s)
 	len = tp->size + 4;
     }
     e1000_send_packet(s, buf, len);
+#ifdef CONFIG_E1000_PARAVIRT
 stats:
+#endif	/* CONFIG_E1000_PARAVIRT */
     s->mac_reg[TPT]++;
     s->mac_reg[GPTC]++;
     n = s->mac_reg[TOTL];
@@ -1120,7 +1125,9 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
         return;
     if (!(tp->tse && tp->cptse && tp->size < hdr))
         xmit_seg(s);
+#ifdef CONFIG_E1000_PARAVIRT
 reset:
+#endif	/* CONFIG_E1000_PARAVIRT */
     tp->tso_frames = 0;
     tp->sum_needed = 0;
     tp->vlan_needed = 0;
@@ -1534,10 +1541,10 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         if (desc_size > s->rxbuf_size) {
             desc_size = s->rxbuf_size;
         }
-        base = rx_desc_base(s) + sizeof(desc) * s->mac_reg[RDH]; // TODO move to #else
 #ifdef CONFIG_E1000_PARAVIRT
         desc = s->rxring[s->mac_reg[RDH]];
 #else /* !CONFIG_E1000_PARAVIRT */
+        base = rx_desc_base(s) + sizeof(desc) * s->mac_reg[RDH];
         pci_dma_read(&s->dev, base, &desc, sizeof(desc));
 #endif /* !CONFIG_E1000_PARAVIRT */
         desc.special = vlan_special;
