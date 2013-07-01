@@ -618,16 +618,7 @@ static void e1000_reset(void *opaque)
 #ifdef CONFIG_E1000_PARAVIRT
     d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
-    if (peer_has_vnet_hdr(d)) {
-	D("configuring VNET header\n");
-	tap_using_vnet_hdr(d->nic->ncs->peer, true);
-	tap_set_vnet_hdr_len(d->nic->ncs->peer,
-				sizeof(struct virtio_net_hdr));
-	tap_set_offload(d->nic->ncs->peer, 1, 1, 1, 1, 1);
-	d->vnet_hdr_ofs = 1;
-    } else {
-	d->vnet_hdr_ofs = 0;
-    }
+    d->vnet_hdr_ofs = 0;
 #endif /* CONFIG_E1000_PARAVIRT */
     d->peer_async = (qemu_register_peer_async_callback(d->nic->ncs,
 				    &e1000_peer_async_callback, d) == 0);
@@ -1864,6 +1855,18 @@ set_32bit(E1000State *s, int index, uint32_t val)
 	if (s->csb) {
 	    s->txcycles_lim = s->csb->host_txcycles_lim;
 	    s->txcycles = 0;
+
+	    /* TODO tap_using_vnet (UP) and (DOWN) */
+	    if (peer_has_vnet_hdr(s)) {
+		D("configuring VNET header\n");
+		tap_using_vnet_hdr(s->nic->ncs->peer, true);
+		tap_set_vnet_hdr_len(s->nic->ncs->peer,
+			sizeof(struct virtio_net_hdr));
+		tap_set_offload(s->nic->ncs->peer, 1, 1, 1, 1, 1);
+		s->vnet_hdr_ofs = 1;
+	    } else {
+		s->vnet_hdr_ofs = 0;
+	    }
 
 	    if (s->vnet_hdr_ofs) {
 		/* Map the vnet-header ring. */

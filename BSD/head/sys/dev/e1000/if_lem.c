@@ -1024,6 +1024,9 @@ lem_ioctl(struct ifnet *ifp, u_long command, caddr_t data)
 		default:
 			max_frame_size = MAX_JUMBO_FRAME_SIZE;
 		}
+		if (adapter->csb && adapter->csb->guest_csb_on) {
+			max_frame_size = 65536;
+		}
 		if (ifr->ifr_mtu > max_frame_size - ETHER_HDR_LEN -
 		    ETHER_CRC_LEN) {
 			EM_CORE_UNLOCK(adapter);
@@ -2862,6 +2865,11 @@ lem_initialize_transmit_unit(struct adapter *adapter)
 	/* Setup the HW Tx Head and Tail descriptor pointers */
 	E1000_WRITE_REG(&adapter->hw, E1000_TDT(0), 0);
 	E1000_WRITE_REG(&adapter->hw, E1000_TDH(0), 0);
+#ifdef NIC_PARAVIRT
+	if (adapter->csb) {
+		adapter->csb->guest_tdt = 0;
+	}
+#endif
 
 	HW_DEBUGOUT2("Base = %x, Length = %x\n",
 	    E1000_READ_REG(&adapter->hw, E1000_TDBAL(0)),
@@ -3616,7 +3624,7 @@ lem_rxeof(struct adapter *adapter, int count, int *done)
 	struct paravirt_csb* csb = adapter->csb;
 	int csb_mode = csb && csb->guest_csb_on;
 
-	ND("clear guest_rxkick at %d", adapter->next_rx_desc_to_check);
+	//ND("clear guest_rxkick at %d", adapter->next_rx_desc_to_check);
 	if (csb_mode && csb->guest_need_rxkick)
 		csb->guest_need_rxkick = 0;
 #endif /* NIC_PARAVIRT */
@@ -3654,7 +3662,7 @@ batch_again:
 				continue;
 			}
 			if (csb->guest_need_rxkick == 0) {
-				ND("set guest_rxkick at %d", adapter->next_rx_desc_to_check);
+				//ND("set guest_rxkick at %d", adapter->next_rx_desc_to_check);
 				csb->guest_need_rxkick = 1;
 				// XXX memory barrier, status volatile ?
 				continue; /* double check */
@@ -3667,7 +3675,7 @@ batch_again:
 #ifdef NIC_PARAVIRT
 		if (csb_mode) {
 			if (csb->guest_need_rxkick)
-				ND("clear again guest_rxkick at %d", adapter->next_rx_desc_to_check);
+				//ND("clear again guest_rxkick at %d", adapter->next_rx_desc_to_check);
 			csb->guest_need_rxkick = 0;
 			retries = 0;
 		}
