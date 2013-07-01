@@ -202,7 +202,8 @@ typedef struct E1000State_st {
     struct guest_memreg_map mbufs;
     uint32_t iovcnt;
     uint32_t iovsize;
-    struct iovec iov[128]; //XXX maximum size?
+#define E1000_MAX_FRAGS	64
+    struct iovec iov[E1000_MAX_FRAGS];
 #endif /* CONFIG_E1000_PARAVIRT */
 
 #ifdef CONFIG_E1000_PARAVIRT
@@ -1070,6 +1071,11 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
 	s->iov[s->iovcnt].iov_base = buf;
 	s->iov[s->iovcnt].iov_len = split_size;
 	s->iovcnt++;
+	if (unlikely(s->iovcnt == E1000_MAX_FRAGS)) {
+	    s->iovcnt = s->vnet_hdr_ofs;
+	    s->iovsize = 0;
+	    goto reset;
+	}
 	s->iovsize += split_size;
 	tp->size += split_size;  /* For code that depends on tp->size. */
 
