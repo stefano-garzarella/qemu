@@ -215,6 +215,8 @@ typedef struct E1000State_st {
     uint32_t txcycles_lim;  /* Snapshot of s->csb->host_txcycles_lim */
     int vnet_hdr_ofs;
     struct virtio_net_hdr tx_vnet_hdr;  /* TODO async_callback not supported */
+    EventNotifier host_notifier;
+    bool ioeventfd;	    /* Use ioeventfd for guest --> host kicks. */
 #endif /* CONFIG_E1000_PARAVIRT */
     bool peer_async;
     uint32_t sync_tdh;	/* TDH register value (exposed to the guest) */
@@ -1920,6 +1922,27 @@ e1000_tx_bh(void *opaque)
         qemu_bh_schedule(s->tx_bh);
     }
 }
+
+static void
+e1000_ioeventfd_handler(EventNotifier * e)
+{
+    E1000State *s = container_of(e, E1000State, host_notifier);
+
+    if (event_notifier_test_and_clear(e)) {
+	if (!(s->csb && s->csb->guest_csb_on)) {
+	    /* This happens once when calling event_notifier_init(..., 1)
+	       instead of event_notifier_init(..., 0). */
+	    return;
+	}
+
+	s->mac_reg[TDT] &= s->csb->guest_tdt & 0xffff;
+	IFRATE(rate_ntfy_tx++);
+	s->csb->host_need_txkick = 0; /* XXX could be done by the guest */
+	smp_mb(); /* XXX do we care ? */
+	e1000_tx_bh(s);
+    }
+}
+
 #endif /* CONFIG_E1000_PARAVIRT */
 
 static void
@@ -2307,6 +2330,28 @@ static NetClientInfo net_e1000_info = {
     .link_status_changed = e1000_set_link_status,
 };
 
+#ifdef CONFIG_E1000_PARAVIRT
+static int e1000_setup_ioeventfd(E1000State *s)
+{
+    if (event_notifier_init(&s->host_notifier, 0)) {
+	printf("event_notifier_init() error\n");
+	s->ioeventfd = false;
+	return -1;
+    }
+    if (event_notifier_set_handler(&s->host_notifier,
+		&e1000_ioeventfd_handler)) {
+	printf("event_notifier_set_handler() error\n");
+	s->ioeventfd = false;
+	return -1;
+    }
+    memory_region_add_eventfd(&s->mmio, TDT << 2, 4, false, 0,
+	    &s->host_notifier);
+    printf("Host notifier at addr %X\n", TDT << 2);
+
+    return 0;
+}
+#endif
+
 static int pci_e1000_init(PCIDevice *pci_dev)
 {
     E1000State *d = DO_UPCAST(E1000State, dev, pci_dev);
@@ -2353,6 +2398,9 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 
 #ifdef CONFIG_E1000_PARAVIRT
     d->tx_bh = qemu_bh_new(e1000_tx_bh, d);
+    if (d->ioeventfd) {
+	e1000_setup_ioeventfd(d);
+    }
 #endif /* CONFIG_E1000_PARAVIRT */
     return 0;
 }
@@ -2368,6 +2416,9 @@ static Property e1000_properties[] = {
     DEFINE_PROP_BIT("autonegotiation", E1000State,
                     compat_flags, E1000_FLAG_AUTONEG_BIT, true),
     DEFINE_PROP_BOOL("mit_on", E1000State, mit_on, true),
+#ifdef CONFIG_E1000_PARAVIRT
+    DEFINE_PROP_BOOL("ioeventfd", E1000State, ioeventfd, false),
+#endif
     DEFINE_PROP_END_OF_LIST(),
 };
 
