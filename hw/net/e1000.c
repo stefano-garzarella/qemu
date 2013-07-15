@@ -216,7 +216,9 @@ typedef struct E1000State_st {
     int vnet_hdr_ofs;
     struct virtio_net_hdr tx_vnet_hdr;  /* TODO async_callback not supported */
     EventNotifier host_notifier;
+    EventNotifier guest_notifier;
     bool ioeventfd;	    /* Use ioeventfd for guest --> host kicks. */
+    bool irqfd;
 #endif /* CONFIG_E1000_PARAVIRT */
     bool peer_async;
     uint32_t sync_tdh;	/* TDH register value (exposed to the guest) */
@@ -537,7 +539,11 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
     }
 
     s->mit_irq_level = (pending_ints != 0);
-    qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
+    if (s->irqfd) {
+	event_notifier_set(&s->guest_notifier);
+    } else {
+	qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
+    }
 }
 
 /*
@@ -1860,6 +1866,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
 
 	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
 				s->tx_bh, pci_dma_context(&s->dev)->as);
+	address_space_print();
 	if (s->csb) {
 	    s->txcycles_lim = s->csb->host_txcycles_lim;
 	    s->txcycles = 0;
@@ -1942,7 +1949,20 @@ e1000_ioeventfd_handler(EventNotifier * e)
 	e1000_tx_bh(s);
     }
 }
+/*
+static void
+e1000_irqfd_handler(EventNotifier * e)
+{
+    E1000State *s = container_of(e, E1000State, guest_notifier);
 
+    if (event_notifier_test_and_clear(e)) {
+	if (!(s->csb && s->csb->guest_csb_on)) {
+	    return;
+	}
+	printf("guest interrupt!!!\n");
+    }
+}
+*/
 #endif /* CONFIG_E1000_PARAVIRT */
 
 static void
@@ -2346,7 +2366,30 @@ static int e1000_setup_ioeventfd(E1000State *s)
     }
     memory_region_add_eventfd(&s->mmio, TDT << 2, 4, false, 0,
 	    &s->host_notifier);
-    printf("Host notifier at addr %X\n", TDT << 2);
+    //printf("Host notifier at addr %X\n", TDT << 2);
+
+    return 0;
+}
+
+static int e1000_setup_irqfd(E1000State *s)
+{
+    if (event_notifier_init(&s->guest_notifier, 0)) {
+	printf("event_notifier_init() error\n");
+	s->irqfd = false;
+	return -1;
+    }
+/*
+    if (event_notifier_set_handler(&s->guest_notifier,
+		&e1000_irqfd_handler)) {
+	printf("event_notifier_set_handler() error\n");
+	return -1;
+    }
+*/
+    if (kvm_irqchip_add_irqfd_notifier(kvm_state, &s->guest_notifier, 11)) {
+	printf("kvm_irqchip_add_irqfd()\n");
+	s->irqfd = false;
+	return -1;
+    }
 
     return 0;
 }
@@ -2401,6 +2444,10 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     if (d->ioeventfd) {
 	e1000_setup_ioeventfd(d);
     }
+
+    if (d->irqfd) {
+	e1000_setup_irqfd(d);
+    }
 #endif /* CONFIG_E1000_PARAVIRT */
     return 0;
 }
@@ -2418,6 +2465,7 @@ static Property e1000_properties[] = {
     DEFINE_PROP_BOOL("mit_on", E1000State, mit_on, true),
 #ifdef CONFIG_E1000_PARAVIRT
     DEFINE_PROP_BOOL("ioeventfd", E1000State, ioeventfd, false),
+    DEFINE_PROP_BOOL("irqfd", E1000State, irqfd, false),
 #endif
     DEFINE_PROP_END_OF_LIST(),
 };

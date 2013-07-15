@@ -2103,6 +2103,16 @@ int address_space_mappable(AddressSpace *as, hwaddr gp_addr,
     return 0;    /* cannot map */
 }
 
+void address_space_print(void)
+{
+    RAMBlock *block;
+
+    QTAILQ_FOREACH(block, &ram_list.blocks, next) {
+	printf("offset=%lu, length=%lu, host=%p\n", block->offset,
+		    block->length, block->host);
+    }
+}
+
 /* Map a physical memory region into a host virtual address.
  * May map a subset of the requested range, given by and returned in *plen.
  * May return NULL if resources needed to perform the mapping are exhausted.
