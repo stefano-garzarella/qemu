@@ -36,7 +36,7 @@
 
 #include "e1000_regs.h"
 
-//#define RATE		/* debug rate monitor */
+#define RATE		/* debug rate monitor */
 
 //#define RXD_STATUS_EOP	E1000_RXD_STAT_IXSM
 #define RXD_STATUS_EOP	(E1000_RXD_STAT_TCPCS | E1000_RXD_STAT_UDPCS | E1000_RXD_STAT_IPCS)
@@ -535,13 +535,17 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	    }
 	    s->mit_ide = 0;
 	}
+	if (s->irqfd) {
+	    if (event_notifier_set(&s->guest_notifier)) {
+		perror("ens()\n");
+		exit(-1);
+	    }
+	}
 	IFRATE(rate_irq_int++);
     }
 
     s->mit_irq_level = (pending_ints != 0);
-    if (s->irqfd) {
-	event_notifier_set(&s->guest_notifier);
-    } else {
+    if (!s->irqfd) {
 	qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
     }
 }
@@ -1866,7 +1870,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
 
 	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
 				s->tx_bh, pci_dma_context(&s->dev)->as);
-	address_space_print();
+	ram_print();
 	if (s->csb) {
 	    s->txcycles_lim = s->csb->host_txcycles_lim;
 	    s->txcycles = 0;

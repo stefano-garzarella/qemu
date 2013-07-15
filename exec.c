@@ -2103,7 +2103,7 @@ int address_space_mappable(AddressSpace *as, hwaddr gp_addr,
     return 0;    /* cannot map */
 }
 
-void address_space_print(void)
+void ram_print(void)
 {
     RAMBlock *block;
 

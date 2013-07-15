@@ -844,6 +844,8 @@ void address_space_destroy(AddressSpace *as);
 int address_space_mappable(AddressSpace *as, hwaddr addr, uint64_t *lo,
         uint64_t *hi, uint64_t *ofs);
 
+void ram_print(void);
+
 /**
  * address_space_rw: read from or write to an address space.
  *
