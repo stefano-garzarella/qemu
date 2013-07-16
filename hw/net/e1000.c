@@ -36,7 +36,7 @@
 
 #include "e1000_regs.h"
 
-#define RATE		/* debug rate monitor */
+//#define RATE		/* debug rate monitor */
 
 //#define RXD_STATUS_EOP	E1000_RXD_STAT_IXSM
 #define RXD_STATUS_EOP	(E1000_RXD_STAT_TCPCS | E1000_RXD_STAT_UDPCS | E1000_RXD_STAT_IPCS)
@@ -189,6 +189,7 @@ typedef struct E1000State_st {
     QEMUTimer *mit_timer;      /* handle for the timer           */
     bool mit_timer_on;         /* mitigation timer active        */
     bool mit_irq_level;        /* track the interrupt pin level  */
+    bool mit_waiting_eoi;      /* we are waiting for the EOI in irqfd mode */
     bool mit_on;               /* mitigation enable              */
     uint32_t mit_ide;          /* old tx mitigation TXD_CMD_IDE  */
 
@@ -217,6 +218,7 @@ typedef struct E1000State_st {
     struct virtio_net_hdr tx_vnet_hdr;  /* TODO async_callback not supported */
     EventNotifier host_notifier;
     EventNotifier guest_notifier;
+    EventNotifier resample_notifier;
     bool ioeventfd;	    /* Use ioeventfd for guest --> host kicks. */
     bool irqfd;
 #endif /* CONFIG_E1000_PARAVIRT */
@@ -535,7 +537,8 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	    }
 	    s->mit_ide = 0;
 	}
-	if (s->irqfd) {
+	if (s->irqfd && !s->mit_waiting_eoi) {
+	    s->mit_waiting_eoi = 1;
 	    if (event_notifier_set(&s->guest_notifier)) {
 		perror("ens()\n");
 		exit(-1);
@@ -627,6 +630,7 @@ static void e1000_reset(void *opaque)
     qemu_del_timer(d->mit_timer);
     d->mit_timer_on = 0;
     d->mit_irq_level = 0;
+    d->mit_waiting_eoi = 0;
     d->mit_ide = 0;
 #ifdef CONFIG_E1000_PARAVIRT
     d->csb = NULL;
@@ -1953,20 +1957,25 @@ e1000_ioeventfd_handler(EventNotifier * e)
 	e1000_tx_bh(s);
     }
 }
-/*
+
 static void
 e1000_irqfd_handler(EventNotifier * e)
 {
-    E1000State *s = container_of(e, E1000State, guest_notifier);
+    E1000State *s = container_of(e, E1000State, resample_notifier);
 
     if (event_notifier_test_and_clear(e)) {
-	if (!(s->csb && s->csb->guest_csb_on)) {
-	    return;
+	s->mit_waiting_eoi = 0;
+	if (s->mit_irq_level) {
+	    /* Send an interrupt request arrived while we were waiting
+	       for EOI. */
+	    if (event_notifier_set(&s->guest_notifier)) {
+		perror("ens()\n");
+		exit(-1);
+	    }
 	}
-	printf("guest interrupt!!!\n");
     }
 }
-*/
+
 #endif /* CONFIG_E1000_PARAVIRT */
 
 static void
@@ -2382,14 +2391,20 @@ static int e1000_setup_irqfd(E1000State *s)
 	s->irqfd = false;
 	return -1;
     }
-/*
-    if (event_notifier_set_handler(&s->guest_notifier,
+
+    if (event_notifier_init(&s->resample_notifier, 0)) {
+	printf("event_notifier_init() error\n");
+	s->irqfd = false;
+	return -1;
+    }
+
+    if (event_notifier_set_handler(&s->resample_notifier,
 		&e1000_irqfd_handler)) {
 	printf("event_notifier_set_handler() error\n");
 	return -1;
     }
-*/
-    if (kvm_irqchip_add_irqfd_notifier(kvm_state, &s->guest_notifier, 11)) {
+
+    if (kvm_irqchip_add_irqfd_notifier(kvm_state, &s->guest_notifier, &s->resample_notifier, 11)) {
 	printf("kvm_irqchip_add_irqfd()\n");
 	s->irqfd = false;
 	return -1;
