@@ -1878,6 +1878,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
 	if (s->csb) {
 	    s->txcycles_lim = s->csb->host_txcycles_lim;
 	    s->txcycles = 0;
+            s->csb->host_need_intr_ack = 1;
 
 	    /* TODO tap_using_vnet (UP) and (DOWN) */
 	    if (peer_has_vnet_hdr(s)) {
