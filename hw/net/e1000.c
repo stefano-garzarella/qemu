@@ -32,6 +32,7 @@
 #include "hw/loader.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/dma.h"
+#include "hw/pci/msix.h"
 #include <qemu/iov.h>
 
 #include "e1000_regs.h"
@@ -54,6 +55,7 @@
 #define E1000_CSBAH       0x02834
 #include "net/paravirt.h"
 #include "net/tap.h"
+#define E1000_MSIX_VECTOR   0
 #endif /* CONFIG_E1000_PARAVIRT */
 
 #ifdef RATE
@@ -636,6 +638,8 @@ static void e1000_reset(void *opaque)
     d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
     d->vnet_hdr_ofs = 0;
+    msix_unuse_all_vectors(&d->dev);
+    msix_vector_use(&d->dev, E1000_MSIX_VECTOR);
 #endif /* CONFIG_E1000_PARAVIRT */
     d->peer_async = (qemu_register_peer_async_callback(d->nic->ncs,
 				    &e1000_peer_async_callback, d) == 0);
@@ -2345,6 +2349,8 @@ pci_e1000_uninit(PCIDevice *dev)
     qemu_free_timer(d->mit_timer);
 #ifdef CONFIG_E1000_PARAVIRT
     qemu_bh_delete(d->tx_bh);
+    msix_unuse_all_vectors(&d->dev);
+    msix_uninit_exclusive_bar(&d->dev);
 #endif /* CONFIG_E1000_PARAVIRT */
     IFRATE(qemu_del_timer(d->rate_timer); qemu_free_timer(d->rate_timer));
     memory_region_destroy(&d->mmio);
@@ -2461,10 +2467,13 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 
 #ifdef CONFIG_E1000_PARAVIRT
     d->tx_bh = qemu_bh_new(e1000_tx_bh, d);
+    if(msix_init_exclusive_bar(&d->dev, 1, 2)) {
+	D("msix_init_exclusive_bar(1) failed\n");
+	exit(1);
+    }
     if (d->ioeventfd) {
 	e1000_setup_ioeventfd(d);
     }
-
     if (d->irqfd) {
 	e1000_setup_irqfd(d);
     }
