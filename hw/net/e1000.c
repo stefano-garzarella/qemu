@@ -55,7 +55,8 @@
 #define E1000_CSBAH       0x02834
 #include "net/paravirt.h"
 #include "net/tap.h"
-#define E1000_MSIX_VECTOR   0
+#define E1000_MSIX_CTRL_VECTOR   0
+#define E1000_MSIX_DATA_VECTOR   1
 #endif /* CONFIG_E1000_PARAVIRT */
 
 #ifdef RATE
@@ -223,6 +224,7 @@ typedef struct E1000State_st {
     EventNotifier resample_notifier;
     bool ioeventfd;	    /* Use ioeventfd for guest --> host kicks. */
     bool irqfd;
+    bool msix;
 #endif /* CONFIG_E1000_PARAVIRT */
     bool peer_async;
     uint32_t sync_tdh;	/* TDH register value (exposed to the guest) */
@@ -491,7 +493,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
     s->mac_reg[ICS] = val;
 
     pending_ints = (s->mac_reg[IMS] & s->mac_reg[ICR]);
-    if (!s->mit_irq_level && pending_ints) {
+    if ((!s->mit_irq_level || s->msix) && pending_ints) {
 	/*
 	 * Here we detect a potential raising edge. We may want to postpone
 	 * raising the interrupt line. We let the interrupt fire in the
@@ -546,11 +548,25 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 		exit(-1);
 	    }
 	}
+        if (s->msix) {
+#define E1000_DATA_INTR (E1000_ICR_TXDW | E1000_ICR_TXQE | E1000_ICS_RXT0 \
+                        | E1000_ICS_RXDMT0 | E1000_ICS_RXO)
+            if (pending_ints & E1000_DATA_INTR) {
+	        msix_notify(&s->dev, E1000_MSIX_DATA_VECTOR);
+                /* Autoclear. */
+                s->mac_reg[ICS] &= ~E1000_DATA_INTR;
+                s->mac_reg[ICR] = s->mac_reg[ICS];
+            }
+            if (pending_ints & (E1000_ICR_LSC | E1000_ICR_MDAC))
+	        msix_notify(&s->dev, E1000_MSIX_CTRL_VECTOR);
+        }
+        if (pending_ints & E1000_ICR_LSC)
+            printf("LSC!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1\n");
 	IFRATE(rate_irq_int++);
     }
 
     s->mit_irq_level = (pending_ints != 0);
-    if (!s->irqfd) {
+    if (!s->irqfd && !s->msix) {
 	qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
     }
 }
@@ -638,8 +654,10 @@ static void e1000_reset(void *opaque)
     d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
     d->vnet_hdr_ofs = 0;
+    d->msix = false;
     msix_unuse_all_vectors(&d->dev);
-    msix_vector_use(&d->dev, E1000_MSIX_VECTOR);
+    msix_vector_use(&d->dev, E1000_MSIX_CTRL_VECTOR);
+    msix_vector_use(&d->dev, E1000_MSIX_DATA_VECTOR);
 #endif /* CONFIG_E1000_PARAVIRT */
     d->peer_async = (qemu_register_peer_async_callback(d->nic->ncs,
 				    &e1000_peer_async_callback, d) == 0);
@@ -1882,7 +1900,8 @@ set_32bit(E1000State *s, int index, uint32_t val)
 	if (s->csb) {
 	    s->txcycles_lim = s->csb->host_txcycles_lim;
 	    s->txcycles = 0;
-            s->csb->host_need_intr_ack = 1;
+            s->msix = !!s->csb->guest_use_msix;
+            D("Using MSI-X = %d\n", s->msix);
 
 	    /* TODO tap_using_vnet (UP) and (DOWN) */
 	    if (peer_has_vnet_hdr(s)) {
@@ -2467,7 +2486,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 
 #ifdef CONFIG_E1000_PARAVIRT
     d->tx_bh = qemu_bh_new(e1000_tx_bh, d);
-    if(msix_init_exclusive_bar(&d->dev, 1, 2)) {
+    if(msix_init_exclusive_bar(&d->dev, 2, 2)) {
 	D("msix_init_exclusive_bar(1) failed\n");
 	exit(1);
     }
