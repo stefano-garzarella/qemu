@@ -564,9 +564,9 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	IFRATE(rate_irq_int++);
     }
 
-    s->mit_irq_level = (pending_ints != 0);
     if (!s->msix) {
-	qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
+        s->mit_irq_level = (pending_ints != 0);
+        qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
     }
 }
 
@@ -1938,7 +1938,13 @@ set_32bit(E1000State *s, int index, uint32_t val)
 	    s->txcycles = 0;
             s->msix = !!s->csb->guest_use_msix;
             D("Using MSI-X = %d\n", s->msix);
+            if (!s->msix)
+                /* We support irqfd only when MSI-X interrupts are used,
+                   otherwise we would need to use KVM resamplefd: Since
+                   it's a bit complicated, just avoid it. */
+                s->irqfd = false;
             e1000_irqfd_up(s);
+            D("Using irqfd = %d\n", s->irqfd);
 
 	    /* TODO tap_using_vnet (UP) and (DOWN) */
 	    if (peer_has_vnet_hdr(s)) {
