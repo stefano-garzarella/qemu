@@ -488,7 +488,6 @@ static int kvm_virtio_pci_vq_vector_use(VirtIOPCIProxy *proxy,
 
     if (irqfd->users == 0) {
         ret = kvm_irqchip_add_msi_route(kvm_state, msg);
-printf("kvm_irqchip_add_msi_route(v=%d)\n", vector);
         if (ret < 0) {
             return ret;
         }
@@ -504,7 +503,6 @@ static void kvm_virtio_pci_vq_vector_release(VirtIOPCIProxy *proxy,
     VirtIOIRQFD *irqfd = &proxy->vector_irqfd[vector];
     if (--irqfd->users == 0) {
         kvm_irqchip_release_virq(kvm_state, irqfd->virq);
-printf("kvm_irqchip_add_msi_route(v=%d)\n", vector);
     }
 }
 
@@ -517,7 +515,6 @@ static int kvm_virtio_pci_irqfd_use(VirtIOPCIProxy *proxy,
     EventNotifier *n = virtio_queue_get_guest_notifier(vq);
     int ret;
     ret = kvm_irqchip_add_irqfd_notifier(kvm_state, n, NULL, irqfd->virq);
-printf("kvm_irqchip_add_irqfd_notifier(v=%d)\n", vector);
     return ret;
 }
 
@@ -531,7 +528,6 @@ static void kvm_virtio_pci_irqfd_release(VirtIOPCIProxy *proxy,
     int ret;
 
     ret = kvm_irqchip_remove_irqfd_notifier(kvm_state, n, irqfd->virq);
-printf("kvm_irqchip_remove_irqfd_notifier(v=%d)\n", vector);
     assert(ret == 0);
 }
 
@@ -625,7 +621,6 @@ static int virtio_pci_vq_vector_unmask(VirtIOPCIProxy *proxy,
         irqfd = &proxy->vector_irqfd[vector];
         if (irqfd->msg.data != msg.data || irqfd->msg.address != msg.address) {
             ret = kvm_irqchip_update_msi_route(kvm_state, irqfd->virq, msg);
-printf("kvm_irqchip_update_msi_route(v=%d)\n", vector);
             if (ret < 0) {
                 return ret;
             }
