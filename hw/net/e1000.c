@@ -32,6 +32,7 @@
 #include "hw/loader.h"
 #include "sysemu/sysemu.h"
 #include "sysemu/dma.h"
+#include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include <qemu/iov.h>
 
@@ -221,7 +222,7 @@ typedef struct E1000State_st {
     struct virtio_net_hdr tx_vnet_hdr;  /* TODO async_callback not supported */
     EventNotifier host_notifier;
     EventNotifier guest_notifier;
-    EventNotifier resample_notifier;
+    int virq;
     bool ioeventfd;	    /* Use ioeventfd for guest --> host kicks. */
     bool irqfd;
     bool msix;
@@ -541,18 +542,18 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	    }
 	    s->mit_ide = 0;
 	}
-	if (s->irqfd && !s->mit_waiting_eoi) {
-	    s->mit_waiting_eoi = 1;
-	    if (event_notifier_set(&s->guest_notifier)) {
-		perror("ens()\n");
-		exit(-1);
-	    }
-	}
         if (s->msix) {
 #define E1000_DATA_INTR (E1000_ICR_TXDW | E1000_ICR_TXQE | E1000_ICS_RXT0 \
                         | E1000_ICS_RXDMT0 | E1000_ICS_RXO)
             if (pending_ints & E1000_DATA_INTR) {
-	        msix_notify(&s->dev, E1000_MSIX_DATA_VECTOR);
+                if (s->irqfd) {
+                    if (event_notifier_set(&s->guest_notifier)) {
+                        perror("ens()\n");
+                        exit(-1);
+                    }
+                } else {
+	            msix_notify(&s->dev, E1000_MSIX_DATA_VECTOR);
+                }
                 /* Autoclear. */
                 s->mac_reg[ICS] &= ~E1000_DATA_INTR;
                 s->mac_reg[ICR] = s->mac_reg[ICS];
@@ -560,13 +561,11 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
             if (pending_ints & (E1000_ICR_LSC | E1000_ICR_MDAC))
 	        msix_notify(&s->dev, E1000_MSIX_CTRL_VECTOR);
         }
-        if (pending_ints & E1000_ICR_LSC)
-            printf("LSC!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1\n");
 	IFRATE(rate_irq_int++);
     }
 
     s->mit_irq_level = (pending_ints != 0);
-    if (!s->irqfd && !s->msix) {
+    if (!s->msix) {
 	qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
     }
 }
@@ -636,6 +635,7 @@ static bool peer_has_vnet_hdr(E1000State *s)
 
     return tap_has_vnet_hdr(nc->peer);
 }
+
 #endif	/* CONFIG_E1000_PARAVIRT */
 
 static void e1000_reset(void *opaque)
@@ -1886,6 +1886,41 @@ mac_writereg(E1000State *s, int index, uint32_t val)
 
 
 #ifdef CONFIG_E1000_PARAVIRT
+static int e1000_irqfd_up(E1000State *s)
+{
+    MSIMessage msg;
+
+    if (s->irqfd) {
+        msg = msix_get_message(&s->dev, E1000_MSIX_DATA_VECTOR);
+        if ((s->virq = kvm_irqchip_add_msi_route(kvm_state, msg)) < 0) {
+            printf("Error: kvm_irqchip_add_msi_route(): %d\n", -s->virq);
+            return -s->virq;
+        }
+        if (kvm_irqchip_add_irqfd_notifier(kvm_state, &s->guest_notifier,
+                    NULL, s->virq)) {
+            printf("Error: kvm_irqchip_add_irqfd()\n");
+            s->irqfd = false;
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int e1000_irqfd_down(E1000State *s)
+{
+    if (s->irqfd) {
+        if (kvm_irqchip_remove_irqfd_notifier(kvm_state, &s->guest_notifier,
+                    s->virq)) {
+            printf("Error: kvm_irqchip_remove_irqfd_notifier()\n");
+            s->irqfd = false;
+            return -1;
+        }
+    }
+    //XXX kvm_irqchip_add_msi_route()
+    return 0;
+}
+
 static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
@@ -1898,10 +1933,12 @@ set_32bit(E1000State *s, int index, uint32_t val)
 				s->tx_bh, pci_dma_context(&s->dev)->as);
 	ram_print();
 	if (s->csb) {
+            /* Post-allocation configuration. */
 	    s->txcycles_lim = s->csb->host_txcycles_lim;
 	    s->txcycles = 0;
             s->msix = !!s->csb->guest_use_msix;
             D("Using MSI-X = %d\n", s->msix);
+            e1000_irqfd_up(s);
 
 	    /* TODO tap_using_vnet (UP) and (DOWN) */
 	    if (peer_has_vnet_hdr(s)) {
@@ -1923,7 +1960,10 @@ set_32bit(E1000State *s, int index, uint32_t val)
 			vnet_hdr_phi, &len, 1 /* is_write */);
 		D("vnet-header ring mapped, phi = %lu\n", vnet_hdr_phi);
 	    }
-	}
+	} else {
+            /* Post-deallocation unconfiguration. */
+            e1000_irqfd_down(s);
+        }
     }
 }
 
@@ -1981,25 +2021,6 @@ e1000_ioeventfd_handler(EventNotifier * e)
 	e1000_tx_bh(s);
     }
 }
-
-static void
-e1000_irqfd_handler(EventNotifier * e)
-{
-    E1000State *s = container_of(e, E1000State, resample_notifier);
-
-    if (event_notifier_test_and_clear(e)) {
-	s->mit_waiting_eoi = 0;
-	if (s->mit_irq_level) {
-	    /* Send an interrupt request arrived while we were waiting
-	       for EOI. */
-	    if (event_notifier_set(&s->guest_notifier)) {
-		perror("ens()\n");
-		exit(-1);
-	    }
-	}
-    }
-}
-
 #endif /* CONFIG_E1000_PARAVIRT */
 
 static void
@@ -2390,50 +2411,30 @@ static NetClientInfo net_e1000_info = {
 };
 
 #ifdef CONFIG_E1000_PARAVIRT
-static int e1000_setup_ioeventfd(E1000State *s)
+static int e1000_kvm_setup(E1000State *s)
 {
-    if (event_notifier_init(&s->host_notifier, 0)) {
-	printf("event_notifier_init() error\n");
-	s->ioeventfd = false;
-	return -1;
+    if (s->ioeventfd) {
+        if (event_notifier_init(&s->host_notifier, 0)) {
+            printf("event_notifier_init() error\n");
+            s->ioeventfd = false;
+            return -1;
+        }
+        if (event_notifier_set_handler(&s->host_notifier,
+                    &e1000_ioeventfd_handler)) {
+            printf("event_notifier_set_handler() error\n");
+            s->ioeventfd = false;
+            return -1;
+        }
+        memory_region_add_eventfd(&s->mmio, TDT << 2, 4, false, 0,
+                &s->host_notifier);
+        //printf("Host notifier at addr %X\n", TDT << 2);
     }
-    if (event_notifier_set_handler(&s->host_notifier,
-		&e1000_ioeventfd_handler)) {
-	printf("event_notifier_set_handler() error\n");
-	s->ioeventfd = false;
-	return -1;
-    }
-    memory_region_add_eventfd(&s->mmio, TDT << 2, 4, false, 0,
-	    &s->host_notifier);
-    //printf("Host notifier at addr %X\n", TDT << 2);
-
-    return 0;
-}
-
-static int e1000_setup_irqfd(E1000State *s)
-{
-    if (event_notifier_init(&s->guest_notifier, 0)) {
-	printf("event_notifier_init() error\n");
-	s->irqfd = false;
-	return -1;
-    }
-
-    if (event_notifier_init(&s->resample_notifier, 0)) {
-	printf("event_notifier_init() error\n");
-	s->irqfd = false;
-	return -1;
-    }
-
-    if (event_notifier_set_handler(&s->resample_notifier,
-		&e1000_irqfd_handler)) {
-	printf("event_notifier_set_handler() error\n");
-	return -1;
-    }
-
-    if (kvm_irqchip_add_irqfd_notifier(kvm_state, &s->guest_notifier, &s->resample_notifier, 11)) {
-	printf("kvm_irqchip_add_irqfd()\n");
-	s->irqfd = false;
-	return -1;
+    if (s->irqfd) {
+        if (event_notifier_init(&s->guest_notifier, 0)) {
+            printf("Error: event_notifier_init()\n");
+            s->irqfd = false;
+            return -1;
+        }
     }
 
     return 0;
@@ -2486,16 +2487,13 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 
 #ifdef CONFIG_E1000_PARAVIRT
     d->tx_bh = qemu_bh_new(e1000_tx_bh, d);
-    if(msix_init_exclusive_bar(&d->dev, 2, 2)) {
+    /* Initialize the BAR register 2 to reference a MSI-X table containing
+       2 entries. */
+    if ((i = msix_init_exclusive_bar(&d->dev, 2, 2))) {
 	D("msix_init_exclusive_bar(1) failed\n");
-	exit(1);
+	return i;
     }
-    if (d->ioeventfd) {
-	e1000_setup_ioeventfd(d);
-    }
-    if (d->irqfd) {
-	e1000_setup_irqfd(d);
-    }
+    e1000_kvm_setup(d);
 #endif /* CONFIG_E1000_PARAVIRT */
     return 0;
 }
