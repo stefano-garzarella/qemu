@@ -58,7 +58,12 @@
 #include "net/tap.h"
 #define E1000_MSIX_CTRL_VECTOR   0
 #define E1000_MSIX_DATA_VECTOR   1
+#define V1000   /* in-kernel e1000-paravirt accelerator */
+#ifdef V1000
+#include "v1000_user.h"
+#endif /* V1000 */
 #endif /* CONFIG_E1000_PARAVIRT */
+
 
 #ifdef RATE
 #define IFRATE(x) x
@@ -193,7 +198,6 @@ typedef struct E1000State_st {
     QEMUTimer *mit_timer;      /* handle for the timer           */
     bool mit_timer_on;         /* mitigation timer active        */
     bool mit_irq_level;        /* track the interrupt pin level  */
-    bool mit_waiting_eoi;      /* we are waiting for the EOI in irqfd mode */
     bool mit_on;               /* mitigation enable              */
     uint32_t mit_ide;          /* old tx mitigation TXD_CMD_IDE  */
 
@@ -219,13 +223,17 @@ typedef struct E1000State_st {
     uint32_t txcycles;	    /* TX bottom half spinning counter */
     uint32_t txcycles_lim;  /* Snapshot of s->csb->host_txcycles_lim */
     int vnet_hdr_ofs;
-    struct virtio_net_hdr tx_vnet_hdr;  /* TODO async_callback not supported */
-    EventNotifier host_notifier;
-    EventNotifier guest_notifier;
+    struct virtio_net_hdr *tx_hdr;
+    EventNotifier host_tx_notifier;
     int virq;
     bool ioeventfd;	    /* Use ioeventfd for guest --> host kicks. */
-    bool irqfd;
     bool msix;
+#ifdef V1000
+    bool v1000;
+    int v1000_fd;
+    EventNotifier host_rx_notifier, guest_notifier;
+    struct V1000Config cfg;
+#endif /* V1000 */
 #endif /* CONFIG_E1000_PARAVIRT */
     bool peer_async;
     uint32_t sync_tdh;	/* TDH register value (exposed to the guest) */
@@ -546,14 +554,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 #define E1000_DATA_INTR (E1000_ICR_TXDW | E1000_ICR_TXQE | E1000_ICS_RXT0 \
                         | E1000_ICS_RXDMT0 | E1000_ICS_RXO)
             if (pending_ints & E1000_DATA_INTR) {
-                if (s->irqfd) {
-                    if (event_notifier_set(&s->guest_notifier)) {
-                        perror("ens()\n");
-                        exit(-1);
-                    }
-                } else {
-	            msix_notify(&s->dev, E1000_MSIX_DATA_VECTOR);
-                }
+	        msix_notify(&s->dev, E1000_MSIX_DATA_VECTOR);
                 /* Autoclear. */
                 s->mac_reg[ICS] &= ~E1000_DATA_INTR;
                 s->mac_reg[ICR] = s->mac_reg[ICS];
@@ -648,7 +649,6 @@ static void e1000_reset(void *opaque)
     qemu_del_timer(d->mit_timer);
     d->mit_timer_on = 0;
     d->mit_irq_level = 0;
-    d->mit_waiting_eoi = 0;
     d->mit_ide = 0;
 #ifdef CONFIG_E1000_PARAVIRT
     d->csb = NULL;
@@ -924,33 +924,34 @@ xmit_seg(E1000State *s)
     unsigned int frames = s->tx.tso_frames, css, sofar, n;
     struct e1000_tx *tp = &s->tx;
     uint8_t * buf;
-
 #ifdef CONFIG_E1000_PARAVIRT
+    struct virtio_net_hdr * hdr;
+
     if (s->csb && s->csb->guest_csb_on &&
 	    (s->vnet_hdr_ofs || !(tp->tse && tp->cptse))) {
 	if (s->vnet_hdr_ofs) {
 	    /* Fills in the virtio net header. */
-	    s->iov[0].iov_base = &s->tx_vnet_hdr;
+	    s->iov[0].iov_base = hdr = &s->tx_hdr[s->mac_reg[TDH]];
 	    s->iov[0].iov_len = sizeof(struct virtio_net_hdr);
 
-	    s->tx_vnet_hdr.flags = (false ? VIRTIO_NET_HDR_F_DATA_VALID : 0); //XXX when?
+	    hdr->flags = (false ? VIRTIO_NET_HDR_F_DATA_VALID : 0); //XXX when?
 	    if (tp->sum_needed & E1000_TXD_POPTS_TXSM) {
-		s->tx_vnet_hdr.flags |= VIRTIO_NET_HDR_F_NEEDS_CSUM;
-		s->tx_vnet_hdr.csum_start = tp->tucss;
-		s->tx_vnet_hdr.csum_offset = tp->tucso - tp->tucss;
+		hdr->flags |= VIRTIO_NET_HDR_F_NEEDS_CSUM;
+		hdr->csum_start = tp->tucss;
+		hdr->csum_offset = tp->tucso - tp->tucss;
 	    } else {
-		s->tx_vnet_hdr.csum_start = 0;
-		s->tx_vnet_hdr.csum_offset = 0;
+		hdr->csum_start = 0;
+		hdr->csum_offset = 0;
 	    }
 	    if (tp->tse && tp->cptse) {
-		s->tx_vnet_hdr.gso_type = tp->ip ? VIRTIO_NET_HDR_GSO_TCPV4 :
+		hdr->gso_type = tp->ip ? VIRTIO_NET_HDR_GSO_TCPV4 :
 		    VIRTIO_NET_HDR_GSO_TCPV6;
-		s->tx_vnet_hdr.gso_size = tp->mss;
-		s->tx_vnet_hdr.hdr_len = tp->hdr_len;
+		hdr->gso_size = tp->mss;
+		hdr->hdr_len = tp->hdr_len;
 	    } else {
-		s->tx_vnet_hdr.gso_type = VIRTIO_NET_HDR_GSO_NONE;
-		s->tx_vnet_hdr.gso_size = 0;
-		s->tx_vnet_hdr.hdr_len = 0;
+		hdr->gso_type = VIRTIO_NET_HDR_GSO_NONE;
+		hdr->gso_size = 0;
+		hdr->hdr_len = 0;
 	    }
 	    if (tp->sum_needed & E1000_TXD_POPTS_IXSM) {
 		//XXX assume is in the first segment
@@ -1886,93 +1887,6 @@ mac_writereg(E1000State *s, int index, uint32_t val)
 
 
 #ifdef CONFIG_E1000_PARAVIRT
-static int e1000_irqfd_up(E1000State *s)
-{
-    MSIMessage msg;
-
-    if (s->irqfd) {
-        msg = msix_get_message(&s->dev, E1000_MSIX_DATA_VECTOR);
-        if ((s->virq = kvm_irqchip_add_msi_route(kvm_state, msg)) < 0) {
-            printf("Error: kvm_irqchip_add_msi_route(): %d\n", -s->virq);
-            return -s->virq;
-        }
-        if (kvm_irqchip_add_irqfd_notifier(kvm_state, &s->guest_notifier,
-                    NULL, s->virq)) {
-            printf("Error: kvm_irqchip_add_irqfd()\n");
-            s->irqfd = false;
-            return -1;
-        }
-    }
-
-    return 0;
-}
-
-static int e1000_irqfd_down(E1000State *s)
-{
-    if (s->irqfd) {
-        if (kvm_irqchip_remove_irqfd_notifier(kvm_state, &s->guest_notifier,
-                    s->virq)) {
-            printf("Error: kvm_irqchip_remove_irqfd_notifier()\n");
-            s->irqfd = false;
-            return -1;
-        }
-    }
-    //XXX kvm_irqchip_add_msi_route()
-    return 0;
-}
-
-static void
-set_32bit(E1000State *s, int index, uint32_t val)
-{
-    s->mac_reg[index] = val;
-    if (index == CSBAL) {
-	hwaddr vnet_hdr_phi;
-	hwaddr len;
-
-	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
-				s->tx_bh, pci_dma_context(&s->dev)->as);
-	ram_print();
-	if (s->csb) {
-            /* Post-allocation configuration. */
-	    s->txcycles_lim = s->csb->host_txcycles_lim;
-	    s->txcycles = 0;
-            s->msix = !!s->csb->guest_use_msix;
-            D("Using MSI-X = %d\n", s->msix);
-            if (!s->msix)
-                /* We support irqfd only when MSI-X interrupts are used,
-                   otherwise we would need to use KVM resamplefd: Since
-                   it's a bit complicated, just avoid it. */
-                s->irqfd = false;
-            e1000_irqfd_up(s);
-            D("Using irqfd = %d\n", s->irqfd);
-
-	    /* TODO tap_using_vnet (UP) and (DOWN) */
-	    if (peer_has_vnet_hdr(s)) {
-		D("configuring VNET header\n");
-		tap_using_vnet_hdr(s->nic->ncs->peer, true);
-		tap_set_vnet_hdr_len(s->nic->ncs->peer,
-			sizeof(struct virtio_net_hdr));
-		tap_set_offload(s->nic->ncs->peer, 1, 1, 1, 1, 1);
-		s->vnet_hdr_ofs = 1;
-	    } else {
-		s->vnet_hdr_ofs = 0;
-	    }
-
-	    if (s->vnet_hdr_ofs) {
-		/* Map the vnet-header ring. */
-		vnet_hdr_phi = ((uint64_t)s->csb->vnet_ring_high << 32) | s->csb->vnet_ring_low;
-		len = (s->mac_reg[RDLEN] / sizeof(struct e1000_rx_desc)) * sizeof(struct virtio_net_hdr);
-		s->vnet_hdr = address_space_map(pci_dma_context(&s->dev)->as,
-			vnet_hdr_phi, &len, 1 /* is_write */);
-		D("vnet-header ring mapped, phi = %lu\n", vnet_hdr_phi);
-	    }
-	} else {
-            /* Post-deallocation unconfiguration. */
-            e1000_irqfd_down(s);
-        }
-    }
-}
-
 static void
 e1000_tx_bh(void *opaque)
 {
@@ -2011,7 +1925,7 @@ e1000_tx_bh(void *opaque)
 static void
 e1000_ioeventfd_handler(EventNotifier * e)
 {
-    E1000State *s = container_of(e, E1000State, host_notifier);
+    E1000State *s = container_of(e, E1000State, host_tx_notifier);
 
     if (event_notifier_test_and_clear(e)) {
 	if (!(s->csb && s->csb->guest_csb_on)) {
@@ -2025,6 +1939,226 @@ e1000_ioeventfd_handler(EventNotifier * e)
 	s->csb->host_need_txkick = 0; /* XXX could be done by the guest */
 	smp_mb(); /* XXX do we care ? */
 	e1000_tx_bh(s);
+    }
+}
+
+static int e1000_tx_ioeventfd_up(E1000State *s)
+{
+    if (!s->ioeventfd && !s->v1000)
+        return 0;
+
+    if (event_notifier_init(&s->host_tx_notifier, 0)) {
+        printf("event_notifier_init() error\n");
+        s->ioeventfd = false;
+        return -1;
+    }
+    if (s->ioeventfd) {
+        if (event_notifier_set_handler(&s->host_tx_notifier,
+                    &e1000_ioeventfd_handler)) {
+            printf("event_notifier_set_handler() error\n");
+            s->ioeventfd = false;
+            return -1;
+        }
+    }
+    memory_region_add_eventfd(&s->mmio, TDT << 2, 4, false, 0,
+            &s->host_tx_notifier);
+    //printf("Host notifier at addr %X\n", TDT << 2);
+
+    return 0;
+}
+
+static void e1000_tx_ioeventfd_down(E1000State *s)
+{
+    if (!s->ioeventfd && !s->v1000)
+        return;
+
+    memory_region_del_eventfd(&s->mmio, TDT << 2, 4, false, 0,
+            &s->host_tx_notifier);
+    event_notifier_set_handler(&s->host_tx_notifier, NULL);
+    event_notifier_cleanup(&s->host_tx_notifier);
+}
+
+#ifdef V1000
+static int e1000_v1000_up(E1000State *s)
+{
+    MSIMessage msg;
+    hwaddr offset, length;
+    uint8_t * vaddr;
+    int ret;
+    int i;
+
+    if (s->v1000) {
+        if ((s->v1000_fd = open("/dev/v1000", O_RDWR)) < 0) {
+            printf("Cannot open '/dev/v1000'\n");
+            return -1;
+        }
+
+        /* Load the translation table. */
+        i = 0;
+        while ((ret = ram_block_get(i, &offset, &length, &vaddr)) == 0) {
+            s->cfg.tr.table[i].phy = offset;
+            s->cfg.tr.table[i].length = length;
+            s->cfg.tr.table[i].virt = vaddr;
+            i++;
+        }
+        if (ret < 0) {
+            printf("ram_block_get() failed!\n");
+            return -1;
+        }
+        s->cfg.tr.num = i;
+
+        /* Create an eventfd to use as an irqfd and configure it. */
+        if (event_notifier_init(&s->guest_notifier, 0)) {
+            printf("Error: event_notifier_init()\n");
+            s->v1000 = false;
+            return -1;
+        }
+        msg = msix_get_message(&s->dev, E1000_MSIX_DATA_VECTOR);
+        if ((s->virq = kvm_irqchip_add_msi_route(kvm_state, msg)) < 0) {
+            printf("Error: kvm_irqchip_add_msi_route(): %d\n", -s->virq);
+            return -s->virq;
+        }
+        if (kvm_irqchip_add_irqfd_notifier(kvm_state, &s->guest_notifier,
+                    NULL, s->virq)) {
+            printf("Error: kvm_irqchip_add_irqfd()\n");
+            s->v1000 = false;
+            return -1;
+        }
+
+        /* Create an eventfd to use as rx ioeventfd and
+           bind it to the RDT register writes. */
+        if (event_notifier_init(&s->host_rx_notifier, 0)) {
+            printf("event_notifier_init() error\n");
+            s->v1000 = false;
+            return -1;
+        }
+        memory_region_add_eventfd(&s->mmio, RDT << 2, 4, false, 0,
+                &s->host_rx_notifier);
+
+        /* Configure the RX ring. */
+        s->cfg.rx_ring.phy = rx_desc_base(s);
+        s->cfg.rx_ring.hdr.phy = ((hwaddr)s->csb->vnet_ring_high << 32) | s->csb->vnet_ring_low;
+        s->cfg.rx_ring.num = s->mac_reg[RDLEN] / sizeof(struct e1000_rx_desc);
+        s->cfg.rx_ring.ioeventfd = event_notifier_get_fd(&s->host_rx_notifier);
+        s->cfg.rx_ring.irqfd = event_notifier_get_fd(&s->guest_notifier);
+        s->cfg.rx_ring.resamplefd = ~0U;
+
+        /* Configure the TX ring. */
+        s->cfg.tx_ring.phy = tx_desc_base(s);
+        s->cfg.tx_ring.hdr.virt = &s->tx_hdr;
+        s->cfg.tx_ring.num = s->mac_reg[TDLEN] / sizeof(struct e1000_tx_desc);
+        s->cfg.tx_ring.ioeventfd = event_notifier_get_fd(&s->host_tx_notifier);
+        s->cfg.tx_ring.irqfd = event_notifier_get_fd(&s->guest_notifier);
+        s->cfg.tx_ring.resamplefd = ~0U;
+
+        /* Configure the net backend. */
+        s->cfg.tapfd = tap_get_fd(s->nic->ncs->peer);
+
+        s->cfg.rxbuf_size = s->rxbuf_size;
+        s->cfg.csb_phy = ((hwaddr)s->mac_reg[CSBAH] << 32)
+                            | s->mac_reg[CSBAL];
+
+length = 4096;
+printf("csb_phy = %lu, %p\n", s->cfg.csb_phy, address_space_map(pci_dma_context(&s->dev)->as, s->cfg.csb_phy, &length, 1));
+length = s->cfg.tx_ring.num * sizeof(struct e1000_tx_desc);
+printf("tx_ring.phy = %lu, %p\n", s->cfg.tx_ring.phy, address_space_map(pci_dma_context(&s->dev)->as, s->cfg.tx_ring.phy, &length, 1));
+length = s->cfg.rx_ring.num * sizeof(struct e1000_rx_desc);
+printf("rx_ring.phy = %lu, %p\n", s->cfg.rx_ring.phy, address_space_map(pci_dma_context(&s->dev)->as, s->cfg.rx_ring.phy, &length, 1));
+length = s->cfg.rx_ring.num * sizeof(struct virtio_net_hdr);
+printf("rx_ring.hdr.phy = %lu, %p\n", s->cfg.rx_ring.hdr.phy, address_space_map(pci_dma_context(&s->dev)->as, s->cfg.rx_ring.hdr.phy, &length, 1));
+printf("tx_hdr = %p\n", s->cfg.tx_ring.hdr.virt);
+
+        /* Configure the v1000 device instance. */
+        i = write(s->v1000_fd, &s->cfg, sizeof(s->cfg));
+        if (i != sizeof(s->cfg)) {
+            printf("v1000 configuration error(%d).\n", i);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int e1000_v1000_down(E1000State *s)
+{
+    if (s->v1000) {
+        memory_region_del_eventfd(&s->mmio, RDT << 2, 4, false, 0,
+                &s->host_rx_notifier);
+        event_notifier_cleanup(&s->host_rx_notifier);
+
+        if (kvm_irqchip_remove_irqfd_notifier(kvm_state, &s->guest_notifier,
+                    s->virq)) {
+            printf("Error: kvm_irqchip_remove_irqfd_notifier()\n");
+            s->v1000 = false;
+            return -1;
+        }
+        //XXX kvm_irqchip_add_msi_route()
+        event_notifier_cleanup(&s->guest_notifier);
+
+        close(s->v1000_fd);
+    }
+    return 0;
+}
+#endif /* V1000 */
+
+static void
+set_32bit(E1000State *s, int index, uint32_t val)
+{
+    s->mac_reg[index] = val;
+    if (index == CSBAL) {
+	hwaddr vnet_hdr_phi;
+	hwaddr len;
+
+	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
+				s->tx_bh, pci_dma_context(&s->dev)->as);
+	if (s->csb) {
+            /* Post-allocation configuration. */
+	    s->txcycles_lim = s->csb->host_txcycles_lim;
+	    s->txcycles = 0;
+            s->msix = !!s->csb->guest_use_msix;
+            D("Using MSI-X = %d\n", s->msix);
+
+	    /* TODO tap_using_vnet (UP) and (DOWN) */
+	    if (peer_has_vnet_hdr(s)) {
+		tap_using_vnet_hdr(s->nic->ncs->peer, true);
+		tap_set_vnet_hdr_len(s->nic->ncs->peer,
+			sizeof(struct virtio_net_hdr));
+		tap_set_offload(s->nic->ncs->peer, 1, 1, 1, 1, 1);
+		s->vnet_hdr_ofs = 1;
+	    } else {
+		s->vnet_hdr_ofs = 0;
+                s->v1000 = false;
+	    }
+	    D("Using VNET header = %d\n", s->vnet_hdr_ofs);
+
+	    if (s->vnet_hdr_ofs) {
+		/* Map the vnet-header ring. */
+		vnet_hdr_phi = ((hwaddr)s->csb->vnet_ring_high << 32) | s->csb->vnet_ring_low;
+		len = (s->mac_reg[RDLEN] / sizeof(struct e1000_rx_desc)) * sizeof(struct virtio_net_hdr);
+		s->vnet_hdr = address_space_map(pci_dma_context(&s->dev)->as,
+			vnet_hdr_phi, &len, 1 /* is_write */);
+		D("vnet-header ring mapped, phi = %lu\n", vnet_hdr_phi);
+	    }
+            /* Create an eventfd to use as tx ioeventfd and
+               bind it to the TDT register writes. */
+            e1000_tx_ioeventfd_up(s);
+            D("using ioeventfd = %d\n", s->ioeventfd);
+#ifdef V1000
+            if (!s->msix)
+                /* We support v1000 only when MSI-X interrupts are used,
+                   otherwise we would need to use KVM resamplefd: Since
+                   it's a bit complicated, simply avoid it. */
+                s->v1000 = false;
+            e1000_v1000_up(s);
+            D("Using v1000 = %d\n", s->v1000);
+#endif /* V1000 */
+	} else {
+            /* Post-deallocation unconfiguration. */
+#ifdef V1000
+            e1000_v1000_down(s);
+#endif /* V1000 */
+            e1000_tx_ioeventfd_down(s);
+        }
     }
 }
 #endif /* CONFIG_E1000_PARAVIRT */
@@ -2052,9 +2186,17 @@ static void
 set_dlen(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val & 0xfff80;
-    if (index == RDLEN) {
-        s->rxbufs = s->mac_reg[index] / sizeof(struct e1000_rx_desc);
+    s->rxbufs = s->mac_reg[index] / sizeof(struct e1000_rx_desc);
+#ifdef CONFIG_E1000_PARAVIRT
+    if (index == TDLEN) {
+        if (s->tx_hdr) {
+            g_free(s->tx_hdr);
+        } 
+        s->tx_hdr = g_malloc(s->mac_reg[index]
+                                * sizeof(struct virtio_net_hdr)
+                                / sizeof(struct e1000_tx_desc));
     }
+#endif
 }
 
 static void
@@ -2416,37 +2558,6 @@ static NetClientInfo net_e1000_info = {
     .link_status_changed = e1000_set_link_status,
 };
 
-#ifdef CONFIG_E1000_PARAVIRT
-static int e1000_kvm_setup(E1000State *s)
-{
-    if (s->ioeventfd) {
-        if (event_notifier_init(&s->host_notifier, 0)) {
-            printf("event_notifier_init() error\n");
-            s->ioeventfd = false;
-            return -1;
-        }
-        if (event_notifier_set_handler(&s->host_notifier,
-                    &e1000_ioeventfd_handler)) {
-            printf("event_notifier_set_handler() error\n");
-            s->ioeventfd = false;
-            return -1;
-        }
-        memory_region_add_eventfd(&s->mmio, TDT << 2, 4, false, 0,
-                &s->host_notifier);
-        //printf("Host notifier at addr %X\n", TDT << 2);
-    }
-    if (s->irqfd) {
-        if (event_notifier_init(&s->guest_notifier, 0)) {
-            printf("Error: event_notifier_init()\n");
-            s->irqfd = false;
-            return -1;
-        }
-    }
-
-    return 0;
-}
-#endif
-
 static int pci_e1000_init(PCIDevice *pci_dev)
 {
     E1000State *d = DO_UPCAST(E1000State, dev, pci_dev);
@@ -2499,7 +2610,12 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 	D("msix_init_exclusive_bar(1) failed\n");
 	return i;
     }
-    e1000_kvm_setup(d);
+#ifdef V1000
+    if (d->v1000) {
+        d->ioeventfd = false;
+    }
+#endif
+    d->tx_hdr = NULL;
 #endif /* CONFIG_E1000_PARAVIRT */
     return 0;
 }
@@ -2517,8 +2633,10 @@ static Property e1000_properties[] = {
     DEFINE_PROP_BOOL("mit_on", E1000State, mit_on, true),
 #ifdef CONFIG_E1000_PARAVIRT
     DEFINE_PROP_BOOL("ioeventfd", E1000State, ioeventfd, false),
-    DEFINE_PROP_BOOL("irqfd", E1000State, irqfd, false),
-#endif
+#ifdef V1000
+    DEFINE_PROP_BOOL("irqfd", E1000State, v1000, false),
+#endif /* V1000 */
+#endif /* CONFIG_E1000_PARAVIRT */
     DEFINE_PROP_END_OF_LIST(),
 };
 

@@ -2103,14 +2103,27 @@ int address_space_mappable(AddressSpace *as, hwaddr gp_addr,
     return 0;    /* cannot map */
 }
 
-void ram_print(void)
+int ram_block_get(int idx, hwaddr *off, hwaddr *len, uint8_t **va)
 {
     RAMBlock *block;
+    int i = 0;
+
+    if (!off || !len || !va || !(*va))
+        return -1;
 
     QTAILQ_FOREACH(block, &ram_list.blocks, next) {
-	printf("offset=%lu, length=%lu, host=%p\n", block->offset,
-		    block->length, block->host);
+        if (i == idx) {
+            *off = block->offset;
+            *len = block->length;
+            *va = block->host;
+            return 0;
+        }
+        i++;
+	/*printf("offset=%lu, length=%lu, host=%p\n", block->offset,
+		    block->length, block->host); */
     }
+
+    return 1;
 }
 
 /* Map a physical memory region into a host virtual address.
