@@ -2159,7 +2159,10 @@ set_32bit(E1000State *s, int index, uint32_t val)
                    otherwise we would need to use KVM resamplefd: Since
                    it's a bit complicated, simply avoid it. */
                 s->v1000 = false;
-            e1000_v1000_up(s);
+            if (e1000_v1000_up(s)) {
+                printf("Error: Unable to use v1000 accelerator\n");
+                exit(EXIT_FAILURE);
+            }
             D("Using v1000 = %d\n", s->v1000);
 #endif /* V1000 */
 	} else {
@@ -2644,7 +2647,7 @@ static Property e1000_properties[] = {
 #ifdef CONFIG_E1000_PARAVIRT
     DEFINE_PROP_BOOL("ioeventfd", E1000State, ioeventfd, false),
 #ifdef V1000
-    DEFINE_PROP_BOOL("irqfd", E1000State, v1000, false),
+    DEFINE_PROP_BOOL("v1000", E1000State, v1000, false),
 #endif /* V1000 */
 #endif /* CONFIG_E1000_PARAVIRT */
     DEFINE_PROP_END_OF_LIST(),
