@@ -931,7 +931,7 @@ xmit_seg(E1000State *s)
 	    (s->vnet_hdr_ofs || !(tp->tse && tp->cptse))) {
 	if (s->vnet_hdr_ofs) {
 	    /* Fills in the virtio net header. */
-	    s->iov[0].iov_base = hdr = &s->tx_hdr[s->mac_reg[TDH]];
+	    s->iov[0].iov_base = hdr = s->tx_hdr + s->mac_reg[TDH];
 	    s->iov[0].iov_len = sizeof(struct virtio_net_hdr);
 
 	    hdr->flags = (false ? VIRTIO_NET_HDR_F_DATA_VALID : 0); //XXX when?
@@ -1412,6 +1412,9 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
     bool rxq_full = (total_size > AVAIL_RXBUFS(s) * s->rxbuf_size);
     int avail;
 
+    if (s->v1000) {
+        return true;
+    }
     if (csb) {
 	if (rxq_full) {
 	    /* Reload csb->guest_rdt only when necessary. */
@@ -1494,6 +1497,9 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
     struct virtio_net_hdr * hdr;
     const uint8_t * vnet_buf = buf;
     size_t vnet_size = size;
+
+    if (s->v1000)
+        return size;
 
     if (csb_mode && s->vnet_hdr_ofs) {
 	buf += sizeof(struct virtio_net_hdr);
@@ -1687,10 +1693,14 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
     struct iovec iov1;
     uint8_t filter_buf[18];  /* Max ethernet header length */
     uint8_t * filter_buf_ptr = &filter_buf[0];
+    uint8_t *guest_buf;
 #ifdef CONFIG_E1000_PARAVIRT
     uint32_t csb_mode = s->csb && s->csb->guest_csb_on;
+
+    if (s->v1000) {
+        return size;
+    }
 #endif
-    uint8_t *guest_buf;
 
     if (!(s->mac_reg[STATUS] & E1000_STATUS_LU)) {
         return -1;
@@ -2045,7 +2055,7 @@ static int e1000_v1000_up(E1000State *s)
 
         /* Configure the TX ring. */
         s->cfg.tx_ring.phy = tx_desc_base(s);
-        s->cfg.tx_ring.hdr.virt = &s->tx_hdr;
+        s->cfg.tx_ring.hdr.virt = s->tx_hdr;
         s->cfg.tx_ring.num = s->mac_reg[TDLEN] / sizeof(struct e1000_tx_desc);
         s->cfg.tx_ring.ioeventfd = event_notifier_get_fd(&s->host_tx_notifier);
         s->cfg.tx_ring.irqfd = event_notifier_get_fd(&s->guest_notifier);
