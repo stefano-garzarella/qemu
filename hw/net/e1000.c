@@ -2062,6 +2062,7 @@ static int e1000_v1000_up(E1000State *s)
         s->cfg.tx_ring.resamplefd = ~0U;
 
         /* Configure the net backend. */
+        s->nic->ncs->peer->info->poll(s->nic->ncs->peer, false);
         s->cfg.tapfd = tap_get_fd(s->nic->ncs->peer);
 
         s->cfg.rxbuf_size = s->rxbuf_size;
@@ -2106,6 +2107,7 @@ static int e1000_v1000_down(E1000State *s)
         event_notifier_cleanup(&s->guest_notifier);
 
         close(s->v1000_fd);
+        s->nic->ncs->peer->info->poll(s->nic->ncs->peer, true);
     }
     return 0;
 }
