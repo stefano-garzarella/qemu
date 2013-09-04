@@ -927,16 +927,16 @@ xmit_seg(E1000State *s)
     if (s->csb && s->csb->guest_csb_on &&
 	    (s->vnet_hdr_ofs || !(tp->tse && tp->cptse))) {
 	if (s->vnet_hdr_ofs) {
-	    /* Fills in the virtio net header. */
+	    /* We are using the virtio-net header: Let's fill it. */
 	    s->iov[0].iov_base = hdr = s->tx_hdr + s->mac_reg[TDH];
 	    s->iov[0].iov_len = sizeof(struct virtio_net_hdr);
 
-	    hdr->flags = (false ? VIRTIO_NET_HDR_F_DATA_VALID : 0); //XXX when?
 	    if (tp->sum_needed & E1000_TXD_POPTS_TXSM) {
-		hdr->flags |= VIRTIO_NET_HDR_F_NEEDS_CSUM;
+		hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
 		hdr->csum_start = tp->tucss;
 		hdr->csum_offset = tp->tucso - tp->tucss;
 	    } else {
+                hdr->flags = 0;
 		hdr->csum_start = 0;
 		hdr->csum_offset = 0;
 	    }
@@ -950,13 +950,9 @@ xmit_seg(E1000State *s)
 		hdr->gso_size = 0;
 		hdr->hdr_len = 0;
 	    }
-	    if (tp->sum_needed & E1000_TXD_POPTS_IXSM) {
-		//XXX assume is in the first segment
-		putsum(s->iov[s->vnet_hdr_ofs].iov_base,
-			s->iov[s->vnet_hdr_ofs].iov_len, tp->ipcso,
-			    tp->ipcss, tp->ipcse);
-	    }
 	} else {
+            /* We are not using the virtio-net header, and this is a
+               potentially fragmented non-TSO packet. */
 	    if (s->iovcnt == 1) {
 		/* TODO use only putsum_iov(), if convenient. */
 		if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
