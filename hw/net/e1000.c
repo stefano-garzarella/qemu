@@ -924,56 +924,65 @@ xmit_seg(E1000State *s)
 #ifdef CONFIG_E1000_PARAVIRT
     struct virtio_net_hdr * hdr;
 
-    if (s->csb && s->csb->guest_csb_on &&
-	    (s->vnet_hdr_ofs || !(tp->tse && tp->cptse))) {
-	if (s->vnet_hdr_ofs) {
-	    /* We are using the virtio-net header: Let's fill it. */
-	    s->iov[0].iov_base = hdr = s->tx_hdr + s->mac_reg[TDH];
-	    s->iov[0].iov_len = sizeof(struct virtio_net_hdr);
+    if (s->csb && s->csb->guest_csb_on) {
+        if (!s->vnet_hdr_ofs && (tp->tse && tp->cptse)) {
+            /* We have TSO packet while not using the virtio-net header. */
+            if (frames == 0 /* && IPv4 */) {
+                tp->header[14+10] = tp->data[14+10] = 0;
+                tp->header[14+11] = tp->data[14+11] = 0;
+            }
+        } else {
+            if (!s->vnet_hdr_ofs) {
+                /* We are not using the virtio-net header, and this is a
+                   potentially fragmented non-TSO packet. E.g., a Linux guest
+                   send TCP segments as fragmented packet when the ethtool
+                   parameters "tso" is off and "sg" is on. */
+                if (s->iovcnt == 1) {
+                    /* TODO use only putsum_iov(), if convenient. */
+                    if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
+                        putsum(s->iov[0].iov_base, s->iov[0].iov_len,
+                                tp->tucso, tp->tucss, tp->tucse);
+                    if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
+                        putsum(s->iov[0].iov_base, s->iov[0].iov_len,
+                                tp->ipcso, tp->ipcss, tp->ipcse);
+                } else {
+                    if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
+                        putsum_iov(s->iov, s->iovcnt, s->iovsize, tp->tucso,
+                                tp->tucss, tp->tucse);
+                    if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
+                        putsum_iov(s->iov, s->iovcnt, s->iovsize, tp->ipcso,
+                                tp->ipcss, tp->ipcse);
+                }
+            } else {
+                /* We are using the virtio-net header: Let's fill it. */
+                s->iov[0].iov_base = hdr = s->tx_hdr + s->mac_reg[TDH];
+                s->iov[0].iov_len = sizeof(struct virtio_net_hdr);
 
-	    if (tp->sum_needed & E1000_TXD_POPTS_TXSM) {
-		hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
-		hdr->csum_start = tp->tucss;
-		hdr->csum_offset = tp->tucso - tp->tucss;
-	    } else {
-                hdr->flags = 0;
-		hdr->csum_start = 0;
-		hdr->csum_offset = 0;
-	    }
-	    if (tp->tse && tp->cptse) {
-		hdr->gso_type = tp->ip ? VIRTIO_NET_HDR_GSO_TCPV4 :
-		    VIRTIO_NET_HDR_GSO_TCPV6;
-		hdr->gso_size = tp->mss;
-		hdr->hdr_len = tp->hdr_len;
-	    } else {
-		hdr->gso_type = VIRTIO_NET_HDR_GSO_NONE;
-		hdr->gso_size = 0;
-		hdr->hdr_len = 0;
-	    }
-	} else {
-            /* We are not using the virtio-net header, and this is a
-               potentially fragmented non-TSO packet. */
-	    if (s->iovcnt == 1) {
-		/* TODO use only putsum_iov(), if convenient. */
-		if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
-		    putsum(s->iov[0].iov_base, s->iov[0].iov_len, tp->tucso,
-				tp->tucss, tp->tucse);
-		if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
-		    putsum(s->iov[0].iov_base, s->iov[0].iov_len, tp->ipcso,
-				tp->ipcss, tp->ipcse);
-	    } else {
-		if (tp->sum_needed & E1000_TXD_POPTS_TXSM)
-		    putsum_iov(s->iov, s->iovcnt, s->iovsize, tp->tucso,
-				tp->tucss, tp->tucse);
-		if (tp->sum_needed & E1000_TXD_POPTS_IXSM)
-		    putsum_iov(s->iov, s->iovcnt, s->iovsize, tp->ipcso,
-			    tp->ipcss, tp->ipcse);
-	    }
-	}
-	e1000_sendv_packet(s);
-	len = s->iovsize;
+                if (tp->sum_needed & E1000_TXD_POPTS_TXSM) {
+                    hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
+                    hdr->csum_start = tp->tucss;
+                    hdr->csum_offset = tp->tucso - tp->tucss;
+                } else {
+                    hdr->flags = 0;
+                    hdr->csum_start = 0;
+                    hdr->csum_offset = 0;
+                }
+                if (tp->tse && tp->cptse) {
+                    hdr->gso_type = tp->ip ? VIRTIO_NET_HDR_GSO_TCPV4 :
+                        VIRTIO_NET_HDR_GSO_TCPV6;
+                    hdr->gso_size = tp->mss;
+                    hdr->hdr_len = tp->hdr_len;
+                } else {
+                    hdr->gso_type = VIRTIO_NET_HDR_GSO_NONE;
+                    hdr->gso_size = 0;
+                    hdr->hdr_len = 0;
+                }
+            }
+            e1000_sendv_packet(s);
+            len = s->iovsize;
 
-	goto stats;
+            goto stats;
+        }
     }
 #endif	/* !CONFIG_E1000_PARAVIRT */
 
@@ -1046,7 +1055,7 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
     struct e1000_context_desc *xp = (struct e1000_context_desc *)dp;
     struct e1000_tx *tp = &s->tx;
 
-    s->mit_ide |= (txd_lower & E1000_TXD_CMD_IDE); // XXX check
+    s->mit_ide |= (txd_lower & E1000_TXD_CMD_IDE);
     if (dtype == E1000_TXD_CMD_DEXT) {	// context descriptor
         op = le32_to_cpu(xp->cmd_and_length);
         tp->ipcss = xp->lower_setup.ip_fields.ipcss;
@@ -1518,7 +1527,7 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 
     /* Discard oversized packets */
 #ifdef CONFIG_E1000_PARAVIRT
-    if (size > 65536) {  /* Max GSO packet */
+    if (unlikely(size > 65536)) {  /* Max GSO packet */
         return vnet_size;
     }
 #else	/* !CONFIG_E1000_PARAVIRT */
@@ -1564,11 +1573,15 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         s->rxring = address_space_map(pci_dma_context(&s->dev)->as,
                 base, &desclen, 0 /* is_write */);
     }
-    if (csb_mode && s->vnet_hdr_ofs) {
+    if (csb_mode) {
 	/* Fills in the vnet header at the same index of the first RX
 	   descriptor used for the received frame. */
 	hdr = &s->vnet_hdr[s->mac_reg[RDH]];
-	memcpy(hdr, vnet_buf, sizeof(struct virtio_net_hdr));
+        if (s->vnet_hdr_ofs) {
+	    memcpy(hdr, vnet_buf, sizeof(struct virtio_net_hdr));
+        } else { /* TODO Move this at initialization time. */
+            memset(hdr, 0, sizeof(struct virtio_net_hdr));
+        }
     }
 #endif /* CONFIG_E1000_PARAVIRT */
     do {
@@ -1714,7 +1727,7 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
     }
 
 #ifdef CONFIG_E1000_PARAVIRT
-    if (size > 65536) {
+    if (unlikely(size > 65536)) {
 	return size;
     }
 #else
@@ -2136,14 +2149,13 @@ set_32bit(E1000State *s, int index, uint32_t val)
 	    }
 	    D("Using VNET header = %d\n", s->vnet_hdr_ofs);
 
-	    if (s->vnet_hdr_ofs) {
-		/* Map the vnet-header ring. */
-		vnet_hdr_phi = ((hwaddr)s->csb->vnet_ring_high << 32) | s->csb->vnet_ring_low;
-		len = (s->mac_reg[RDLEN] / sizeof(struct e1000_rx_desc)) * sizeof(struct virtio_net_hdr);
-		s->vnet_hdr = address_space_map(pci_dma_context(&s->dev)->as,
-			vnet_hdr_phi, &len, 1 /* is_write */);
-		D("vnet-header ring mapped, phi = %lu\n", vnet_hdr_phi);
-	    }
+            /* Map the vnet-header ring. */
+            vnet_hdr_phi = ((hwaddr)s->csb->vnet_ring_high << 32) | s->csb->vnet_ring_low;
+            len = (s->mac_reg[RDLEN] / sizeof(struct e1000_rx_desc)) * sizeof(struct virtio_net_hdr);
+            s->vnet_hdr = address_space_map(pci_dma_context(&s->dev)->as,
+                    vnet_hdr_phi, &len, 1 /* is_write */);
+            D("vnet-header ring mapped, phi = %lu\n", vnet_hdr_phi);
+
             /* Create an eventfd to use as tx ioeventfd and
                bind it to the TDT register writes. */
             e1000_tx_ioeventfd_up(s);
@@ -2560,7 +2572,7 @@ static NetClientInfo net_e1000_info = {
     .can_receive = e1000_can_receive,
     .receive = e1000_receive,
 #ifdef CONFIG_E1000_PARAVIRT
-    .receive_iov = e1000_receive_iov,
+    //.receive_iov = e1000_receive_iov, // TODO reenable, with vnet-hdr!!
 #endif	/* CONFIG_E1000_PARAVIRT */
     .cleanup = e1000_cleanup,
     .link_status_changed = e1000_set_link_status,
