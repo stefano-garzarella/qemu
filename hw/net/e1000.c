@@ -927,9 +927,10 @@ xmit_seg(E1000State *s)
     if (s->csb && s->csb->guest_csb_on) {
         if (!s->vnet_hdr_ofs && (tp->tse && tp->cptse)) {
             /* We have TSO packet while not using the virtio-net header. */
-            if (frames == 0 /* && IPv4 */) {
-                tp->header[14+10] = tp->data[14+10] = 0;
-                tp->header[14+11] = tp->data[14+11] = 0;
+            if (frames == 0) {
+                /* Zero the IPv4 checksum field in the TSO packet.*/
+                *((uint16_t*)(tp->header + 14 + 10)) =
+                    *((uint16_t*)(tp->data + 14 + 10)) = 0;
             }
         } else {
             if (!s->vnet_hdr_ofs) {
