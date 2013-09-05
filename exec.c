@@ -2108,7 +2108,7 @@ int ram_block_get(int idx, hwaddr *off, hwaddr *len, uint8_t **va)
     RAMBlock *block;
     int i = 0;
 
-    if (!off || !len || !va || !(*va))
+    if (!off || !len || !va)
         return -1;
 
     QTAILQ_FOREACH(block, &ram_list.blocks, next) {
