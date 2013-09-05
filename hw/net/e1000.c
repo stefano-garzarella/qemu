@@ -928,9 +928,22 @@ xmit_seg(E1000State *s)
         if (!s->vnet_hdr_ofs && (tp->tse && tp->cptse)) {
             /* We have TSO packet while not using the virtio-net header. */
             if (frames == 0) {
-                /* Zero the IPv4 checksum field in the TSO packet.*/
-                *((uint16_t*)(tp->header + 14 + 10)) =
-                    *((uint16_t*)(tp->data + 14 + 10)) = 0;
+                uint32_t csum;
+                /* Zero the IPv4 checksum field in the TSO packet,
+                   because the putsum() function expect this field
+                   to be zero.*/
+                *((uint16_t*)(tp->header + tp->ipcso)) =
+                    *((uint16_t*)(tp->data + tp->ipcso)) = 0;
+                /* Compute a partial TCP checksum, including IP addresses,
+                   and IP protocol, storing it into tp->header (for reuse),
+                   and into tp->data (first TCP segment). This operation
+                   is done by the driver in non-paravirtual mode (see
+                   tcpdup_magic() in the Linux driver). */
+                csum = net_checksum_add(8, &tp->header[14+12]); /* IP addrs */
+                csum += tp->header[14+9];  /* IPPROTO_TCP */
+                csum = (csum >> 16) + (csum & 0xffff);  /* Fold it. */
+                *((uint16_t*)(tp->header + tp->tucso)) =
+                    *((uint16_t*)(tp->data + tp->tucso)) = cpu_to_be16(csum);
             }
         } else {
             if (!s->vnet_hdr_ofs) {
