@@ -499,7 +499,11 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
     s->mac_reg[ICS] = val;
 
     pending_ints = (s->mac_reg[IMS] & s->mac_reg[ICR]);
-    if ((!s->mit_irq_level || s->msix) && pending_ints) {
+#ifdef CONFIG_E1000_PARAVIRT
+    if (pending_ints && (!s->mit_irq_level || s->msix)) {
+#else
+    if (pending_ints && !s->mit_irq_level) {
+#endif /* CONFIG_E1000_PARAVIRT */
 	/*
 	 * Here we detect a potential raising edge. We may want to postpone
 	 * raising the interrupt line. We let the interrupt fire in the
@@ -524,7 +528,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 				(pending_ints & (E1000_ICS_RXT0)))) {
 		return;
 	}
-#endif
+#endif /* CONFIG_E1000_PARAVIRT */
 	if (s->mit_on) {
 	    uint32_t mit_delay = 0;
 
@@ -547,6 +551,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 	    }
 	    s->mit_ide = 0;
 	}
+#ifdef CONFIG_E1000_PARAVIRT
         if (s->msix) {
 #define E1000_DATA_INTR (E1000_ICR_TXDW | E1000_ICR_TXQE | E1000_ICS_RXT0 \
                         | E1000_ICS_RXDMT0 | E1000_ICS_RXO)
@@ -559,13 +564,17 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
             if (pending_ints & (E1000_ICR_LSC | E1000_ICR_MDAC))
 	        msix_notify(&s->dev, E1000_MSIX_CTRL_VECTOR);
         }
+#endif /* CONFIG_E1000_PARAVIRT */
 	IFRATE(rate_irq_int++);
     }
 
-    if (!s->msix) {
-        s->mit_irq_level = (pending_ints != 0);
-        qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
+#ifdef CONFIG_E1000_PARAVIRT
+    if (s->msix) {
+        return;
     }
+#endif /* CONFIG_E1000_PARAVIRT */
+    s->mit_irq_level = (pending_ints != 0);
+    qemu_set_irq(s->dev.irq[0], s->mit_irq_level);
 }
 
 /*
