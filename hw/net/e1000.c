@@ -1602,8 +1602,6 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 	hdr = &s->vnet_hdr[s->mac_reg[RDH]];
         if (s->vnet_hdr_ofs) {
 	    memcpy(hdr, vnet_buf, sizeof(struct virtio_net_hdr));
-        } else { /* TODO Move this at initialization time. */
-            memset(hdr, 0, sizeof(struct virtio_net_hdr));
         }
     }
 #endif /* CONFIG_E1000_PARAVIRT */
@@ -2177,6 +2175,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
             len = (s->mac_reg[RDLEN] / sizeof(struct e1000_rx_desc)) * sizeof(struct virtio_net_hdr);
             s->vnet_hdr = address_space_map(pci_dma_context(&s->dev)->as,
                     vnet_hdr_phi, &len, 1 /* is_write */);
+            memset(s->vnet_hdr, 0, len);
             D("vnet-header ring mapped, phi = %lu\n", vnet_hdr_phi);
 
             /* Create an eventfd to use as tx ioeventfd and
