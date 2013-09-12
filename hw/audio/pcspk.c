@@ -25,6 +25,7 @@
 #include "hw/hw.h"
 #include "hw/i386/pc.h"
 #include "hw/isa/isa.h"
+#include "hw/audio/audio.h"
 #include "audio/audio.h"
 #include "qemu/timer.h"
 #include "hw/timer/i8254.h"
@@ -35,8 +36,11 @@
 #define PCSPK_MAX_FREQ (PCSPK_SAMPLE_RATE >> 1)
 #define PCSPK_MIN_COUNT ((PIT_FREQ + PCSPK_MAX_FREQ - 1) / PCSPK_MAX_FREQ)
 
+#define PC_SPEAKER(obj) OBJECT_CHECK(PCSpkState, (obj), TYPE_PC_SPEAKER)
+
 typedef struct {
-    ISADevice dev;
+    ISADevice parent_obj;
+
     MemoryRegion ioport;
     uint32_t iobase;
     uint8_t sample_buf[PCSPK_BUF_LEN];
@@ -105,7 +109,7 @@ static void pcspk_callback(void *opaque, int free)
     }
 }
 
-int pcspk_audio_init(ISABus *bus)
+static int pcspk_audio_init(ISABus *bus)
 {
     PCSpkState *s = pcspk_state;
     struct audsettings as = {PCSPK_SAMPLE_RATE, 1, AUD_FMT_U8, 0};
@@ -159,16 +163,21 @@ static const MemoryRegionOps pcspk_io_ops = {
     },
 };
 
-static int pcspk_initfn(ISADevice *dev)
+static void pcspk_initfn(Object *obj)
 {
-    PCSpkState *s = DO_UPCAST(PCSpkState, dev, dev);
+    PCSpkState *s = PC_SPEAKER(obj);
 
-    memory_region_init_io(&s->ioport, &pcspk_io_ops, s, "elcr", 1);
-    isa_register_ioport(dev, &s->ioport, s->iobase);
+    memory_region_init_io(&s->ioport, OBJECT(s), &pcspk_io_ops, s, "elcr", 1);
+}
+
+static void pcspk_realizefn(DeviceState *dev, Error **errp)
+{
+    ISADevice *isadev = ISA_DEVICE(dev);
+    PCSpkState *s = PC_SPEAKER(dev);
+
+    isa_register_ioport(isadev, &s->ioport, s->iobase);
 
     pcspk_state = s;
-
-    return 0;
 }
 
 static Property pcspk_properties[] = {
@@ -180,22 +189,24 @@ static Property pcspk_properties[] = {
 static void pcspk_class_initfn(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    ISADeviceClass *ic = ISA_DEVICE_CLASS(klass);
 
-    ic->init = pcspk_initfn;
+    dc->realize = pcspk_realizefn;
+    set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
     dc->no_user = 1;
     dc->props = pcspk_properties;
 }
 
 static const TypeInfo pcspk_info = {
-    .name           = "isa-pcspk",
+    .name           = TYPE_PC_SPEAKER,
     .parent         = TYPE_ISA_DEVICE,
     .instance_size  = sizeof(PCSpkState),
+    .instance_init  = pcspk_initfn,
     .class_init     = pcspk_class_initfn,
 };
 
 static void pcspk_register(void)
 {
     type_register_static(&pcspk_info);
+    isa_register_soundhw("pcspk", "PC speaker", pcspk_audio_init);
 }
 type_init(pcspk_register)

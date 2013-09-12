@@ -47,8 +47,12 @@
 
 static const char e3[] = "COPYRIGHT (C) CREATIVE TECHNOLOGY LTD, 1992.";
 
+#define TYPE_SB16 "sb16"
+#define SB16(obj) OBJECT_CHECK (SB16State, (obj), TYPE_SB16)
+
 typedef struct SB16State {
-    ISADevice dev;
+    ISADevice parent_obj;
+
     QEMUSoundCard card;
     qemu_irq pic;
     uint32_t irq;
@@ -764,9 +768,9 @@ static void complete (SB16State *s)
                 }
                 else {
                     if (s->aux_ts) {
-                        qemu_mod_timer (
+                        timer_mod (
                             s->aux_ts,
-                            qemu_get_clock_ns (vm_clock) + ticks
+                            qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ticks
                             );
                     }
                 }
@@ -1352,14 +1356,19 @@ static const MemoryRegionPortio sb16_ioport_list[] = {
 };
 
 
-static int sb16_initfn (ISADevice *dev)
+static void sb16_initfn (Object *obj)
 {
-    SB16State *s;
-
-    s = DO_UPCAST (SB16State, dev, dev);
+    SB16State *s = SB16 (obj);
 
     s->cmd = -1;
-    isa_init_irq (dev, &s->pic, s->irq);
+}
+
+static void sb16_realizefn (DeviceState *dev, Error **errp)
+{
+    ISADevice *isadev = ISA_DEVICE (dev);
+    SB16State *s = SB16 (dev);
+
+    isa_init_irq (isadev, &s->pic, s->irq);
 
     s->mixer_regs[0x80] = magic_of_irq (s->irq);
     s->mixer_regs[0x81] = (1 << s->dma) | (1 << s->hdma);
@@ -1369,24 +1378,23 @@ static int sb16_initfn (ISADevice *dev)
     s->csp_regs[9] = 0xf8;
 
     reset_mixer (s);
-    s->aux_ts = qemu_new_timer_ns (vm_clock, aux_timer, s);
+    s->aux_ts = timer_new_ns(QEMU_CLOCK_VIRTUAL, aux_timer, s);
     if (!s->aux_ts) {
         dolog ("warning: Could not create auxiliary timer\n");
     }
 
-    isa_register_portio_list (dev, s->port, sb16_ioport_list, s, "sb16");
+    isa_register_portio_list (isadev, s->port, sb16_ioport_list, s, "sb16");
 
     DMA_register_channel (s->hdma, SB_read_DMA, s);
     DMA_register_channel (s->dma, SB_read_DMA, s);
     s->can_write = 1;
 
     AUD_register_card ("sb16", &s->card);
-    return 0;
 }
 
-int SB16_init (ISABus *bus)
+static int SB16_init (ISABus *bus)
 {
-    isa_create_simple (bus, "sb16");
+    isa_create_simple (bus, TYPE_SB16);
     return 0;
 }
 
@@ -1402,23 +1410,26 @@ static Property sb16_properties[] = {
 static void sb16_class_initfn (ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS (klass);
-    ISADeviceClass *ic = ISA_DEVICE_CLASS (klass);
-    ic->init = sb16_initfn;
+
+    dc->realize = sb16_realizefn;
+    set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
     dc->desc = "Creative Sound Blaster 16";
     dc->vmsd = &vmstate_sb16;
     dc->props = sb16_properties;
 }
 
 static const TypeInfo sb16_info = {
-    .name          = "sb16",
+    .name          = TYPE_SB16,
     .parent        = TYPE_ISA_DEVICE,
     .instance_size = sizeof (SB16State),
+    .instance_init = sb16_initfn,
     .class_init    = sb16_class_initfn,
 };
 
 static void sb16_register_types (void)
 {
     type_register_static (&sb16_info);
+    isa_register_soundhw("sb16", "Creative Sound Blaster 16", SB16_init);
 }
 
 type_init (sb16_register_types)

@@ -1035,7 +1035,7 @@ static int es1370_initfn (PCIDevice *dev)
     c[PCI_MIN_GNT] = 0x0c;
     c[PCI_MAX_LAT] = 0x80;
 
-    memory_region_init_io (&s->io, &es1370_io_ops, s, "es1370", 256);
+    memory_region_init_io (&s->io, OBJECT(s), &es1370_io_ops, s, "es1370", 256);
     pci_register_bar (&s->dev, 0, PCI_BASE_ADDRESS_SPACE_IO, &s->io);
     qemu_register_reset (es1370_on_reset, s);
 
@@ -1051,7 +1051,7 @@ static void es1370_exitfn (PCIDevice *dev)
     memory_region_destroy (&s->io);
 }
 
-int es1370_init (PCIBus *bus)
+static int es1370_init (PCIBus *bus)
 {
     pci_create_simple (bus, -1, "ES1370");
     return 0;
@@ -1069,6 +1069,7 @@ static void es1370_class_init (ObjectClass *klass, void *data)
     k->class_id = PCI_CLASS_MULTIMEDIA_AUDIO;
     k->subsystem_vendor_id = 0x4942;
     k->subsystem_id = 0x4c4c;
+    set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
     dc->desc = "ENSONIQ AudioPCI ES1370";
     dc->vmsd = &vmstate_es1370;
 }
@@ -1083,6 +1084,7 @@ static const TypeInfo es1370_info = {
 static void es1370_register_types (void)
 {
     type_register_static (&es1370_info);
+    pci_register_soundhw("es1370", "ENSONIQ AudioPCI ES1370", es1370_init);
 }
 
 type_init (es1370_register_types)

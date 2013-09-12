@@ -1,6 +1,14 @@
 #ifndef FW_CFG_H
 #define FW_CFG_H
 
+#ifndef NO_QEMU_PROTOS
+#include <stdint.h>
+#include <stddef.h>
+
+#include "exec/hwaddr.h"
+#include "qemu/typedefs.h"
+#endif
+
 #define FW_CFG_SIGNATURE        0x00
 #define FW_CFG_ID               0x01
 #define FW_CFG_UUID             0x02
@@ -53,7 +61,6 @@ typedef struct FWCfgFiles {
 
 typedef void (*FWCfgCallback)(void *opaque, uint8_t *data);
 
-typedef struct FWCfgState FWCfgState;
 void fw_cfg_add_bytes(FWCfgState *s, uint16_t key, void *data, size_t len);
 void fw_cfg_add_string(FWCfgState *s, uint16_t key, const char *value);
 void fw_cfg_add_i16(FWCfgState *s, uint16_t key, uint16_t value);
@@ -65,6 +72,8 @@ void fw_cfg_add_file(FWCfgState *s, const char *filename, void *data,
                      size_t len);
 FWCfgState *fw_cfg_init(uint32_t ctl_port, uint32_t data_port,
                         hwaddr crl_addr, hwaddr data_addr);
+
+FWCfgState *fw_cfg_find(void);
 
 #endif /* NO_QEMU_PROTOS */
 

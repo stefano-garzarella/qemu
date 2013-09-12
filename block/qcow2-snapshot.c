@@ -189,6 +189,15 @@ static int qcow2_write_snapshots(BlockDriverState *bs)
         return ret;
     }
 
+    /* The snapshot list position has not yet been updated, so these clusters
+     * must indeed be completely free */
+    ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT, offset,
+                                        s->snapshots_size);
+    if (ret < 0) {
+        return ret;
+    }
+
+
     /* Write all snapshots to the new list */
     for(i = 0; i < s->nb_snapshots; i++) {
         sn = s->snapshots + i;
@@ -262,7 +271,8 @@ static int qcow2_write_snapshots(BlockDriverState *bs)
     }
 
     /* free the old snapshot table */
-    qcow2_free_clusters(bs, s->snapshots_offset, s->snapshots_size);
+    qcow2_free_clusters(bs, s->snapshots_offset, s->snapshots_size,
+                        QCOW2_DISCARD_SNAPSHOT);
     s->snapshots_offset = snapshots_offset;
     s->snapshots_size = snapshots_size;
     return 0;
@@ -360,6 +370,12 @@ int qcow2_snapshot_create(BlockDriverState *bs, QEMUSnapshotInfo *sn_info)
     l1_table = g_malloc(s->l1_size * sizeof(uint64_t));
     for(i = 0; i < s->l1_size; i++) {
         l1_table[i] = cpu_to_be64(s->l1_table[i]);
+    }
+
+    ret = qcow2_pre_write_overlap_check(bs, QCOW2_OL_DEFAULT,
+            sn->l1_table_offset, s->l1_size * sizeof(uint64_t));
+    if (ret < 0) {
+        goto fail;
     }
 
     ret = bdrv_pwrite(bs->file, sn->l1_table_offset, l1_table,
@@ -474,6 +490,13 @@ int qcow2_snapshot_goto(BlockDriverState *bs, const char *snapshot_id)
         goto fail;
     }
 
+    ret = qcow2_pre_write_overlap_check(bs,
+            QCOW2_OL_DEFAULT & ~QCOW2_OL_ACTIVE_L1,
+            s->l1_table_offset, cur_l1_bytes);
+    if (ret < 0) {
+        goto fail;
+    }
+
     ret = bdrv_pwrite_sync(bs->file, s->l1_table_offset, sn_l1_table,
                            cur_l1_bytes);
     if (ret < 0) {
@@ -569,7 +592,8 @@ int qcow2_snapshot_delete(BlockDriverState *bs, const char *snapshot_id)
     if (ret < 0) {
         return ret;
     }
-    qcow2_free_clusters(bs, sn.l1_table_offset, sn.l1_size * sizeof(uint64_t));
+    qcow2_free_clusters(bs, sn.l1_table_offset, sn.l1_size * sizeof(uint64_t),
+                        QCOW2_DISCARD_SNAPSHOT);
 
     /* must update the copied flag on the current cluster offsets */
     ret = qcow2_update_snapshot_refcount(bs, s->l1_table_offset, s->l1_size, 0);

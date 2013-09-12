@@ -84,20 +84,6 @@
 # error Unknown pointer size
 #endif
 
-#ifndef CONFIG_IOVEC
-#define CONFIG_IOVEC
-struct iovec {
-    void *iov_base;
-    size_t iov_len;
-};
-/*
- * Use the same value as Linux for now.
- */
-#define IOV_MAX		1024
-#else
-#include <sys/uio.h>
-#endif
-
 typedef int (*fprintf_function)(FILE *f, const char *fmt, ...)
     GCC_FMT_ATTR(2, 3);
 
@@ -122,16 +108,12 @@ static inline char *realpath(const char *path, char *resolved_path)
 void configure_icount(const char *option);
 extern int use_icount;
 
-/* FIXME: Remove NEED_CPU_H.  */
-#ifndef NEED_CPU_H
-
 #include "qemu/osdep.h"
 #include "qemu/bswap.h"
 
-#else
-
+/* FIXME: Remove NEED_CPU_H.  */
+#ifdef NEED_CPU_H
 #include "cpu.h"
-
 #endif /* !defined(NEED_CPU_H) */
 
 /* main function, renamed */
@@ -179,6 +161,7 @@ char *pstrcat(char *buf, int buf_size, const char *s);
 int strstart(const char *str, const char *val, const char **ptr);
 int stristart(const char *str, const char *val, const char **ptr);
 int qemu_strnlen(const char *s, int max_len);
+char *qemu_strsep(char **input, const char *delim);
 time_t mktimegm(struct tm *tm);
 int qemu_fls(int i);
 int qemu_fdatasync(int fd);
@@ -196,6 +179,8 @@ int parse_uint_full(const char *s, unsigned long long *value, int base);
  * A-Z, as strtosz() will use qemu_toupper() on the given argument
  * prior to comparison.
  */
+#define STRTOSZ_DEFSUFFIX_EB	'E'
+#define STRTOSZ_DEFSUFFIX_PB	'P'
 #define STRTOSZ_DEFSUFFIX_TB	'T'
 #define STRTOSZ_DEFSUFFIX_GB	'G'
 #define STRTOSZ_DEFSUFFIX_MB	'M'
@@ -237,6 +222,8 @@ ssize_t qemu_recv_full(int fd, void *buf, size_t count, int flags)
 
 #ifndef _WIN32
 int qemu_pipe(int pipefd[2]);
+/* like openpty() but also makes it raw; return master fd */
+int qemu_openpty_raw(int *aslave, char *pty_name);
 #endif
 
 #ifdef _WIN32
@@ -292,8 +279,10 @@ bool tcg_enabled(void);
 void cpu_exec_init_all(void);
 
 /* CPU save/load.  */
+#ifdef CPU_SAVE_VERSION
 void cpu_save(QEMUFile *f, void *opaque);
 int cpu_load(QEMUFile *f, void *opaque, int version_id);
+#endif
 
 /* Unblock cpu */
 void qemu_cpu_kick_self(void);
@@ -304,15 +293,8 @@ struct qemu_work_item {
     void (*func)(void *data);
     void *data;
     int done;
+    bool free;
 };
-
-#ifdef CONFIG_USER_ONLY
-static inline void qemu_init_vcpu(void *env)
-{
-}
-#else
-void qemu_init_vcpu(void *env);
-#endif
 
 
 /**
@@ -454,12 +436,18 @@ void qemu_hexdump(const char *buf, FILE *fp, const char *prefix, size_t size);
 /* vector definitions */
 #ifdef __ALTIVEC__
 #include <altivec.h>
-#define VECTYPE        vector unsigned char
+/* The altivec.h header says we're allowed to undef these for
+ * C++ compatibility.  Here we don't care about C++, but we
+ * undef them anyway to avoid namespace pollution.
+ */
+#undef vector
+#undef pixel
+#undef bool
+#define VECTYPE        __vector unsigned char
 #define SPLAT(p)       vec_splat(vec_ld(0, p), 0)
 #define ALL_EQ(v1, v2) vec_all_eq(v1, v2)
 /* altivec.h may redefine the bool macro as vector type.
  * Reset it to POSIX semantics. */
-#undef bool
 #define bool _Bool
 #elif defined __SSE2__
 #include <emmintrin.h>

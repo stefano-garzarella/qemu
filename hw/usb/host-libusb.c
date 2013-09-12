@@ -94,7 +94,8 @@ struct USBHostDevice {
     } ifs[USB_MAX_INTERFACES];
 
     /* callbacks & friends */
-    QEMUBH                           *bh;
+    QEMUBH                           *bh_nodev;
+    QEMUBH                           *bh_postld;
     Notifier                         exit;
 
     /* request queues */
@@ -240,7 +241,11 @@ static int usb_host_get_port(libusb_device *dev, char *port, size_t len)
     size_t off;
     int rc, i;
 
+#if LIBUSBX_API_VERSION >= 0x01000102
+    rc = libusb_get_port_numbers(dev, path, 7);
+#else
     rc = libusb_get_port_path(ctx, dev, path, 7);
+#endif
     if (rc < 0) {
         return 0;
     }
@@ -384,7 +389,7 @@ out:
 static void usb_host_req_abort(USBHostRequest *r)
 {
     USBHostDevice  *s = r->host;
-    bool inflight = (r->p && r->p->state == USB_RET_ASYNC);
+    bool inflight = (r->p && r->p->state == USB_PACKET_ASYNC);
 
     if (inflight) {
         r->p->status = USB_RET_NODEV;
@@ -666,6 +671,42 @@ static void usb_host_iso_data_out(USBHostDevice *s, USBPacket *p)
 
 /* ------------------------------------------------------------------------ */
 
+static bool usb_host_full_speed_compat(USBHostDevice *s)
+{
+    struct libusb_config_descriptor *conf;
+    const struct libusb_interface_descriptor *intf;
+    const struct libusb_endpoint_descriptor *endp;
+    uint8_t type;
+    int rc, c, i, a, e;
+
+    for (c = 0;; c++) {
+        rc = libusb_get_config_descriptor(s->dev, c, &conf);
+        if (rc != 0) {
+            break;
+        }
+        for (i = 0; i < conf->bNumInterfaces; i++) {
+            for (a = 0; a < conf->interface[i].num_altsetting; a++) {
+                intf = &conf->interface[i].altsetting[a];
+                for (e = 0; e < intf->bNumEndpoints; e++) {
+                    endp = &intf->endpoint[e];
+                    type = endp->bmAttributes & 0x3;
+                    switch (type) {
+                    case 0x01: /* ISO */
+                        return false;
+                    case 0x03: /* INTERRUPT */
+                        if (endp->wMaxPacketSize > 64) {
+                            return false;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        libusb_free_config_descriptor(conf);
+    }
+    return true;
+}
+
 static void usb_host_ep_update(USBHostDevice *s)
 {
     static const char *tname[] = {
@@ -757,11 +798,9 @@ static int usb_host_open(USBHostDevice *s, libusb_device *dev)
 
     udev->speed     = speed_map[libusb_get_device_speed(dev)];
     udev->speedmask = (1 << udev->speed);
-#if 0
-    if (udev->speed == USB_SPEED_HIGH && usb_linux_full_speed_compat(dev)) {
+    if (udev->speed == USB_SPEED_HIGH && usb_host_full_speed_compat(s)) {
         udev->speedmask |= USB_SPEED_MASK_FULL;
     }
-#endif
 
     if (s->ddesc.iProduct) {
         libusb_get_string_descriptor_ascii(s->dh, s->ddesc.iProduct,
@@ -835,10 +874,10 @@ static void usb_host_nodev_bh(void *opaque)
 
 static void usb_host_nodev(USBHostDevice *s)
 {
-    if (!s->bh) {
-        s->bh = qemu_bh_new(usb_host_nodev_bh, s);
+    if (!s->bh_nodev) {
+        s->bh_nodev = qemu_bh_new(usb_host_nodev_bh, s);
     }
-    qemu_bh_schedule(s->bh);
+    qemu_bh_schedule(s->bh_nodev);
 }
 
 static void usb_host_exit_notifier(struct Notifier *n, void *data)
@@ -856,6 +895,7 @@ static int usb_host_initfn(USBDevice *udev)
     USBHostDevice *s = USB_HOST_DEVICE(udev);
 
     loglevel = s->loglevel;
+    udev->flags |= (1 << USB_DEV_FLAG_IS_HOST);
     udev->auto_attach = 0;
     QTAILQ_INIT(&s->requests);
     QTAILQ_INIT(&s->isorings);
@@ -1228,9 +1268,52 @@ static void usb_host_handle_reset(USBDevice *udev)
     usb_host_ep_update(s);
 }
 
+/*
+ * This is *NOT* about restoring state.  We have absolutely no idea
+ * what state the host device is in at the moment and whenever it is
+ * still present in the first place.  Attemping to contine where we
+ * left off is impossible.
+ *
+ * What we are going to to to here is emulate a surprise removal of
+ * the usb device passed through, then kick host scan so the device
+ * will get re-attached (and re-initialized by the guest) in case it
+ * is still present.
+ *
+ * As the device removal will change the state of other devices (usb
+ * host controller, most likely interrupt controller too) we have to
+ * wait with it until *all* vmstate is loaded.  Thus post_load just
+ * kicks a bottom half which then does the actual work.
+ */
+static void usb_host_post_load_bh(void *opaque)
+{
+    USBHostDevice *dev = opaque;
+    USBDevice *udev = USB_DEVICE(dev);
+
+    if (dev->dh != NULL) {
+        usb_host_close(dev);
+    }
+    if (udev->attached) {
+        usb_device_detach(udev);
+    }
+    usb_host_auto_check(NULL);
+}
+
+static int usb_host_post_load(void *opaque, int version_id)
+{
+    USBHostDevice *dev = opaque;
+
+    if (!dev->bh_postld) {
+        dev->bh_postld = qemu_bh_new(usb_host_post_load_bh, dev);
+    }
+    qemu_bh_schedule(dev->bh_postld);
+    return 0;
+}
+
 static const VMStateDescription vmstate_usb_host = {
     .name = "usb-host",
-    .unmigratable = 1,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .post_load = usb_host_post_load,
     .fields = (VMStateField[]) {
         VMSTATE_USB_DEVICE(parent_obj, USBHostDevice),
         VMSTATE_END_OF_LIST()
@@ -1268,6 +1351,7 @@ static void usb_host_class_initfn(ObjectClass *klass, void *data)
     uc->flush_ep_queue = usb_host_flush_ep_queue;
     dc->vmsd = &vmstate_usb_host;
     dc->props = usb_host_dev_properties;
+    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
 }
 
 static TypeInfo usb_host_dev_info = {
@@ -1378,7 +1462,7 @@ static void usb_host_auto_check(void *unused)
         if (unconnected == 0) {
             /* nothing to watch */
             if (usb_auto_timer) {
-                qemu_del_timer(usb_auto_timer);
+                timer_del(usb_auto_timer);
                 trace_usb_host_auto_scan_disabled();
             }
             return;
@@ -1390,13 +1474,13 @@ static void usb_host_auto_check(void *unused)
         usb_vmstate = qemu_add_vm_change_state_handler(usb_host_vm_state, NULL);
     }
     if (!usb_auto_timer) {
-        usb_auto_timer = qemu_new_timer_ms(rt_clock, usb_host_auto_check, NULL);
+        usb_auto_timer = timer_new_ms(QEMU_CLOCK_REALTIME, usb_host_auto_check, NULL);
         if (!usb_auto_timer) {
             return;
         }
         trace_usb_host_auto_scan_enabled();
     }
-    qemu_mod_timer(usb_auto_timer, qemu_get_clock_ms(rt_clock) + 2000);
+    timer_mod(usb_auto_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 2000);
 }
 
 void usb_host_info(Monitor *mon, const QDict *qdict)

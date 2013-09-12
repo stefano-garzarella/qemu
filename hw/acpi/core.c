@@ -419,7 +419,8 @@ void acpi_pm1_evt_init(ACPIREGS *ar, acpi_update_sci_fn update_sci,
                        MemoryRegion *parent)
 {
     ar->pm1.evt.update_sci = update_sci;
-    memory_region_init_io(&ar->pm1.evt.io, &acpi_pm_evt_ops, ar, "acpi-evt", 4);
+    memory_region_init_io(&ar->pm1.evt.io, memory_region_owner(parent),
+                          &acpi_pm_evt_ops, ar, "acpi-evt", 4);
     memory_region_add_subregion(parent, 0, &ar->pm1.evt.io);
 }
 
@@ -432,9 +433,9 @@ void acpi_pm_tmr_update(ACPIREGS *ar, bool enable)
     if (enable) {
         expire_time = muldiv64(ar->tmr.overflow_time, get_ticks_per_sec(),
                                PM_TIMER_FREQUENCY);
-        qemu_mod_timer(ar->tmr.timer, expire_time);
+        timer_mod(ar->tmr.timer, expire_time);
     } else {
-        qemu_del_timer(ar->tmr.timer);
+        timer_del(ar->tmr.timer);
     }
 }
 
@@ -462,8 +463,15 @@ static uint64_t acpi_pm_tmr_read(void *opaque, hwaddr addr, unsigned width)
     return acpi_pm_tmr_get(opaque);
 }
 
+static void acpi_pm_tmr_write(void *opaque, hwaddr addr, uint64_t val,
+                              unsigned width)
+{
+    /* nothing */
+}
+
 static const MemoryRegionOps acpi_pm_tmr_ops = {
     .read = acpi_pm_tmr_read,
+    .write = acpi_pm_tmr_write,
     .valid.min_access_size = 4,
     .valid.max_access_size = 4,
     .endianness = DEVICE_LITTLE_ENDIAN,
@@ -473,15 +481,16 @@ void acpi_pm_tmr_init(ACPIREGS *ar, acpi_update_sci_fn update_sci,
                       MemoryRegion *parent)
 {
     ar->tmr.update_sci = update_sci;
-    ar->tmr.timer = qemu_new_timer_ns(vm_clock, acpi_pm_tmr_timer, ar);
-    memory_region_init_io(&ar->tmr.io, &acpi_pm_tmr_ops, ar, "acpi-tmr", 4);
+    ar->tmr.timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, acpi_pm_tmr_timer, ar);
+    memory_region_init_io(&ar->tmr.io, memory_region_owner(parent),
+                          &acpi_pm_tmr_ops, ar, "acpi-tmr", 4);
     memory_region_add_subregion(parent, 8, &ar->tmr.io);
 }
 
 void acpi_pm_tmr_reset(ACPIREGS *ar)
 {
     ar->tmr.overflow_time = 0;
-    qemu_del_timer(ar->tmr.timer);
+    timer_del(ar->tmr.timer);
 }
 
 /* ACPI PM1aCNT */
@@ -545,7 +554,8 @@ void acpi_pm1_cnt_init(ACPIREGS *ar, MemoryRegion *parent, uint8_t s4_val)
     ar->pm1.cnt.s4_val = s4_val;
     ar->wakeup.notify = acpi_notify_wakeup;
     qemu_register_wakeup_notifier(&ar->wakeup);
-    memory_region_init_io(&ar->pm1.cnt.io, &acpi_pm_cnt_ops, ar, "acpi-cnt", 2);
+    memory_region_init_io(&ar->pm1.cnt.io, memory_region_owner(parent),
+                          &acpi_pm_cnt_ops, ar, "acpi-cnt", 2);
     memory_region_add_subregion(parent, 4, &ar->pm1.cnt.io);
 }
 

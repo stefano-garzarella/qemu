@@ -249,7 +249,7 @@ typedef struct InterfaceInfo InterfaceInfo;
  *     MyClass parent_class;
  *
  *     MyDoSomething parent_do_something;
- * } MyClass;
+ * } DerivedClass;
  *
  * static void derived_do_something(MyState *obj)
  * {
@@ -344,6 +344,8 @@ typedef void (ObjectUnparent)(Object *obj);
  */
 typedef void (ObjectFree)(void *obj);
 
+#define OBJECT_CLASS_CAST_CACHE 4
+
 /**
  * ObjectClass:
  *
@@ -355,6 +357,8 @@ struct ObjectClass
     /*< private >*/
     Type type;
     GSList *interfaces;
+
+    const char *cast_cache[OBJECT_CLASS_CAST_CACHE];
 
     ObjectUnparent *unparent;
 };
@@ -394,6 +398,8 @@ struct Object
  * @instance_init: This function is called to initialize an object.  The parent
  *   class will have already been initialized so the type is only responsible
  *   for initializing its own members.
+ * @instance_post_init: This function is called to finish initialization of
+ *   an object, after all @instance_init functions were called.
  * @instance_finalize: This function is called during object destruction.  This
  *   is called before the parent @instance_finalize function has been called.
  *   An object should only free the members that are unique to its type in this
@@ -429,6 +435,7 @@ struct TypeInfo
 
     size_t instance_size;
     void (*instance_init)(Object *obj);
+    void (*instance_post_init)(Object *obj);
     void (*instance_finalize)(Object *obj);
 
     bool abstract;
@@ -476,7 +483,8 @@ struct TypeInfo
  * generated.
  */
 #define OBJECT_CHECK(type, obj, name) \
-    ((type *)object_dynamic_cast_assert(OBJECT(obj), (name)))
+    ((type *)object_dynamic_cast_assert(OBJECT(obj), (name), \
+                                        __FILE__, __LINE__, __func__))
 
 /**
  * OBJECT_CLASS_CHECK:
@@ -489,7 +497,8 @@ struct TypeInfo
  * specific class type.
  */
 #define OBJECT_CLASS_CHECK(class, obj, name) \
-    ((class *)object_class_dynamic_cast_assert(OBJECT_CLASS(obj), (name)))
+    ((class *)object_class_dynamic_cast_assert(OBJECT_CLASS(obj), (name), \
+                                               __FILE__, __LINE__, __func__))
 
 /**
  * OBJECT_GET_CLASS:
@@ -547,7 +556,8 @@ struct InterfaceClass
  * Returns: @obj casted to @interface if cast is valid, otherwise raise error.
  */
 #define INTERFACE_CHECK(interface, obj, name) \
-    ((interface *)object_dynamic_cast_assert(OBJECT((obj)), (name)))
+    ((interface *)object_dynamic_cast_assert(OBJECT((obj)), (name), \
+                                             __FILE__, __LINE__, __func__))
 
 /**
  * object_new:
@@ -575,25 +585,27 @@ Object *object_new_with_type(Type type);
 
 /**
  * object_initialize_with_type:
- * @obj: A pointer to the memory to be used for the object.
+ * @data: A pointer to the memory to be used for the object.
+ * @size: The maximum size available at @data for the object.
  * @type: The type of the object to instantiate.
  *
  * This function will initialize an object.  The memory for the object should
  * have already been allocated.  The returned object has a reference count of 1,
  * and will be finalized when the last reference is dropped.
  */
-void object_initialize_with_type(void *data, Type type);
+void object_initialize_with_type(void *data, size_t size, Type type);
 
 /**
  * object_initialize:
  * @obj: A pointer to the memory to be used for the object.
+ * @size: The maximum size available at @obj for the object.
  * @typename: The name of the type of the object to instantiate.
  *
  * This function will initialize an object.  The memory for the object should
  * have already been allocated.  The returned object has a reference count of 1,
  * and will be finalized when the last reference is dropped.
  */
-void object_initialize(void *obj, const char *typename);
+void object_initialize(void *obj, size_t size, const char *typename);
 
 /**
  * object_dynamic_cast:
@@ -612,9 +624,12 @@ Object *object_dynamic_cast(Object *obj, const char *typename);
  *
  * See object_dynamic_cast() for a description of the parameters of this
  * function.  The only difference in behavior is that this function asserts
- * instead of returning #NULL on failure.
+ * instead of returning #NULL on failure if QOM cast debugging is enabled.
+ * This function is not meant to be called directly, but only through
+ * the wrapper macro OBJECT_CHECK.
  */
-Object *object_dynamic_cast_assert(Object *obj, const char *typename);
+Object *object_dynamic_cast_assert(Object *obj, const char *typename,
+                                   const char *file, int line, const char *func);
 
 /**
  * object_get_class:
@@ -659,11 +674,31 @@ Type type_register(const TypeInfo *info);
  * @klass: The #ObjectClass to attempt to cast.
  * @typename: The QOM typename of the class to cast to.
  *
- * Returns: This function always returns @klass and asserts on failure.
+ * See object_class_dynamic_cast() for a description of the parameters
+ * of this function.  The only difference in behavior is that this function
+ * asserts instead of returning #NULL on failure if QOM cast debugging is
+ * enabled.  This function is not meant to be called directly, but only through
+ * the wrapper macros OBJECT_CLASS_CHECK and INTERFACE_CHECK.
  */
 ObjectClass *object_class_dynamic_cast_assert(ObjectClass *klass,
-                                              const char *typename);
+                                              const char *typename,
+                                              const char *file, int line,
+                                              const char *func);
 
+/**
+ * object_class_dynamic_cast:
+ * @klass: The #ObjectClass to attempt to cast.
+ * @typename: The QOM typename of the class to cast to.
+ *
+ * Returns: If @typename is a class, this function returns @klass if
+ * @typename is a subtype of @klass, else returns #NULL.
+ *
+ * If @typename is an interface, this function returns the interface
+ * definition for @klass if @klass implements it unambiguously; #NULL
+ * is returned if @klass does not implement the interface or if multiple
+ * classes or interfaces on the hierarchy leading to @klass implement
+ * it.  (FIXME: perhaps this can be detected at type definition time?)
+ */
 ObjectClass *object_class_dynamic_cast(ObjectClass *klass,
                                        const char *typename);
 

@@ -162,6 +162,7 @@ int qdev_init(DeviceState *dev)
 
     object_property_set_bool(OBJECT(dev), true, "realized", &local_err);
     if (local_err != NULL) {
+        qerror_report_err(local_err);
         error_free(local_err);
         qdev_free(dev);
         return -1;
@@ -207,7 +208,7 @@ void qdev_unplug(DeviceState *dev, Error **errp)
 {
     DeviceClass *dc = DEVICE_GET_CLASS(dev);
 
-    if (!dev->parent_bus->allow_hotplug) {
+    if (dev->parent_bus && !dev->parent_bus->allow_hotplug) {
         error_set(errp, QERR_BUS_NO_HOTPLUG, dev->parent_bus->name);
         return;
     }
@@ -469,10 +470,10 @@ static void bus_unparent(Object *obj)
     }
 }
 
-void qbus_create_inplace(void *bus, const char *typename,
+void qbus_create_inplace(void *bus, size_t size, const char *typename,
                          DeviceState *parent, const char *name)
 {
-    object_initialize(bus, typename);
+    object_initialize(bus, size, typename);
     qbus_realize(bus, parent, name);
 }
 
@@ -514,7 +515,7 @@ static int qdev_get_fw_dev_path_helper(DeviceState *dev, char *p, int size)
             l += snprintf(p + l, size - l, "%s", d);
             g_free(d);
         } else {
-            l += snprintf(p + l, size - l, "%s", object_get_typename(OBJECT(dev)));
+            return l;
         }
     }
     l += snprintf(p + l , size - l, "/");
@@ -751,10 +752,23 @@ static void device_initfn(Object *obj)
         }
         class = object_class_get_parent(class);
     } while (class != object_class_by_name(TYPE_DEVICE));
-    qdev_prop_set_globals(dev);
+    if (err != NULL) {
+        qerror_report_err(err);
+        error_free(err);
+        exit(1);
+    }
 
     object_property_add_link(OBJECT(dev), "parent_bus", TYPE_BUS,
                              (Object **)&dev->parent_bus, &err);
+    assert_no_error(err);
+}
+
+static void device_post_init(Object *obj)
+{
+    DeviceState *dev = DEVICE(obj);
+    Error *err = NULL;
+
+    qdev_prop_set_globals(dev, &err);
     assert_no_error(err);
 }
 
@@ -847,6 +861,7 @@ static const TypeInfo device_type_info = {
     .parent = TYPE_OBJECT,
     .instance_size = sizeof(DeviceState),
     .instance_init = device_initfn,
+    .instance_post_init = device_post_init,
     .instance_finalize = device_finalize,
     .class_base_init = device_class_base_init,
     .class_init = device_class_init,
@@ -861,9 +876,17 @@ static void qbus_initfn(Object *obj)
     QTAILQ_INIT(&bus->children);
 }
 
+static char *default_bus_get_fw_dev_path(DeviceState *dev)
+{
+    return g_strdup(object_get_typename(OBJECT(dev)));
+}
+
 static void bus_class_init(ObjectClass *class, void *data)
 {
+    BusClass *bc = BUS_CLASS(class);
+
     class->unparent = bus_unparent;
+    bc->get_fw_dev_path = default_bus_get_fw_dev_path;
 }
 
 static void qbus_finalize(Object *obj)

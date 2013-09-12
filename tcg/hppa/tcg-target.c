@@ -22,6 +22,10 @@
  * THE SOFTWARE.
  */
 
+#if TCG_TARGET_REG_BITS != 32
+#error unsupported
+#endif
+
 #ifndef NDEBUG
 static const char * const tcg_target_reg_names[TCG_TARGET_NB_REGS] = {
     "%r0", "%r1", "%rp", "%r3", "%r4", "%r5", "%r6", "%r7",
@@ -145,14 +149,14 @@ static int reassemble_21(int as21)
 #define R_PARISC_PCREL12F  R_PARISC_NONE
 
 static void patch_reloc(uint8_t *code_ptr, int type,
-                        tcg_target_long value, tcg_target_long addend)
+                        intptr_t value, intptr_t addend)
 {
     uint32_t *insn_ptr = (uint32_t *)code_ptr;
     uint32_t insn = *insn_ptr;
-    tcg_target_long pcrel;
+    intptr_t pcrel;
 
     value += addend;
-    pcrel = (value - ((tcg_target_long)code_ptr + 8)) >> 2;
+    pcrel = (value - ((intptr_t)code_ptr + 8)) >> 2;
 
     switch (type) {
     case R_PARISC_PCREL12F:
@@ -388,14 +392,14 @@ static void tcg_out_ldst(TCGContext *s, int ret, int addr,
 
 /* This function is required by tcg.c.  */
 static inline void tcg_out_ld(TCGContext *s, TCGType type, TCGReg ret,
-                              TCGReg arg1, tcg_target_long arg2)
+                              TCGReg arg1, intptr_t arg2)
 {
     tcg_out_ldst(s, ret, arg1, arg2, INSN_LDW);
 }
 
 /* This function is required by tcg.c.  */
 static inline void tcg_out_st(TCGContext *s, TCGType type, TCGReg ret,
-                              TCGReg arg1, tcg_target_long arg2)
+                              TCGReg arg1, intptr_t arg2)
 {
     tcg_out_ldst(s, ret, arg1, arg2, INSN_STW);
 }
@@ -906,8 +910,6 @@ static void tcg_out_movcond(TCGContext *s, int cond, TCGArg ret,
 }
 
 #if defined(CONFIG_SOFTMMU)
-#include "exec/softmmu_defs.h"
-
 /* helper signature: helper_ld_mmu(CPUState *env, target_ulong addr,
    int mmu_idx) */
 static const void * const qemu_ld_helpers[4] = {
@@ -1766,28 +1768,11 @@ static void tcg_target_init(TCGContext *s)
 }
 
 typedef struct {
-    uint32_t len __attribute__((aligned((sizeof(void *)))));
-    uint32_t id;
-    uint8_t version;
-    char augmentation[1];
-    uint8_t code_align;
-    uint8_t data_align;
-    uint8_t return_column;
-} DebugFrameCIE;
-
-typedef struct {
-    uint32_t len __attribute__((aligned((sizeof(void *)))));
-    uint32_t cie_offset;
-    tcg_target_long func_start __attribute__((packed));
-    tcg_target_long func_len __attribute__((packed));
-    uint8_t def_cfa[4];
-    uint8_t ret_ofs[3];
-    uint8_t reg_ofs[ARRAY_SIZE(tcg_target_callee_save_regs) * 2];
-} DebugFrameFDE;
-
-typedef struct {
     DebugFrameCIE cie;
-    DebugFrameFDE fde;
+    DebugFrameFDEHeader fde;
+    uint8_t fde_def_cfa[4];
+    uint8_t fde_ret_ofs[3];
+    uint8_t fde_reg_ofs[ARRAY_SIZE(tcg_target_callee_save_regs) * 2];
 } DebugFrame;
 
 #define ELF_HOST_MACHINE  EM_PARISC
@@ -1806,16 +1791,18 @@ static DebugFrame debug_frame = {
     .cie.data_align = 1,
     .cie.return_column = 2,
 
-    .fde.len = sizeof(DebugFrameFDE)-4, /* length after .len member */
-    .fde.def_cfa = {
+    /* Total FDE size does not include the "len" member.  */
+    .fde.len = sizeof(DebugFrame) - offsetof(DebugFrame, fde.cie_offset),
+
+    .fde_def_cfa = {
         0x12, 30,                       /* DW_CFA_def_cfa_sf sp, ... */
         (-FRAME_SIZE & 0x7f) | 0x80,     /* ... sleb128 -FRAME_SIZE */
         (-FRAME_SIZE >> 7) & 0x7f
     },
-    .fde.ret_ofs = {
+    .fde_ret_ofs = {
         0x11, 2, (-20 / 4) & 0x7f       /* DW_CFA_offset_extended_sf r2, 20 */
     },
-    .fde.reg_ofs = {
+    .fde_reg_ofs = {
         /* This must match the ordering in tcg_target_callee_save_regs.  */
         0x80 + 4, 0,                    /* DW_CFA_offset r4, 0 */
         0x80 + 5, 4,                    /* DW_CFA_offset r5, 4 */

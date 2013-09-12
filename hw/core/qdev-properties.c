@@ -74,13 +74,14 @@ static void bit_prop_set(DeviceState *dev, Property *props, bool val)
     }
 }
 
-static int print_bit(DeviceState *dev, Property *prop, char *dest, size_t len)
+static int prop_print_bit(DeviceState *dev, Property *prop, char *dest,
+                          size_t len)
 {
     uint32_t *p = qdev_get_prop_ptr(dev, prop);
     return snprintf(dest, len, (*p & qdev_get_prop_mask(prop)) ? "on" : "off");
 }
 
-static void get_bit(Object *obj, Visitor *v, void *opaque,
+static void prop_get_bit(Object *obj, Visitor *v, void *opaque,
                     const char *name, Error **errp)
 {
     DeviceState *dev = DEVICE(obj);
@@ -91,7 +92,7 @@ static void get_bit(Object *obj, Visitor *v, void *opaque,
     visit_type_bool(v, &value, name, errp);
 }
 
-static void set_bit(Object *obj, Visitor *v, void *opaque,
+static void prop_set_bit(Object *obj, Visitor *v, void *opaque,
                     const char *name, Error **errp)
 {
     DeviceState *dev = DEVICE(obj);
@@ -115,9 +116,9 @@ static void set_bit(Object *obj, Visitor *v, void *opaque,
 PropertyInfo qdev_prop_bit = {
     .name  = "boolean",
     .legacy_name  = "on/off",
-    .print = print_bit,
-    .get   = get_bit,
-    .set   = set_bit,
+    .print = prop_print_bit,
+    .get   = prop_get_bit,
+    .set   = prop_set_bit,
 };
 
 /* --- bool --- */
@@ -986,25 +987,18 @@ void error_set_from_qdev_prop_error(Error **errp, int ret, DeviceState *dev,
     }
 }
 
-int qdev_prop_parse(DeviceState *dev, const char *name, const char *value)
+void qdev_prop_parse(DeviceState *dev, const char *name, const char *value,
+                     Error **errp)
 {
     char *legacy_name;
-    Error *err = NULL;
 
     legacy_name = g_strdup_printf("legacy-%s", name);
     if (object_property_get_type(OBJECT(dev), legacy_name, NULL)) {
-        object_property_parse(OBJECT(dev), value, legacy_name, &err);
+        object_property_parse(OBJECT(dev), value, legacy_name, errp);
     } else {
-        object_property_parse(OBJECT(dev), value, name, &err);
+        object_property_parse(OBJECT(dev), value, name, errp);
     }
     g_free(legacy_name);
-
-    if (err) {
-        qerror_report_err(err);
-        error_free(err);
-        return -1;
-    }
-    return 0;
 }
 
 void qdev_prop_set_bit(DeviceState *dev, const char *name, bool value)
@@ -1106,20 +1100,99 @@ void qdev_prop_register_global_list(GlobalProperty *props)
     }
 }
 
-void qdev_prop_set_globals(DeviceState *dev)
+void qdev_prop_set_globals_for_type(DeviceState *dev, const char *typename,
+                                    Error **errp)
+{
+    GlobalProperty *prop;
+
+    QTAILQ_FOREACH(prop, &global_props, next) {
+        Error *err = NULL;
+
+        if (strcmp(typename, prop->driver) != 0) {
+            continue;
+        }
+        qdev_prop_parse(dev, prop->property, prop->value, &err);
+        if (err != NULL) {
+            error_propagate(errp, err);
+            return;
+        }
+    }
+}
+
+void qdev_prop_set_globals(DeviceState *dev, Error **errp)
 {
     ObjectClass *class = object_get_class(OBJECT(dev));
 
     do {
-        GlobalProperty *prop;
-        QTAILQ_FOREACH(prop, &global_props, next) {
-            if (strcmp(object_class_get_name(class), prop->driver) != 0) {
-                continue;
-            }
-            if (qdev_prop_parse(dev, prop->property, prop->value) != 0) {
-                exit(1);
-            }
+        Error *err = NULL;
+
+        qdev_prop_set_globals_for_type(dev, object_class_get_name(class),
+                                       &err);
+        if (err != NULL) {
+            error_propagate(errp, err);
+            return;
         }
         class = object_class_get_parent(class);
     } while (class);
 }
+
+/* --- 64bit unsigned int 'size' type --- */
+
+static void get_size(Object *obj, Visitor *v, void *opaque,
+                     const char *name, Error **errp)
+{
+    DeviceState *dev = DEVICE(obj);
+    Property *prop = opaque;
+    uint64_t *ptr = qdev_get_prop_ptr(dev, prop);
+
+    visit_type_size(v, ptr, name, errp);
+}
+
+static void set_size(Object *obj, Visitor *v, void *opaque,
+                     const char *name, Error **errp)
+{
+    DeviceState *dev = DEVICE(obj);
+    Property *prop = opaque;
+    uint64_t *ptr = qdev_get_prop_ptr(dev, prop);
+
+    visit_type_size(v, ptr, name, errp);
+}
+
+static int parse_size(DeviceState *dev, Property *prop, const char *str)
+{
+    uint64_t *ptr = qdev_get_prop_ptr(dev, prop);
+    Error *errp = NULL;
+
+    if (str != NULL) {
+        parse_option_size(prop->name, str, ptr, &errp);
+    }
+    assert_no_error(errp);
+    return 0;
+}
+
+static int print_size(DeviceState *dev, Property *prop, char *dest, size_t len)
+{
+    static const char suffixes[] = { 'B', 'K', 'M', 'G', 'T' };
+    uint64_t div, val = *(uint64_t *)qdev_get_prop_ptr(dev, prop);
+    int i;
+
+    /* Compute floor(log2(val)).  */
+    i = 64 - clz64(val);
+
+    /* Find the power of 1024 that we'll display as the units.  */
+    i /= 10;
+    if (i >= ARRAY_SIZE(suffixes)) {
+        i = ARRAY_SIZE(suffixes) - 1;
+    }
+    div = 1ULL << (i * 10);
+
+    return snprintf(dest, len, "%0.03f%c", (double)val/div, suffixes[i]);
+}
+
+PropertyInfo qdev_prop_size = {
+    .name  = "size",
+    .parse = parse_size,
+    .print = print_size,
+    .get = get_size,
+    .set = set_size,
+};

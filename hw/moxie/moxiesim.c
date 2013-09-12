@@ -1,7 +1,7 @@
 /*
  * QEMU/moxiesim emulation
  *
- * Emulates a very simple machine model similiar to the one use by the
+ * Emulates a very simple machine model similar to the one used by the
  * GDB moxie simulator.
  *
  * Copyright (c) 2008, 2009, 2010, 2013 Anthony Green
@@ -136,11 +136,11 @@ static void moxiesim_init(QEMUMachineInitArgs *args)
     qemu_register_reset(main_cpu_reset, cpu);
 
     /* Allocate RAM. */
-    memory_region_init_ram(ram, "moxiesim.ram", ram_size);
+    memory_region_init_ram(ram, NULL, "moxiesim.ram", ram_size);
     vmstate_register_ram_global(ram);
     memory_region_add_subregion(address_space_mem, ram_base, ram);
 
-    memory_region_init_ram(rom, "moxie.rom", 128*0x1000);
+    memory_region_init_ram(rom, NULL, "moxie.rom", 128*0x1000);
     vmstate_register_ram_global(rom);
     memory_region_add_subregion(get_system_memory(), 0x1000, rom);
 

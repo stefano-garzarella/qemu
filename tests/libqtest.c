@@ -99,8 +99,8 @@ static pid_t qtest_qemu_pid(QTestState *s)
         if (fgets(buffer, sizeof(buffer), f)) {
             pid = atoi(buffer);
         }
+        fclose(f);
     }
-    fclose(f);
     return pid;
 }
 
@@ -171,12 +171,16 @@ void qtest_quit(QTestState *s)
         waitpid(pid, &status, 0);
     }
 
+    close(s->fd);
+    close(s->qmp_fd);
+    g_string_free(s->rx, true);
     unlink(s->pid_file);
     unlink(s->socket_path);
     unlink(s->qmp_socket_path);
     g_free(s->pid_file);
     g_free(s->socket_path);
     g_free(s->qmp_socket_path);
+    g_free(s);
 }
 
 static void socket_sendf(int fd, const char *fmt, va_list ap)

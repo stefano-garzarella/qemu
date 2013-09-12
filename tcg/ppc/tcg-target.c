@@ -204,7 +204,7 @@ static void reloc_pc14 (void *pc, tcg_target_long target)
 }
 
 static void patch_reloc(uint8_t *code_ptr, int type,
-                        tcg_target_long value, tcg_target_long addend)
+                        intptr_t value, intptr_t addend)
 {
     value += addend;
     switch (type) {
@@ -548,8 +548,6 @@ static void add_qemu_ldst_label (TCGContext *s,
     label->raddr = raddr;
     label->label_ptr[0] = label_ptr;
 }
-
-#include "exec/softmmu_defs.h"
 
 /* helper signature: helper_ld_mmu(CPUState *env, target_ulong addr,
    int mmu_idx) */
@@ -1062,14 +1060,14 @@ static void tcg_target_qemu_prologue (TCGContext *s)
 #endif
 }
 
-static void tcg_out_ld (TCGContext *s, TCGType type, TCGReg ret, TCGReg arg1,
-                        tcg_target_long arg2)
+static void tcg_out_ld(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg1,
+                       intptr_t arg2)
 {
     tcg_out_ldst (s, ret, arg1, arg2, LWZ, LWZX);
 }
 
-static void tcg_out_st (TCGContext *s, TCGType type, TCGReg arg, TCGReg arg1,
-                        tcg_target_long arg2)
+static void tcg_out_st(TCGContext *s, TCGType type, TCGReg arg, TCGReg arg1,
+                       intptr_t arg2)
 {
     tcg_out_ldst (s, arg, arg1, arg2, STW, STWX);
 }
@@ -1671,18 +1669,6 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, const TCGArg *args,
         tcg_out32 (s, DIVWU | TAB (args[0], args[1], args[2]));
         break;
 
-    case INDEX_op_rem_i32:
-        tcg_out32 (s, DIVW | TAB (0, args[1], args[2]));
-        tcg_out32 (s, MULLW | TAB (0, 0, args[2]));
-        tcg_out32 (s, SUBF | TAB (args[0], 0, args[1]));
-        break;
-
-    case INDEX_op_remu_i32:
-        tcg_out32 (s, DIVWU | TAB (0, args[1], args[2]));
-        tcg_out32 (s, MULLW | TAB (0, 0, args[2]));
-        tcg_out32 (s, SUBF | TAB (args[0], 0, args[1]));
-        break;
-
     case INDEX_op_mulu2_i32:
         if (args[0] == args[2] || args[0] == args[3]) {
             tcg_out32 (s, MULLW | TAB (0, args[2], args[3]));
@@ -1992,8 +1978,6 @@ static const TCGTargetOpDef ppc_op_defs[] = {
     { INDEX_op_mul_i32, { "r", "r", "ri" } },
     { INDEX_op_div_i32, { "r", "r", "r" } },
     { INDEX_op_divu_i32, { "r", "r", "r" } },
-    { INDEX_op_rem_i32, { "r", "r", "r" } },
-    { INDEX_op_remu_i32, { "r", "r", "r" } },
     { INDEX_op_mulu2_i32, { "r", "r", "r", "r" } },
     { INDEX_op_sub_i32, { "r", "r", "ri" } },
     { INDEX_op_and_i32, { "r", "r", "ri" } },

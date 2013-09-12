@@ -19,8 +19,11 @@
 #include "qemu/atomic.h"
 #include "hw/virtio/virtio-bus.h"
 
-/* The alignment to use between consumer and producer parts of vring.
- * x86 pagesize again. */
+/*
+ * The alignment to use between consumer and producer parts of vring.
+ * x86 pagesize again. This is the default, used by transports like PCI
+ * which don't provide a means for the guest to tell the host the alignment.
+ */
 #define VIRTIO_PCI_VRING_ALIGN         4096
 
 typedef struct VRingDesc
@@ -54,6 +57,7 @@ typedef struct VRingUsed
 typedef struct VRing
 {
     unsigned int num;
+    unsigned int align;
     hwaddr desc;
     hwaddr avail;
     hwaddr used;
@@ -93,7 +97,7 @@ static void virtqueue_init(VirtQueue *vq)
     vq->vring.avail = pa + vq->vring.num * sizeof(VRingDesc);
     vq->vring.used = vring_align(vq->vring.avail +
                                  offsetof(VRingAvail, ring[vq->vring.num]),
-                                 VIRTIO_PCI_VRING_ALIGN);
+                                 vq->vring.align);
 }
 
 static inline uint64_t vring_desc_addr(hwaddr desc_pa, int i)
@@ -373,8 +377,8 @@ void virtqueue_get_avail_bytes(VirtQueue *vq, unsigned int *in_bytes,
             /* loop over the indirect descriptor table */
             indirect = 1;
             max = vring_desc_len(desc_pa, i) / sizeof(VRingDesc);
-            num_bufs = i = 0;
             desc_pa = vring_desc_addr(desc_pa, i);
+            num_bufs = i = 0;
         }
 
         do {
@@ -568,10 +572,11 @@ uint32_t virtio_config_readb(VirtIODevice *vdev, uint32_t addr)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint8_t val;
 
-    k->get_config(vdev, vdev->config);
-
-    if (addr > (vdev->config_len - sizeof(val)))
+    if (addr + sizeof(val) > vdev->config_len) {
         return (uint32_t)-1;
+    }
+
+    k->get_config(vdev, vdev->config);
 
     val = ldub_p(vdev->config + addr);
     return val;
@@ -582,10 +587,11 @@ uint32_t virtio_config_readw(VirtIODevice *vdev, uint32_t addr)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint16_t val;
 
-    k->get_config(vdev, vdev->config);
-
-    if (addr > (vdev->config_len - sizeof(val)))
+    if (addr + sizeof(val) > vdev->config_len) {
         return (uint32_t)-1;
+    }
+
+    k->get_config(vdev, vdev->config);
 
     val = lduw_p(vdev->config + addr);
     return val;
@@ -596,10 +602,11 @@ uint32_t virtio_config_readl(VirtIODevice *vdev, uint32_t addr)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint32_t val;
 
-    k->get_config(vdev, vdev->config);
-
-    if (addr > (vdev->config_len - sizeof(val)))
+    if (addr + sizeof(val) > vdev->config_len) {
         return (uint32_t)-1;
+    }
+
+    k->get_config(vdev, vdev->config);
 
     val = ldl_p(vdev->config + addr);
     return val;
@@ -610,8 +617,9 @@ void virtio_config_writeb(VirtIODevice *vdev, uint32_t addr, uint32_t data)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint8_t val = data;
 
-    if (addr > (vdev->config_len - sizeof(val)))
+    if (addr + sizeof(val) > vdev->config_len) {
         return;
+    }
 
     stb_p(vdev->config + addr, val);
 
@@ -625,8 +633,9 @@ void virtio_config_writew(VirtIODevice *vdev, uint32_t addr, uint32_t data)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint16_t val = data;
 
-    if (addr > (vdev->config_len - sizeof(val)))
+    if (addr + sizeof(val) > vdev->config_len) {
         return;
+    }
 
     stw_p(vdev->config + addr, val);
 
@@ -640,8 +649,9 @@ void virtio_config_writel(VirtIODevice *vdev, uint32_t addr, uint32_t data)
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint32_t val = data;
 
-    if (addr > (vdev->config_len - sizeof(val)))
+    if (addr + sizeof(val) > vdev->config_len) {
         return;
+    }
 
     stl_p(vdev->config + addr, val);
 
@@ -661,6 +671,20 @@ hwaddr virtio_queue_get_addr(VirtIODevice *vdev, int n)
     return vdev->vq[n].pa;
 }
 
+void virtio_queue_set_num(VirtIODevice *vdev, int n, int num)
+{
+    /* Don't allow guest to flip queue between existent and
+     * nonexistent states, or to set it to an invalid size.
+     */
+    if (!!num != !!vdev->vq[n].vring.num ||
+        num > VIRTQUEUE_MAX_SIZE ||
+        num < 0) {
+        return;
+    }
+    vdev->vq[n].vring.num = num;
+    virtqueue_init(&vdev->vq[n]);
+}
+
 int virtio_queue_get_num(VirtIODevice *vdev, int n)
 {
     return vdev->vq[n].vring.num;
@@ -671,6 +695,21 @@ int virtio_queue_get_id(VirtQueue *vq)
     VirtIODevice *vdev = vq->vdev;
     assert(vq >= &vdev->vq[0] && vq < &vdev->vq[VIRTIO_PCI_QUEUE_MAX]);
     return vq - &vdev->vq[0];
+}
+
+void virtio_queue_set_align(VirtIODevice *vdev, int n, int align)
+{
+    BusState *qbus = qdev_get_parent_bus(DEVICE(vdev));
+    VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(qbus);
+
+    /* Check that the transport told us it was going to do this
+     * (so a buggy transport will immediately assert rather than
+     * silently failing to migrate this state)
+     */
+    assert(k->has_variable_vring_alignment);
+
+    vdev->vq[n].vring.align = align;
+    virtqueue_init(&vdev->vq[n]);
 }
 
 void virtio_queue_notify_vq(VirtQueue *vq)
@@ -713,6 +752,7 @@ VirtQueue *virtio_add_queue(VirtIODevice *vdev, int queue_size,
         abort();
 
     vdev->vq[i].vring.num = queue_size;
+    vdev->vq[i].vring.align = VIRTIO_PCI_VRING_ALIGN;
     vdev->vq[i].handle_output = handle_output;
 
     return &vdev->vq[i];
@@ -830,6 +870,9 @@ void virtio_save(VirtIODevice *vdev, QEMUFile *f)
             break;
 
         qemu_put_be32(f, vdev->vq[i].vring.num);
+        if (k->has_variable_vring_alignment) {
+            qemu_put_be32(f, vdev->vq[i].vring.align);
+        }
         qemu_put_be64(f, vdev->vq[i].pa);
         qemu_put_be16s(f, &vdev->vq[i].last_avail_idx);
         if (k->save_queue) {
@@ -886,6 +929,9 @@ int virtio_load(VirtIODevice *vdev, QEMUFile *f)
 
     for (i = 0; i < num; i++) {
         vdev->vq[i].vring.num = qemu_get_be32(f);
+        if (k->has_variable_vring_alignment) {
+            vdev->vq[i].vring.align = qemu_get_be32(f);
+        }
         vdev->vq[i].pa = qemu_get_be64(f);
         qemu_get_be16s(f, &vdev->vq[i].last_avail_idx);
         vdev->vq[i].signalled_used_valid = false;
@@ -1030,6 +1076,11 @@ void virtio_queue_set_last_avail_idx(VirtIODevice *vdev, int n, uint16_t idx)
     vdev->vq[n].last_avail_idx = idx;
 }
 
+void virtio_queue_invalidate_signalled_used(VirtIODevice *vdev, int n)
+{
+    vdev->vq[n].signalled_used_valid = false;
+}
+
 VirtQueue *virtio_get_queue(VirtIODevice *vdev, int n)
 {
     return vdev->vq + n;
@@ -1098,6 +1149,18 @@ EventNotifier *virtio_queue_get_host_notifier(VirtQueue *vq)
     return &vq->host_notifier;
 }
 
+void virtio_device_set_child_bus_name(VirtIODevice *vdev, char *bus_name)
+{
+    if (vdev->bus_name) {
+        g_free(vdev->bus_name);
+        vdev->bus_name = NULL;
+    }
+
+    if (bus_name) {
+        vdev->bus_name = g_strdup(bus_name);
+    }
+}
+
 static int virtio_device_init(DeviceState *qdev)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(qdev);
@@ -1110,11 +1173,23 @@ static int virtio_device_init(DeviceState *qdev)
     return 0;
 }
 
+static int virtio_device_exit(DeviceState *qdev)
+{
+    VirtIODevice *vdev = VIRTIO_DEVICE(qdev);
+
+    if (vdev->bus_name) {
+        g_free(vdev->bus_name);
+        vdev->bus_name = NULL;
+    }
+    return 0;
+}
+
 static void virtio_device_class_init(ObjectClass *klass, void *data)
 {
     /* Set the default value here. */
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->init = virtio_device_init;
+    dc->exit = virtio_device_exit;
     dc->bus_type = TYPE_VIRTIO_BUS;
 }
 

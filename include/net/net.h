@@ -55,6 +55,7 @@ typedef void (LinkStatusChanged)(NetClientState *);
 typedef void (NetClientDestructor)(NetClientState *);
 typedef void (PeerAsyncCallback)(void *);
 typedef void (RegisterPeerAsyncCallback)(NetClientState *, PeerAsyncCallback*, void *);
+typedef RxFilterInfo *(QueryRxFilter)(NetClientState *);
 
 typedef struct NetClientInfo {
     NetClientOptionsKind type;
@@ -68,6 +69,7 @@ typedef struct NetClientInfo {
     NetCleanup *cleanup;
     LinkStatusChanged *link_status_changed;
     RegisterPeerAsyncCallback *register_peer_async_callback;
+    QueryRxFilter *query_rx_filter;
     NetPoll *poll;
 } NetClientInfo;
 
@@ -76,13 +78,14 @@ struct NetClientState {
     int link_down;
     QTAILQ_ENTRY(NetClientState) next;
     NetClientState *peer;
-    NetQueue *send_queue;
+    NetQueue *incoming_queue;
     char *model;
     char *name;
     char info_str[256];
     unsigned receive_disabled : 1;
     NetClientDestructor *destructor;
     unsigned int queue_index;
+    unsigned rxfilter_notify_enabled:1;
 };
 
 typedef struct NICState {

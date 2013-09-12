@@ -68,7 +68,7 @@ int css_create_css_image(uint8_t cssid, bool default_image)
     return 0;
 }
 
-static uint16_t css_build_subchannel_id(SubchDev *sch)
+uint16_t css_build_subchannel_id(SubchDev *sch)
 {
     if (channel_subsys->max_cssid > 0) {
         return (sch->cssid << 8) | (1 << 3) | (sch->ssid << 1) | 1;
@@ -124,7 +124,7 @@ static void sch_handle_clear_func(SubchDev *sch)
     /* Path management: In our simple css, we always choose the only path. */
     path = 0x80;
 
-    /* Reset values prior to 'issueing the clear signal'. */
+    /* Reset values prior to 'issuing the clear signal'. */
     p->lpum = 0;
     p->pom = 0xff;
     s->flags &= ~SCSW_FLAGS_MASK_PNO;
@@ -777,7 +777,7 @@ int css_do_tsch(SubchDev *sch, IRB *target_irb)
             (p->chars & PMCW_CHARS_MASK_CSENSE)) {
             irb.scsw.flags |= SCSW_FLAGS_MASK_ESWF | SCSW_FLAGS_MASK_ECTL;
             memcpy(irb.ecw, sch->sense_data, sizeof(sch->sense_data));
-            irb.esw[1] = 0x02000000 | (sizeof(sch->sense_data) << 8);
+            irb.esw[1] = 0x01000000 | (sizeof(sch->sense_data) << 8);
         }
     }
     /* Store the irb to the guest. */

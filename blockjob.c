@@ -45,6 +45,7 @@ void *block_job_create(const BlockJobType *job_type, BlockDriverState *bs,
         error_set(errp, QERR_DEVICE_IN_USE, bdrv_get_device_name(bs));
         return NULL;
     }
+    bdrv_ref(bs);
     bdrv_set_in_use(bs, 1);
 
     job = g_malloc0(job_type->instance_size);
@@ -187,7 +188,7 @@ int block_job_cancel_sync(BlockJob *job)
     return (data.cancelled && data.ret == 0) ? -ECANCELED : data.ret;
 }
 
-void block_job_sleep_ns(BlockJob *job, QEMUClock *clock, int64_t ns)
+void block_job_sleep_ns(BlockJob *job, QEMUClockType type, int64_t ns)
 {
     assert(job->busy);
 
@@ -200,7 +201,7 @@ void block_job_sleep_ns(BlockJob *job, QEMUClock *clock, int64_t ns)
     if (block_job_is_paused(job)) {
         qemu_coroutine_yield();
     } else {
-        co_sleep_ns(clock, ns);
+        co_sleep_ns(type, ns);
     }
     job->busy = true;
 }

@@ -28,6 +28,7 @@
  * THE SOFTWARE.
  */
 #include "hw/hw.h"
+#include "hw/loader.h"
 #include "sysemu/arch_init.h"
 #include "hw/i2c/smbus.h"
 #include "hw/boards.h"
@@ -41,21 +42,20 @@
 #include "hw/ide/pci.h"
 #include "hw/ide/ahci.h"
 #include "hw/usb.h"
+#include "hw/cpu/icc_bus.h"
 
 /* ICH9 AHCI has 6 ports */
 #define MAX_SATA_PORTS     6
 
+static bool has_pvpanic;
+static bool has_pci_info = true;
+
 /* PC hardware initialisation */
 static void pc_q35_init(QEMUMachineInitArgs *args)
 {
-    ram_addr_t ram_size = args->ram_size;
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
-    const char *kernel_cmdline = args->kernel_cmdline;
-    const char *initrd_filename = args->initrd_filename;
-    const char *boot_device = args->boot_device;
     ram_addr_t below_4g_mem_size, above_4g_mem_size;
     Q35PCIHost *q35_host;
+    PCIHostState *phb;
     PCIBus *host_bus;
     PCIDevice *lpc;
     BusState *idebus[MAX_SATA_PORTS];
@@ -73,35 +73,52 @@ static void pc_q35_init(QEMUMachineInitArgs *args)
     int i;
     ICH9LPCState *ich9_lpc;
     PCIDevice *ahci;
+    DeviceState *icc_bridge;
+    PcGuestInfo *guest_info;
 
-    pc_cpus_init(cpu_model);
+    if (xen_enabled() && xen_hvm_init(&ram_memory) != 0) {
+        fprintf(stderr, "xen hardware virtual machine initialisation failed\n");
+        exit(1);
+    }
+
+    icc_bridge = qdev_create(NULL, TYPE_ICC_BRIDGE);
+    object_property_add_child(qdev_get_machine(), "icc-bridge",
+                              OBJECT(icc_bridge), NULL);
+
+    pc_cpus_init(args->cpu_model, icc_bridge);
     pc_acpi_init("q35-acpi-dsdt.aml");
 
     kvmclock_create();
 
-    if (ram_size >= 0xb0000000) {
-        above_4g_mem_size = ram_size - 0xb0000000;
+    if (args->ram_size >= 0xb0000000) {
+        above_4g_mem_size = args->ram_size - 0xb0000000;
         below_4g_mem_size = 0xb0000000;
     } else {
         above_4g_mem_size = 0;
-        below_4g_mem_size = ram_size;
+        below_4g_mem_size = args->ram_size;
     }
 
     /* pci enabled */
     if (pci_enabled) {
         pci_memory = g_new(MemoryRegion, 1);
-        memory_region_init(pci_memory, "pci", INT64_MAX);
+        memory_region_init(pci_memory, NULL, "pci", INT64_MAX);
         rom_memory = pci_memory;
     } else {
         pci_memory = NULL;
         rom_memory = get_system_memory();
     }
 
+    guest_info = pc_guest_info_init(below_4g_mem_size, above_4g_mem_size);
+    guest_info->has_pci_info = has_pci_info;
+    guest_info->isapc_ram_fw = false;
+
     /* allocate ram and load rom/bios */
     if (!xen_enabled()) {
-        pc_memory_init(get_system_memory(), kernel_filename, kernel_cmdline,
-                       initrd_filename, below_4g_mem_size, above_4g_mem_size,
-                       rom_memory, &ram_memory);
+        pc_memory_init(get_system_memory(),
+                       args->kernel_filename, args->kernel_cmdline,
+                       args->initrd_filename,
+                       below_4g_mem_size, above_4g_mem_size,
+                       rom_memory, &ram_memory, guest_info);
     }
 
     /* irq lines */
@@ -117,15 +134,18 @@ static void pc_q35_init(QEMUMachineInitArgs *args)
     /* create pci host bus */
     q35_host = Q35_HOST_DEVICE(qdev_create(NULL, TYPE_Q35_HOST_DEVICE));
 
+    object_property_add_child(qdev_get_machine(), "q35", OBJECT(q35_host), NULL);
     q35_host->mch.ram_memory = ram_memory;
     q35_host->mch.pci_address_space = pci_memory;
     q35_host->mch.system_memory = get_system_memory();
-    q35_host->mch.address_space_io = get_system_io();;
+    q35_host->mch.address_space_io = get_system_io();
     q35_host->mch.below_4g_mem_size = below_4g_mem_size;
     q35_host->mch.above_4g_mem_size = above_4g_mem_size;
+    q35_host->mch.guest_info = guest_info;
     /* pci */
     qdev_init_nofail(DEVICE(q35_host));
-    host_bus = q35_host->host.pci.bus;
+    phb = PCI_HOST_BRIDGE(q35_host);
+    host_bus = phb->bus;
     /* create ISA bus */
     lpc = pci_create_simple_multifunction(host_bus, PCI_DEVFN(ICH9_LPC_DEV,
                                           ICH9_LPC_FUNC), true,
@@ -156,6 +176,7 @@ static void pc_q35_init(QEMUMachineInitArgs *args)
     if (pci_enabled) {
         ioapic_init_gsi(gsi_state, NULL);
     }
+    qdev_init_nofail(icc_bridge);
 
     pc_register_ferr_irq(gsi[13]);
 
@@ -184,47 +205,113 @@ static void pc_q35_init(QEMUMachineInitArgs *args)
                                     0xb100),
                       8, NULL, 0);
 
-    pc_cmos_init(below_4g_mem_size, above_4g_mem_size, boot_device,
+    pc_cmos_init(below_4g_mem_size, above_4g_mem_size, args->boot_order,
                  floppy, idebus[0], idebus[1], rtc_state);
 
     /* the rest devices to which pci devfn is automatically assigned */
     pc_vga_init(isa_bus, host_bus);
-    audio_init(isa_bus, host_bus);
     pc_nic_init(isa_bus, host_bus);
     if (pci_enabled) {
         pc_pci_device_init(host_bus);
     }
+
+    if (has_pvpanic) {
+        pvpanic_init(isa_bus);
+    }
+}
+
+static void pc_compat_1_6(QEMUMachineInitArgs *args)
+{
+    has_pci_info = false;
+    rom_file_in_ram = false;
+}
+
+static void pc_compat_1_5(QEMUMachineInitArgs *args)
+{
+    pc_compat_1_6(args);
+    has_pvpanic = true;
+}
+
+static void pc_compat_1_4(QEMUMachineInitArgs *args)
+{
+    pc_compat_1_5(args);
+    has_pvpanic = false;
+    x86_cpu_compat_set_features("n270", FEAT_1_ECX, 0, CPUID_EXT_MOVBE);
+    x86_cpu_compat_set_features("Westmere", FEAT_1_ECX, 0, CPUID_EXT_PCLMULQDQ);
+}
+
+static void pc_q35_init_1_6(QEMUMachineInitArgs *args)
+{
+    pc_compat_1_6(args);
+    pc_q35_init(args);
+}
+
+static void pc_q35_init_1_5(QEMUMachineInitArgs *args)
+{
+    pc_compat_1_5(args);
+    pc_q35_init(args);
 }
 
 static void pc_q35_init_1_4(QEMUMachineInitArgs *args)
 {
-    pc_sysfw_flash_vs_rom_bug_compatible = true;
+    pc_compat_1_4(args);
     pc_q35_init(args);
 }
 
-static QEMUMachine pc_q35_machine_v1_5 = {
-    .name = "pc-q35-1.5",
+#define PC_Q35_MACHINE_OPTIONS \
+    PC_DEFAULT_MACHINE_OPTIONS, \
+    .desc = "Standard PC (Q35 + ICH9, 2009)", \
+    .hot_add_cpu = pc_hot_add_cpu
+
+#define PC_Q35_1_7_MACHINE_OPTIONS PC_Q35_MACHINE_OPTIONS
+
+static QEMUMachine pc_q35_machine_v1_7 = {
+    PC_Q35_1_7_MACHINE_OPTIONS,
+    .name = "pc-q35-1.7",
     .alias = "q35",
-    .desc = "Standard PC (Q35 + ICH9, 2009)",
     .init = pc_q35_init,
-    .max_cpus = 255,
-    DEFAULT_MACHINE_OPTIONS,
 };
 
+#define PC_Q35_1_6_MACHINE_OPTIONS PC_Q35_MACHINE_OPTIONS
+
+static QEMUMachine pc_q35_machine_v1_6 = {
+    PC_Q35_1_6_MACHINE_OPTIONS,
+    .name = "pc-q35-1.6",
+    .init = pc_q35_init_1_6,
+    .compat_props = (GlobalProperty[]) {
+        PC_COMPAT_1_6,
+        { /* end of list */ }
+    },
+};
+
+static QEMUMachine pc_q35_machine_v1_5 = {
+    PC_Q35_1_6_MACHINE_OPTIONS,
+    .name = "pc-q35-1.5",
+    .init = pc_q35_init_1_5,
+    .compat_props = (GlobalProperty[]) {
+        PC_COMPAT_1_5,
+        { /* end of list */ }
+    },
+};
+
+#define PC_Q35_1_4_MACHINE_OPTIONS \
+    PC_Q35_1_6_MACHINE_OPTIONS, \
+    .hot_add_cpu = NULL
+
 static QEMUMachine pc_q35_machine_v1_4 = {
+    PC_Q35_1_4_MACHINE_OPTIONS,
     .name = "pc-q35-1.4",
-    .desc = "Standard PC (Q35 + ICH9, 2009)",
     .init = pc_q35_init_1_4,
-    .max_cpus = 255,
     .compat_props = (GlobalProperty[]) {
         PC_COMPAT_1_4,
         { /* end of list */ }
     },
-    DEFAULT_MACHINE_OPTIONS,
 };
 
 static void pc_q35_machine_init(void)
 {
+    qemu_register_machine(&pc_q35_machine_v1_7);
+    qemu_register_machine(&pc_q35_machine_v1_6);
     qemu_register_machine(&pc_q35_machine_v1_5);
     qemu_register_machine(&pc_q35_machine_v1_4);
 }

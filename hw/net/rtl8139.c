@@ -108,6 +108,11 @@ static inline GCC_FMT_ATTR(1, 2) int DPRINTF(const char *fmt, ...)
 }
 #endif
 
+#define TYPE_RTL8139 "rtl8139"
+
+#define RTL8139(obj) \
+     OBJECT_CHECK(RTL8139State, (obj), TYPE_RTL8139)
+
 /* Symbolic offsets to registers. */
 enum RTL8139_registers {
     MAC0 = 0,        /* Ethernet hardware address. */
@@ -448,7 +453,10 @@ typedef struct RTL8139TallyCounters
 static void RTL8139TallyCounters_clear(RTL8139TallyCounters* counters);
 
 typedef struct RTL8139State {
-    PCIDevice dev;
+    /*< private >*/
+    PCIDevice parent_obj;
+    /*< public >*/
+
     uint8_t phys[8]; /* mac address */
     uint8_t mult[8]; /* multicast mask array */
 
@@ -825,6 +833,7 @@ static void prom9346_set_wire(RTL8139State *s, int eecs, int eesk, int eedi)
 
 static void rtl8139_update_irq(RTL8139State *s)
 {
+    PCIDevice *d = PCI_DEVICE(s);
     int isr;
     isr = (s->IntrStatus & s->IntrMask) & 0xffff;
 
@@ -844,8 +853,8 @@ static void rtl8139_update_irq(RTL8139State *s)
 	else if (s->IntrMitigate) {
 	    /* Let the interrupt go, but start the mitigation timer. */
 	    s->mit_timer_on = 1;
-	    qemu_mod_timer(s->mit_timer,
-		    qemu_get_clock_ns(vm_clock) + s->IntrMitigate * 1000);
+	    timer_mod(s->mit_timer,
+		    qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + s->IntrMitigate * 1000);
 	}
     }
     s->force_txkick = 0;
@@ -855,7 +864,7 @@ static void rtl8139_update_irq(RTL8139State *s)
     DPRINTF("Set IRQ to %d (%04x %04x)\n", isr ? 1 : 0, s->IntrStatus,
         s->IntrMask);
 
-    qemu_set_irq(s->dev.irq[0], (isr != 0));
+    qemu_set_irq(d->irq[0], (isr != 0));
 #ifdef RATE
     if (!rate_irq_level && isr) {
 	rate_irq_int++;
@@ -892,6 +901,8 @@ static int rtl8139_cp_transmitter_enabled(RTL8139State *s)
 
 static void rtl8139_write_buffer(RTL8139State *s, const void *buf, int size)
 {
+    PCIDevice *d = PCI_DEVICE(s);
+
     if (s->RxBufAddr + size > s->RxBufferSize)
     {
         int wrapped = MOD2(s->RxBufAddr + size, s->RxBufferSize);
@@ -903,14 +914,14 @@ static void rtl8139_write_buffer(RTL8139State *s, const void *buf, int size)
 
             if (size > wrapped)
             {
-                pci_dma_write(&s->dev, s->RxBuf + s->RxBufAddr,
+                pci_dma_write(d, s->RxBuf + s->RxBufAddr,
                               buf, size-wrapped);
             }
 
             /* reset buffer pointer */
             s->RxBufAddr = 0;
 
-            pci_dma_write(&s->dev, s->RxBuf + s->RxBufAddr,
+            pci_dma_write(d, s->RxBuf + s->RxBufAddr,
                           buf + (size-wrapped), wrapped);
 
             s->RxBufAddr = wrapped;
@@ -920,7 +931,7 @@ static void rtl8139_write_buffer(RTL8139State *s, const void *buf, int size)
     }
 
     /* non-wrapping path or overwrapping enabled */
-    pci_dma_write(&s->dev, s->RxBuf + s->RxBufAddr, buf, size);
+    pci_dma_write(d, s->RxBuf + s->RxBufAddr, buf, size);
 
     s->RxBufAddr += size;
 }
@@ -970,6 +981,7 @@ struct CplusDesc {
 static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t size_, int do_interrupt)
 {
     RTL8139State *s = qemu_get_nic_opaque(nc);
+    PCIDevice *d = PCI_DEVICE(s);
     /* size is the length of the buffer passed to the driver */
     int size = size_;
     const uint8_t *dot1q_buf = NULL;
@@ -1137,7 +1149,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
         uint32_t val;
 	struct CplusDesc rxd;
 
-        pci_dma_read(&s->dev, cplus_rx_ring_desc, &rxd, sizeof(struct CplusDesc));
+        pci_dma_read(d, cplus_rx_ring_desc, &rxd, sizeof(struct CplusDesc));
 	rxd.w0 = le32_to_cpu(rxd.w0);
 	rxd.w1 = le32_to_cpu(rxd.w1);
 	rxd.bufLO = le32_to_cpu(rxd.bufLO);
@@ -1208,12 +1220,12 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
 
         /* receive/copy to target memory */
         if (dot1q_buf) {
-            pci_dma_write(&s->dev, rx_addr, buf, 2 * ETHER_ADDR_LEN);
-            pci_dma_write(&s->dev, rx_addr + 2 * ETHER_ADDR_LEN,
+            pci_dma_write(d, rx_addr, buf, 2 * ETHER_ADDR_LEN);
+            pci_dma_write(d, rx_addr + 2 * ETHER_ADDR_LEN,
                           buf + 2 * ETHER_ADDR_LEN + VLAN_HLEN,
                           size - 2 * ETHER_ADDR_LEN);
         } else {
-            pci_dma_write(&s->dev, rx_addr, buf, size);
+            pci_dma_write(d, rx_addr, buf, size);
         }
 
         if (s->CpCmd & CPlusRxChkSum)
@@ -1223,7 +1235,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
 
         /* write checksum */
         val = cpu_to_le32(crc32(0, buf, size_));
-        pci_dma_write(&s->dev, rx_addr+size, (uint8_t *)&val, 4);
+        pci_dma_write(d, rx_addr+size, (uint8_t *)&val, 4);
 
 /* first segment of received packet flag */
 #define CP_RX_STATUS_FS (1<<29)
@@ -1270,7 +1282,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
         /* update ring data */
         rxd.w0 = cpu_to_le32(rxd.w0);
         rxd.w1 = cpu_to_le32(rxd.w1);
-        pci_dma_write(&s->dev, cplus_rx_ring_desc, (uint8_t *)&rxd, sizeof(rxd.w0) + sizeof(rxd.w1));
+        pci_dma_write(d, cplus_rx_ring_desc, (uint8_t *)&rxd, sizeof(rxd.w0) + sizeof(rxd.w1));
 
         /* update tally counter */
         ++s->tally_counters.RxOk;
@@ -1357,7 +1369,7 @@ static void rtl8139_reset_rxring(RTL8139State *s, uint32_t bufferSize)
 
 static void rtl8139_reset(DeviceState *d)
 {
-    RTL8139State *s = container_of(d, RTL8139State, dev.qdev);
+    RTL8139State *s = RTL8139(d);
     int i;
 
     /* restore MAC address */
@@ -1466,49 +1478,50 @@ static void RTL8139TallyCounters_clear(RTL8139TallyCounters* counters)
 
 static void RTL8139TallyCounters_dma_write(RTL8139State *s, dma_addr_t tc_addr)
 {
+    PCIDevice *d = PCI_DEVICE(s);
     RTL8139TallyCounters *tally_counters = &s->tally_counters;
     uint16_t val16;
     uint32_t val32;
     uint64_t val64;
 
     val64 = cpu_to_le64(tally_counters->TxOk);
-    pci_dma_write(&s->dev, tc_addr + 0,     (uint8_t *)&val64, 8);
+    pci_dma_write(d, tc_addr + 0,     (uint8_t *)&val64, 8);
 
     val64 = cpu_to_le64(tally_counters->RxOk);
-    pci_dma_write(&s->dev, tc_addr + 8,     (uint8_t *)&val64, 8);
+    pci_dma_write(d, tc_addr + 8,     (uint8_t *)&val64, 8);
 
     val64 = cpu_to_le64(tally_counters->TxERR);
-    pci_dma_write(&s->dev, tc_addr + 16,    (uint8_t *)&val64, 8);
+    pci_dma_write(d, tc_addr + 16,    (uint8_t *)&val64, 8);
 
     val32 = cpu_to_le32(tally_counters->RxERR);
-    pci_dma_write(&s->dev, tc_addr + 24,    (uint8_t *)&val32, 4);
+    pci_dma_write(d, tc_addr + 24,    (uint8_t *)&val32, 4);
 
     val16 = cpu_to_le16(tally_counters->MissPkt);
-    pci_dma_write(&s->dev, tc_addr + 28,    (uint8_t *)&val16, 2);
+    pci_dma_write(d, tc_addr + 28,    (uint8_t *)&val16, 2);
 
     val16 = cpu_to_le16(tally_counters->FAE);
-    pci_dma_write(&s->dev, tc_addr + 30,    (uint8_t *)&val16, 2);
+    pci_dma_write(d, tc_addr + 30,    (uint8_t *)&val16, 2);
 
     val32 = cpu_to_le32(tally_counters->Tx1Col);
-    pci_dma_write(&s->dev, tc_addr + 32,    (uint8_t *)&val32, 4);
+    pci_dma_write(d, tc_addr + 32,    (uint8_t *)&val32, 4);
 
     val32 = cpu_to_le32(tally_counters->TxMCol);
-    pci_dma_write(&s->dev, tc_addr + 36,    (uint8_t *)&val32, 4);
+    pci_dma_write(d, tc_addr + 36,    (uint8_t *)&val32, 4);
 
     val64 = cpu_to_le64(tally_counters->RxOkPhy);
-    pci_dma_write(&s->dev, tc_addr + 40,    (uint8_t *)&val64, 8);
+    pci_dma_write(d, tc_addr + 40,    (uint8_t *)&val64, 8);
 
     val64 = cpu_to_le64(tally_counters->RxOkBrd);
-    pci_dma_write(&s->dev, tc_addr + 48,    (uint8_t *)&val64, 8);
+    pci_dma_write(d, tc_addr + 48,    (uint8_t *)&val64, 8);
 
     val32 = cpu_to_le32(tally_counters->RxOkMul);
-    pci_dma_write(&s->dev, tc_addr + 56,    (uint8_t *)&val32, 4);
+    pci_dma_write(d, tc_addr + 56,    (uint8_t *)&val32, 4);
 
     val16 = cpu_to_le16(tally_counters->TxAbt);
-    pci_dma_write(&s->dev, tc_addr + 60,    (uint8_t *)&val16, 2);
+    pci_dma_write(d, tc_addr + 60,    (uint8_t *)&val16, 2);
 
     val16 = cpu_to_le16(tally_counters->TxUndrn);
-    pci_dma_write(&s->dev, tc_addr + 62,    (uint8_t *)&val16, 2);
+    pci_dma_write(d, tc_addr + 62,    (uint8_t *)&val16, 2);
 }
 
 /* Loads values of tally counters from VM state file */
@@ -1537,6 +1550,8 @@ static const VMStateDescription vmstate_tally_counters = {
 
 static void rtl8139_ChipCmd_write(RTL8139State *s, uint32_t val)
 {
+    DeviceState *d = DEVICE(s);
+
     val &= 0xff;
 
     DPRINTF("ChipCmd write val=0x%08x\n", val);
@@ -1544,7 +1559,7 @@ static void rtl8139_ChipCmd_write(RTL8139State *s, uint32_t val)
     if (val & CmdReset)
     {
         DPRINTF("ChipCmd reset\n");
-        rtl8139_reset(&s->dev.qdev);
+        rtl8139_reset(d);
     }
     if (val & CmdRxEnb)
     {
@@ -1699,6 +1714,8 @@ static uint32_t rtl8139_BasicModeStatus_read(RTL8139State *s)
 
 static void rtl8139_Cfg9346_write(RTL8139State *s, uint32_t val)
 {
+    DeviceState *d = DEVICE(s);
+
     val &= 0xff;
 
     DPRINTF("Cfg9346 write val=0x%02x\n", val);
@@ -1718,7 +1735,7 @@ static void rtl8139_Cfg9346_write(RTL8139State *s, uint32_t val)
     } else if (opmode == 0x40) {
         /* Reset.  */
         val = 0;
-        rtl8139_reset(&s->dev.qdev);
+        rtl8139_reset(d);
     }
 
     s->Cfg9346 = val;
@@ -1997,13 +2014,14 @@ static int rtl8139_transmit_one(RTL8139State *s, int descriptor)
 
     DPRINTF("+++ transmitting from descriptor %d\n", descriptor);
 
+    PCIDevice *d = PCI_DEVICE(s);
     int txsize = s->TxStatus[descriptor] & 0x1fff;
     uint8_t txbuffer[0x2000];
 
     DPRINTF("+++ transmit reading %d bytes from host memory at 0x%08x\n",
         txsize, s->TxAddr[descriptor]);
 
-    pci_dma_read(&s->dev, s->TxAddr[descriptor], txbuffer, txsize);
+    pci_dma_read(d, s->TxAddr[descriptor], txbuffer, txsize);
 
     /* Mark descriptor as transferred */
     s->TxStatus[descriptor] |= TxHostOwns;
@@ -2122,6 +2140,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         return 0 ;
     }
 
+    PCIDevice *d = PCI_DEVICE(s);
     int descriptor = s->currCPlusTxDesc;
 
     dma_addr_t cplus_tx_ring_desc = rtl8139_addr64(s->TxAddr[0], s->TxAddr[1]);
@@ -2136,7 +2155,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
     uint32_t val;
     struct CplusDesc txd;
 
-    pci_dma_read(&s->dev, cplus_tx_ring_desc, (uint8_t *)&txd, sizeof(CplusDesc));
+    pci_dma_read(d, cplus_tx_ring_desc, (uint8_t *)&txd, sizeof(CplusDesc));
     txd.w0 = le32_to_cpu(txd.w0);
     txd.w1 = le32_to_cpu(txd.w1);
     txd.bufLO = le32_to_cpu(txd.bufLO);
@@ -2254,7 +2273,7 @@ printf("mallocing\n");
             DMA_ADDR_FMT" to offset %d\n", txsize, tx_addr,
             s->cplus_txbuffer_offset);
 
-    pci_dma_read(&s->dev, tx_addr,
+    pci_dma_read(d, tx_addr,
                  s->cplus_txbuffer + s->cplus_txbuffer_offset, txsize);
     s->cplus_txbuffer_offset += txsize;
 
@@ -2282,7 +2301,7 @@ printf("mallocing\n");
 
     /* update ring data */
     val = cpu_to_le32(txd.w0);
-    pci_dma_write(&s->dev, cplus_tx_ring_desc, (uint8_t *)&val, 4);
+    pci_dma_write(d, cplus_tx_ring_desc, (uint8_t *)&val, 4);
 
     /* Now decide if descriptor being processed is holding the last segment of packet */
     if (txd.w0 & CP_TX_LS)
@@ -2754,7 +2773,7 @@ static void rtl8139_tx_bh(void * opaque)
         csb->host_need_txkick = 1;
 	ND("tx bh going to sleep, set txkick");
         smp_mb();
-	pci_dma_read(&s->dev, rtl8139_addr64(s->TxAddr[0], s->TxAddr[1]) +
+	pci_dma_read(PCI_DEVICE(s), rtl8139_addr64(s->TxAddr[0], s->TxAddr[1]) +
 		16 * s->currCPlusTxDesc, (uint8_t *)&w0, 4);
 	if (le32_to_cpu(w0) & CP_TX_OWN) {
 	    ND("tx bh race avoidance, clear txkick");
@@ -2801,6 +2820,9 @@ static void rtl8139_RxBufPtr_write(RTL8139State *s, uint32_t val)
 
     /* this value is off by 16 */
     s->RxBufPtr = MOD2(val + 0x10, s->RxBufferSize);
+
+    /* more buffer space may be available so try to receive */
+    qemu_flush_queued_packets(qemu_get_queue(s->nic));
 
     DPRINTF(" CAPR write: rx buffer length %d head 0x%04x read 0x%04x\n",
         s->RxBufferSize, s->RxBufAddr, s->RxBufPtr);
@@ -2853,7 +2875,7 @@ static void rtl8139_IntrMask_write(RTL8139State *s, uint32_t val)
 
     s->IntrMask = val;
 
-    rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
+    rtl8139_set_next_tctr_time(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     rtl8139_update_irq(s);
 
 }
@@ -2894,7 +2916,7 @@ static void rtl8139_IntrStatus_write(RTL8139State *s, uint32_t val)
      * and probably emulated is slower is better to assume this resetting was
      * done before testing on previous rtl8139_update_irq lead to IRQ losing
      */
-    rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
+    rtl8139_set_next_tctr_time(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     rtl8139_update_irq(s);
 
 #endif
@@ -2903,7 +2925,7 @@ static void rtl8139_IntrStatus_write(RTL8139State *s, uint32_t val)
 
 static uint32_t rtl8139_IntrStatus_read(RTL8139State *s)
 {
-    rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
+    rtl8139_set_next_tctr_time(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 
     uint32_t ret = s->IntrStatus;
 
@@ -3129,7 +3151,7 @@ static void rtl8139_set_next_tctr_time(RTL8139State *s, int64_t current_time)
     s->TimerExpire = next_time;
 
     if ((s->IntrMask & PCSTimeout) != 0 && (s->IntrStatus & PCSTimeout) == 0) {
-        qemu_mod_timer(s->timer, next_time);
+        timer_mod(s->timer, next_time);
     }
 }
 
@@ -3176,7 +3198,7 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
 
         case Timer:
             DPRINTF("TCTR Timer reset on write\n");
-            s->TCTR_base = qemu_get_clock_ns(vm_clock);
+            s->TCTR_base = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
             rtl8139_set_next_tctr_time(s, s->TCTR_base);
             break;
 
@@ -3184,7 +3206,7 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
             DPRINTF("FlashReg TimerInt write val=0x%08x\n", val);
             if (s->TimerInt != val) {
                 s->TimerInt = val;
-                rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
+                rtl8139_set_next_tctr_time(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
             }
             break;
 #ifdef PARAVIRT
@@ -3195,7 +3217,8 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
 	case CsbAddrLO:
 	    s->CsbAddrLO = val;
 	    paravirt_configure_csb(&s->csb, s->CsbAddrLO, s->CsbAddrHI,
-				    s->tx_bh, pci_dma_context(&s->dev)->as);
+				    s->tx_bh,
+                                    pci_get_address_space(PCI_DEVICE(s)));
 	    if (s->csb) {
 		s->txcycles_lim = s->csb->host_txcycles_lim;
 		s->txcycles = 0;
@@ -3417,7 +3440,7 @@ static uint32_t rtl8139_io_readl(void *opaque, uint8_t addr)
             break;
 
         case Timer:
-            ret = muldiv64(qemu_get_clock_ns(vm_clock) - s->TCTR_base,
+            ret = muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->TCTR_base,
                            PCI_FREQUENCY, get_ticks_per_sec());
             DPRINTF("TCTR Timer read val=0x%08x\n", ret);
             break;
@@ -3480,7 +3503,7 @@ static uint32_t rtl8139_mmio_readl(void *opaque, hwaddr addr)
 static int rtl8139_post_load(void *opaque, int version_id)
 {
     RTL8139State* s = opaque;
-    rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
+    rtl8139_set_next_tctr_time(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     if (version_id < 4) {
         s->cplus_enabled = s->CpCmd != 0;
     }
@@ -3510,7 +3533,7 @@ static const VMStateDescription vmstate_rtl8139_hotplug_ready ={
 static void rtl8139_pre_save(void *opaque)
 {
     RTL8139State* s = opaque;
-    int64_t current_time = qemu_get_clock_ns(vm_clock);
+    int64_t current_time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     /* set IntrStatus correctly */
     rtl8139_set_next_tctr_time(s, current_time);
@@ -3527,7 +3550,7 @@ static const VMStateDescription vmstate_rtl8139 = {
     .post_load = rtl8139_post_load,
     .pre_save  = rtl8139_pre_save,
     .fields      = (VMStateField []) {
-        VMSTATE_PCI_DEVICE(dev, RTL8139State),
+        VMSTATE_PCI_DEVICE(parent_obj, RTL8139State),
         VMSTATE_PARTIAL_BUFFER(phys, RTL8139State, 6),
         VMSTATE_BUFFER(mult, RTL8139State),
         VMSTATE_UINT32_ARRAY(TxStatus, RTL8139State, 4),
@@ -3681,7 +3704,7 @@ static void rtl8139_timer(void *opaque)
 
     s->IntrStatus |= PCSTimeout;
     rtl8139_update_irq(s);
-    rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
+    rtl8139_set_next_tctr_time(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 }
 
 static void rtl8139_cleanup(NetClientState *nc)
@@ -3693,7 +3716,7 @@ static void rtl8139_cleanup(NetClientState *nc)
 
 static void pci_rtl8139_uninit(PCIDevice *dev)
 {
-    RTL8139State *s = DO_UPCAST(RTL8139State, dev, dev);
+    RTL8139State *s = RTL8139(dev);
 
     memory_region_destroy(&s->bar_io);
     memory_region_destroy(&s->bar_mem);
@@ -3701,14 +3724,14 @@ static void pci_rtl8139_uninit(PCIDevice *dev)
         g_free(s->cplus_txbuffer);
         s->cplus_txbuffer = NULL;
     }
-    qemu_del_timer(s->timer);
-    qemu_free_timer(s->timer);
+    timer_del(s->timer);
+    timer_free(s->timer);
 #ifdef PARAVIRT
-    qemu_del_timer(s->mit_timer);
-    qemu_free_timer(s->mit_timer);
+    timer_del(s->mit_timer);
+    timer_free(s->mit_timer);
     qemu_bh_delete(s->tx_bh);
 #endif /* PARAVIRT */
-    IFRATE(qemu_del_timer(s->rate_timer); qemu_free_timer(s->rate_timer));
+    IFRATE(timer_del(s->rate_timer); timer_free(s->rate_timer));
     qemu_del_nic(s->nic);
 }
 
@@ -3737,19 +3760,22 @@ static NetClientInfo net_rtl8139_info = {
 
 static int pci_rtl8139_init(PCIDevice *dev)
 {
-    RTL8139State * s = DO_UPCAST(RTL8139State, dev, dev);
+    RTL8139State *s = RTL8139(dev);
+    DeviceState *d = DEVICE(dev);
     uint8_t *pci_conf;
 
-    pci_conf = s->dev.config;
+    pci_conf = dev->config;
     pci_conf[PCI_INTERRUPT_PIN] = 1;    /* interrupt pin A */
     /* TODO: start of capability list, but no capability
      * list bit in status register, and offset 0xdc seems unused. */
     pci_conf[PCI_CAPABILITY_LIST] = 0xdc;
 
-    memory_region_init_io(&s->bar_io, &rtl8139_io_ops, s, "rtl8139", 0x100);
-    memory_region_init_io(&s->bar_mem, &rtl8139_mmio_ops, s, "rtl8139", 0x100);
-    pci_register_bar(&s->dev, 0, PCI_BASE_ADDRESS_SPACE_IO, &s->bar_io);
-    pci_register_bar(&s->dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar_mem);
+    memory_region_init_io(&s->bar_io, OBJECT(s), &rtl8139_io_ops, s,
+                          "rtl8139", 0x100);
+    memory_region_init_io(&s->bar_mem, OBJECT(s), &rtl8139_mmio_ops, s,
+                          "rtl8139", 0x100);
+    pci_register_bar(dev, 0, PCI_BASE_ADDRESS_SPACE_IO, &s->bar_io);
+    pci_register_bar(dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar_mem);
 
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
 
@@ -3765,7 +3791,7 @@ static int pci_rtl8139_init(PCIDevice *dev)
     s->eeprom.contents[9] = s->conf.macaddr.a[4] | s->conf.macaddr.a[5] << 8;
 
     s->nic = qemu_new_nic(&net_rtl8139_info, &s->conf,
-                          object_get_typename(OBJECT(dev)), dev->qdev.id, s);
+                          object_get_typename(OBJECT(dev)), d->id, s);
     qemu_format_nic_info_str(qemu_get_queue(s->nic), s->conf.macaddr.a);
 
     s->cplus_txbuffer = NULL;
@@ -3773,16 +3799,16 @@ static int pci_rtl8139_init(PCIDevice *dev)
     s->cplus_txbuffer_offset = 0;
 
     s->TimerExpire = 0;
-    s->timer = qemu_new_timer_ns(vm_clock, rtl8139_timer, s);
-    rtl8139_set_next_tctr_time(s, qemu_get_clock_ns(vm_clock));
+    s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rtl8139_timer, s);
+    rtl8139_set_next_tctr_time(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 #ifdef PARAVIRT
-    s->mit_timer = qemu_new_timer_ns(vm_clock, rtl8139_mit_timer, s);
+    s->mit_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rtl8139_mit_timer, s);
     s->csb = NULL;
     s->tx_bh = qemu_bh_new(rtl8139_tx_bh, s);
 #endif /* PARAVIRT */
-    IFRATE(s->rate_timer = qemu_new_timer_ms(vm_clock, &rate_callback, s));
+    IFRATE(s->rate_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, &rate_callback, s));
 
-    add_boot_device_path(s->conf.bootindex, &dev->qdev, "/ethernet-phy@0");
+    add_boot_device_path(s->conf.bootindex, d, "/ethernet-phy@0");
 
     return 0;
 }
@@ -3810,10 +3836,11 @@ static void rtl8139_class_init(ObjectClass *klass, void *data)
     dc->reset = rtl8139_reset;
     dc->vmsd = &vmstate_rtl8139;
     dc->props = rtl8139_properties;
+    set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
 }
 
 static const TypeInfo rtl8139_info = {
-    .name          = "rtl8139",
+    .name          = TYPE_RTL8139,
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(RTL8139State),
     .class_init    = rtl8139_class_init,

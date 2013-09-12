@@ -13,6 +13,7 @@ static int usb_qdev_exit(DeviceState *qdev);
 
 static Property usb_props[] = {
     DEFINE_PROP_STRING("port", USBDevice, port_path),
+    DEFINE_PROP_STRING("serial", USBDevice, serial),
     DEFINE_PROP_BIT("full-path", USBDevice, flags,
                     USB_DEV_FLAG_FULL_PATH, true),
     DEFINE_PROP_END_OF_LIST()
@@ -46,6 +47,10 @@ static int usb_device_post_load(void *opaque, int version_id)
     } else {
         dev->attached = 1;
     }
+    if (dev->setup_index >= sizeof(dev->data_buf) ||
+        dev->setup_len >= sizeof(dev->data_buf)) {
+        return -EINVAL;
+    }
     return 0;
 }
 
@@ -66,9 +71,10 @@ const VMStateDescription vmstate_usb_device = {
     }
 };
 
-void usb_bus_new(USBBus *bus, USBBusOps *ops, DeviceState *host)
+void usb_bus_new(USBBus *bus, size_t bus_size,
+                 USBBusOps *ops, DeviceState *host)
 {
-    qbus_create_inplace(&bus->qbus, TYPE_USB_BUS, host, NULL);
+    qbus_create_inplace(bus, bus_size, TYPE_USB_BUS, host, NULL);
     bus->ops = ops;
     bus->busnr = next_usb_bus++;
     bus->qbus.allow_hotplug = 1; /* Yes, we can */

@@ -32,6 +32,7 @@
 #include "qemu/iov.h"
 #include "sysemu/dma.h"
 #include "trace.h"
+#include "qemu/main-loop.h"
 
 //#define DEBUG
 //#define DEBUG_DUMP_DATA
@@ -119,7 +120,8 @@ struct UHCIPCIDeviceClass {
 
 struct UHCIAsync {
     USBPacket packet;
-    QEMUSGList sgl;
+    uint8_t   static_buf[64]; /* 64 bytes is enough, except for isoc packets */
+    uint8_t   *buf;
     UHCIQueue *queue;
     QTAILQ_ENTRY(UHCIAsync) next;
     uint32_t  td_addr;
@@ -188,6 +190,7 @@ typedef struct UHCI_QH {
 
 static void uhci_async_cancel(UHCIAsync *async);
 static void uhci_queue_fill(UHCIQueue *q, UHCI_TD *td);
+static void uhci_resume(void *opaque);
 
 static inline int32_t uhci_queue_token(UHCI_TD *td)
 {
@@ -264,7 +267,6 @@ static UHCIAsync *uhci_async_alloc(UHCIQueue *queue, uint32_t td_addr)
     async->queue = queue;
     async->td_addr = td_addr;
     usb_packet_init(&async->packet);
-    pci_dma_sglist_init(&async->sgl, &queue->uhci->dev, 1);
     trace_usb_uhci_packet_add(async->queue->token, async->td_addr);
 
     return async;
@@ -274,7 +276,9 @@ static void uhci_async_free(UHCIAsync *async)
 {
     trace_usb_uhci_packet_del(async->queue->token, async->td_addr);
     usb_packet_cleanup(&async->packet);
-    qemu_sglist_destroy(&async->sgl);
+    if (async->buf != async->static_buf) {
+        g_free(async->buf);
+    }
     g_free(async);
 }
 
@@ -299,7 +303,6 @@ static void uhci_async_cancel(UHCIAsync *async)
                                  async->done);
     if (!async->done)
         usb_cancel_packet(&async->packet);
-    usb_packet_unmap(&async->packet, &async->sgl);
     uhci_async_free(async);
 }
 
@@ -430,7 +433,7 @@ static int uhci_post_load(void *opaque, int version_id)
     UHCIState *s = opaque;
 
     if (version_id < 2) {
-        s->expire_time = qemu_get_clock_ns(vm_clock) +
+        s->expire_time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
             (get_ticks_per_sec() / FRAME_TIMER_FREQ);
     }
     return 0;
@@ -473,9 +476,9 @@ static void uhci_port_write(void *opaque, hwaddr addr,
         if ((val & UHCI_CMD_RS) && !(s->cmd & UHCI_CMD_RS)) {
             /* start frame processing */
             trace_usb_uhci_schedule_start();
-            s->expire_time = qemu_get_clock_ns(vm_clock) +
+            s->expire_time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                 (get_ticks_per_sec() / FRAME_TIMER_FREQ);
-            qemu_mod_timer(s->frame_timer, s->expire_time);
+            timer_mod(s->frame_timer, s->expire_time);
             s->status &= ~UHCI_STS_HCHALTED;
         } else if (!(val & UHCI_CMD_RS)) {
             s->status |= UHCI_STS_HCHALTED;
@@ -497,6 +500,12 @@ static void uhci_port_write(void *opaque, hwaddr addr,
             return;
         }
         s->cmd = val;
+        if (val & UHCI_CMD_EGSM) {
+            if ((s->ports[0].ctrl & UHCI_PORT_RD) ||
+                (s->ports[1].ctrl & UHCI_PORT_RD)) {
+                uhci_resume(s);
+            }
+        }
         break;
     case 0x02:
         s->status &= ~val;
@@ -774,6 +783,7 @@ static int uhci_complete_td(UHCIState *s, UHCI_TD *td, UHCIAsync *async, uint32_
         *int_mask |= 0x01;
 
     if (pid == USB_TOKEN_IN) {
+        pci_dma_write(&s->dev, td->buffer, async->buf, len);
         if ((td->ctrl & TD_CTRL_SPD) && len < max_len) {
             *int_mask |= 0x02;
             /* short packet: do not update QH */
@@ -881,12 +891,17 @@ static int uhci_handle_td(UHCIState *s, UHCIQueue *q, uint32_t qh_addr,
     spd = (pid == USB_TOKEN_IN && (td->ctrl & TD_CTRL_SPD) != 0);
     usb_packet_setup(&async->packet, pid, q->ep, 0, td_addr, spd,
                      (td->ctrl & TD_CTRL_IOC) != 0);
-    qemu_sglist_add(&async->sgl, td->buffer, max_len);
-    usb_packet_map(&async->packet, &async->sgl);
+    if (max_len <= sizeof(async->static_buf)) {
+        async->buf = async->static_buf;
+    } else {
+        async->buf = g_malloc(max_len);
+    }
+    usb_packet_addbuf(&async->packet, async->buf, max_len);
 
     switch(pid) {
     case USB_TOKEN_OUT:
     case USB_TOKEN_SETUP:
+        pci_dma_read(&s->dev, td->buffer, async->buf, max_len);
         usb_handle_packet(q->ep->dev, &async->packet);
         if (async->packet.status == USB_RET_SUCCESS) {
             async->packet.actual_length = max_len;
@@ -899,7 +914,6 @@ static int uhci_handle_td(UHCIState *s, UHCIQueue *q, uint32_t qh_addr,
 
     default:
         /* invalid pid : frame interrupted */
-        usb_packet_unmap(&async->packet, &async->sgl);
         uhci_async_free(async);
         s->status |= UHCI_STS_HCPERR;
         uhci_update_irq(s);
@@ -916,7 +930,6 @@ static int uhci_handle_td(UHCIState *s, UHCIQueue *q, uint32_t qh_addr,
 
 done:
     ret = uhci_complete_td(s, td, async, int_mask);
-    usb_packet_unmap(&async->packet, &async->sgl);
     uhci_async_free(async);
     return ret;
 }
@@ -1148,7 +1161,7 @@ static void uhci_frame_timer(void *opaque)
     if (!(s->cmd & UHCI_CMD_RS)) {
         /* Full stop */
         trace_usb_uhci_schedule_stop();
-        qemu_del_timer(s->frame_timer);
+        timer_del(s->frame_timer);
         uhci_async_cancel_all(s);
         /* set hchalted bit in status - UHCI11D 2.1.2 */
         s->status |= UHCI_STS_HCHALTED;
@@ -1157,7 +1170,7 @@ static void uhci_frame_timer(void *opaque)
 
     /* We still store expire_time in our state, for migration */
     t_last_run = s->expire_time - frame_t;
-    t_now = qemu_get_clock_ns(vm_clock);
+    t_now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     /* Process up to MAX_FRAMES_PER_TICK frames */
     frames = (t_now - t_last_run) / frame_t;
@@ -1191,7 +1204,7 @@ static void uhci_frame_timer(void *opaque)
     }
     s->pending_int_mask = 0;
 
-    qemu_mod_timer(s->frame_timer, t_now + frame_t);
+    timer_mod(s->frame_timer, t_now + frame_t);
 }
 
 static const MemoryRegionOps uhci_ioport_ops = {
@@ -1241,20 +1254,22 @@ static int usb_uhci_common_initfn(PCIDevice *dev)
             return -1;
         }
     } else {
-        usb_bus_new(&s->bus, &uhci_bus_ops, &s->dev.qdev);
+        usb_bus_new(&s->bus, sizeof(s->bus), &uhci_bus_ops, DEVICE(dev));
         for (i = 0; i < NB_PORTS; i++) {
             usb_register_port(&s->bus, &s->ports[i].port, s, i, &uhci_port_ops,
                               USB_SPEED_MASK_LOW | USB_SPEED_MASK_FULL);
         }
     }
     s->bh = qemu_bh_new(uhci_bh, s);
-    s->frame_timer = qemu_new_timer_ns(vm_clock, uhci_frame_timer, s);
+    s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, uhci_frame_timer, s);
     s->num_ports_vmstate = NB_PORTS;
     QTAILQ_INIT(&s->queues);
 
     qemu_register_reset(uhci_reset, s);
 
-    memory_region_init_io(&s->io_bar, &uhci_ioport_ops, s, "uhci", 0x20);
+    memory_region_init_io(&s->io_bar, OBJECT(s), &uhci_ioport_ops, s,
+                          "uhci", 0x20);
+
     /* Use region 4 for consistency with real hardware.  BSD guests seem
        to rely on this.  */
     pci_register_bar(&s->dev, 4, PCI_BASE_ADDRESS_SPACE_IO, &s->io_bar);
@@ -1308,6 +1323,7 @@ static void uhci_class_init(ObjectClass *klass, void *data)
     k->no_hotplug = 1;
     dc->vmsd = &vmstate_uhci;
     dc->props = uhci_properties;
+    set_bit(DEVICE_CATEGORY_USB, dc->categories);
     u->info = *info;
 }
 

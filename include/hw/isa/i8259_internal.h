@@ -42,13 +42,14 @@ typedef struct PICCommonState PICCommonState;
 typedef struct PICCommonClass
 {
     ISADeviceClass parent_class;
-    void (*init)(PICCommonState *s);
+
     void (*pre_save)(PICCommonState *s);
     void (*post_load)(PICCommonState *s);
 } PICCommonClass;
 
 struct PICCommonState {
-    ISADevice dev;
+    ISADevice parent_obj;
+
     uint8_t last_irr; /* edge detection */
     uint8_t irr; /* interrupt request register */
     uint8_t imr; /* interrupt mask register */

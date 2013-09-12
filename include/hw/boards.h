@@ -6,12 +6,9 @@
 #include "sysemu/blockdev.h"
 #include "hw/qdev.h"
 
-#define DEFAULT_MACHINE_OPTIONS \
-    .boot_order = "cad"
-
 typedef struct QEMUMachineInitArgs {
     ram_addr_t ram_size;
-    const char *boot_device;
+    const char *boot_order;
     const char *kernel_filename;
     const char *kernel_cmdline;
     const char *initrd_filename;
@@ -22,12 +19,15 @@ typedef void QEMUMachineInitFunc(QEMUMachineInitArgs *args);
 
 typedef void QEMUMachineResetFunc(void);
 
+typedef void QEMUMachineHotAddCPUFunc(const int64_t id, Error **errp);
+
 typedef struct QEMUMachine {
     const char *name;
     const char *alias;
     const char *desc;
     QEMUMachineInitFunc *init;
     QEMUMachineResetFunc *reset;
+    QEMUMachineHotAddCPUFunc *hot_add_cpu;
     BlockInterfaceType block_default_type;
     int max_cpus;
     unsigned int no_serial:1,
@@ -39,7 +39,7 @@ typedef struct QEMUMachine {
         no_sdcard:1;
     int is_default;
     const char *default_machine_opts;
-    const char *boot_order;
+    const char *default_boot_order;
     GlobalProperty *compat_props;
     struct QEMUMachine *next;
     const char *hw_version;

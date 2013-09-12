@@ -25,7 +25,6 @@
 #include "qemu/timer.h"
 #include "block/block_int.h"
 #include "qemu/module.h"
-#include "qemu-common.h"
 #include "block/aio.h"
 #include "raw-aio.h"
 #include "qemu/event_notifier.h"
@@ -104,13 +103,6 @@ static void win32_aio_completion_cb(EventNotifier *e)
 
         win32_aio_process_completion(s, waiocb, count);
     }
-}
-
-static int win32_aio_flush_cb(EventNotifier *e)
-{
-    QEMUWin32AIOState *s = container_of(e, QEMUWin32AIOState, e);
-
-    return (s->count > 0) ? 1 : 0;
 }
 
 static void win32_aio_cancel(BlockDriverAIOCB *blockacb)
@@ -202,8 +194,7 @@ QEMUWin32AIOState *win32_aio_init(void)
         goto out_close_efd;
     }
 
-    qemu_aio_set_event_notifier(&s->e, win32_aio_completion_cb,
-                                win32_aio_flush_cb);
+    qemu_aio_set_event_notifier(&s->e, win32_aio_completion_cb);
 
     return s;
 

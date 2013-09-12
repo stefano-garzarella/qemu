@@ -34,9 +34,6 @@
         tcg_abort(); \
     } while (0)
 
-/* Single bit n. */
-#define BIT(n) (1 << (n))
-
 /* Bitfield n...m (in 32 bit value). */
 #define BITS(n, m) (((0xffffffffU << (31 - n)) >> (31 - n + m)) << m)
 
@@ -373,7 +370,7 @@ static const char *const tcg_target_reg_names[TCG_TARGET_NB_REGS] = {
 #endif
 
 static void patch_reloc(uint8_t *code_ptr, int type,
-                        tcg_target_long value, tcg_target_long addend)
+                        intptr_t value, intptr_t addend)
 {
     /* tcg_out_reloc always uses the same type, addend. */
     assert(type == sizeof(tcg_target_long));
@@ -416,13 +413,6 @@ static void tcg_out_i(TCGContext *s, tcg_target_ulong v)
 {
     *(tcg_target_ulong *)s->code_ptr = v;
     s->code_ptr += sizeof(tcg_target_ulong);
-}
-
-/* Write 64 bit value. */
-static void tcg_out64(TCGContext *s, uint64_t v)
-{
-    *(uint64_t *)s->code_ptr = v;
-    s->code_ptr += sizeof(v);
 }
 
 /* Write opcode. */
@@ -491,7 +481,7 @@ static void tci_out_label(TCGContext *s, TCGArg arg)
 }
 
 static void tcg_out_ld(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg1,
-                       tcg_target_long arg2)
+                       intptr_t arg2)
 {
     uint8_t *old_code_ptr = s->code_ptr;
     if (type == TCG_TYPE_I32) {
@@ -845,7 +835,7 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, const TCGArg *args,
 }
 
 static void tcg_out_st(TCGContext *s, TCGType type, TCGReg arg, TCGReg arg1,
-                       tcg_target_long arg2)
+                       intptr_t arg2)
 {
     uint8_t *old_code_ptr = s->code_ptr;
     if (type == TCG_TYPE_I32) {

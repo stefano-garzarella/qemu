@@ -15,6 +15,7 @@ extern PropertyInfo qdev_prop_uint64;
 extern PropertyInfo qdev_prop_hex8;
 extern PropertyInfo qdev_prop_hex32;
 extern PropertyInfo qdev_prop_hex64;
+extern PropertyInfo qdev_prop_size;
 extern PropertyInfo qdev_prop_string;
 extern PropertyInfo qdev_prop_chr;
 extern PropertyInfo qdev_prop_ptr;
@@ -116,6 +117,8 @@ extern PropertyInfo qdev_prop_arraylen;
     DEFINE_PROP_DEFAULT(_n, _s, _f, _d, qdev_prop_hex32, uint32_t)
 #define DEFINE_PROP_HEX64(_n, _s, _f, _d)                       \
     DEFINE_PROP_DEFAULT(_n, _s, _f, _d, qdev_prop_hex64, uint64_t)
+#define DEFINE_PROP_SIZE(_n, _s, _f, _d)                       \
+    DEFINE_PROP_DEFAULT(_n, _s, _f, _d, qdev_prop_size, uint64_t)
 #define DEFINE_PROP_PCI_DEVFN(_n, _s, _f, _d)                   \
     DEFINE_PROP_DEFAULT(_n, _s, _f, _d, qdev_prop_pci_devfn, int32_t)
 
@@ -148,7 +151,8 @@ extern PropertyInfo qdev_prop_arraylen;
 
 /* Set properties between creation and init.  */
 void *qdev_get_prop_ptr(DeviceState *dev, Property *prop);
-int qdev_prop_parse(DeviceState *dev, const char *name, const char *value);
+void qdev_prop_parse(DeviceState *dev, const char *name, const char *value,
+                     Error **errp);
 void qdev_prop_set_bit(DeviceState *dev, const char *name, bool value);
 void qdev_prop_set_uint8(DeviceState *dev, const char *name, uint8_t value);
 void qdev_prop_set_uint16(DeviceState *dev, const char *name, uint16_t value);
@@ -167,7 +171,9 @@ void qdev_prop_set_ptr(DeviceState *dev, const char *name, void *value);
 
 void qdev_prop_register_global(GlobalProperty *prop);
 void qdev_prop_register_global_list(GlobalProperty *props);
-void qdev_prop_set_globals(DeviceState *dev);
+void qdev_prop_set_globals(DeviceState *dev, Error **errp);
+void qdev_prop_set_globals_for_type(DeviceState *dev, const char *typename,
+                                    Error **errp);
 void error_set_from_qdev_prop_error(Error **errp, int ret, DeviceState *dev,
                                     Property *prop, const char *value);
 

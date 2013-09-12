@@ -168,6 +168,7 @@ static const char *event_names[BLKDBG_EVENT_MAX] = {
 
     [BLKDBG_REFTABLE_LOAD]                  = "reftable_load",
     [BLKDBG_REFTABLE_GROW]                  = "reftable_grow",
+    [BLKDBG_REFTABLE_UPDATE]                = "reftable_update",
 
     [BLKDBG_REFBLOCK_LOAD]                  = "refblock_load",
     [BLKDBG_REFBLOCK_UPDATE]                = "refblock_update",
@@ -182,6 +183,9 @@ static const char *event_names[BLKDBG_EVENT_MAX] = {
     [BLKDBG_CLUSTER_ALLOC]                  = "cluster_alloc",
     [BLKDBG_CLUSTER_ALLOC_BYTES]            = "cluster_alloc_bytes",
     [BLKDBG_CLUSTER_FREE]                   = "cluster_free",
+
+    [BLKDBG_FLUSH_TO_OS]                    = "flush_to_os",
+    [BLKDBG_FLUSH_TO_DISK]                  = "flush_to_disk",
 };
 
 static int get_event_by_name(const char *name, BlkDebugEvent *event)

@@ -152,7 +152,8 @@ struct SCSIBus {
     const SCSIBusInfo *info;
 };
 
-void scsi_bus_new(SCSIBus *bus, DeviceState *host, const SCSIBusInfo *info);
+void scsi_bus_new(SCSIBus *bus, size_t bus_size, DeviceState *host,
+                  const SCSIBusInfo *info, const char *bus_name);
 
 static inline SCSIBus *scsi_bus_from_device(SCSIDevice *d)
 {
@@ -161,8 +162,8 @@ static inline SCSIBus *scsi_bus_from_device(SCSIDevice *d)
 
 SCSIDevice *scsi_bus_legacy_add_drive(SCSIBus *bus, BlockDriverState *bdrv,
                                       int unit, bool removable, int bootindex,
-                                      const char *serial);
-int scsi_bus_legacy_handle_cmdline(SCSIBus *bus);
+                                      const char *serial, Error **errp);
+void scsi_bus_legacy_handle_cmdline(SCSIBus *bus, Error **errp);
 
 /*
  * Predefined sense codes

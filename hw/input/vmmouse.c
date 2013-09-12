@@ -51,9 +51,13 @@
 #define DPRINTF(fmt, ...) do { } while (0)
 #endif
 
-typedef struct _VMMouseState
+#define TYPE_VMMOUSE "vmmouse"
+#define VMMOUSE(obj) OBJECT_CHECK(VMMouseState, (obj), TYPE_VMMOUSE)
+
+typedef struct VMMouseState
 {
-    ISADevice dev;
+    ISADevice parent_obj;
+
     uint32_t queue[VMMOUSE_QUEUE_SIZE];
     int32_t queue_size;
     uint16_t nb_queue;
@@ -250,24 +254,22 @@ static const VMStateDescription vmstate_vmmouse = {
 
 static void vmmouse_reset(DeviceState *d)
 {
-    VMMouseState *s = container_of(d, VMMouseState, dev.qdev);
+    VMMouseState *s = VMMOUSE(d);
 
     s->queue_size = VMMOUSE_QUEUE_SIZE;
 
     vmmouse_disable(s);
 }
 
-static int vmmouse_initfn(ISADevice *dev)
+static void vmmouse_realizefn(DeviceState *dev, Error **errp)
 {
-    VMMouseState *s = DO_UPCAST(VMMouseState, dev, dev);
+    VMMouseState *s = VMMOUSE(dev);
 
     DPRINTF("vmmouse_init\n");
 
     vmport_register(VMMOUSE_STATUS, vmmouse_ioport_read, s);
     vmport_register(VMMOUSE_COMMAND, vmmouse_ioport_read, s);
     vmport_register(VMMOUSE_DATA, vmmouse_ioport_read, s);
-
-    return 0;
 }
 
 static Property vmmouse_properties[] = {
@@ -278,8 +280,8 @@ static Property vmmouse_properties[] = {
 static void vmmouse_class_initfn(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    ISADeviceClass *ic = ISA_DEVICE_CLASS(klass);
-    ic->init = vmmouse_initfn;
+
+    dc->realize = vmmouse_realizefn;
     dc->no_user = 1;
     dc->reset = vmmouse_reset;
     dc->vmsd = &vmstate_vmmouse;
@@ -287,7 +289,7 @@ static void vmmouse_class_initfn(ObjectClass *klass, void *data)
 }
 
 static const TypeInfo vmmouse_info = {
-    .name          = "vmmouse",
+    .name          = TYPE_VMMOUSE,
     .parent        = TYPE_ISA_DEVICE,
     .instance_size = sizeof(VMMouseState),
     .class_init    = vmmouse_class_initfn,

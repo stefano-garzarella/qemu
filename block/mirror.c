@@ -338,8 +338,8 @@ static void coroutine_fn mirror_run(void *opaque)
         base = s->mode == MIRROR_SYNC_MODE_FULL ? NULL : bs->backing_hd;
         for (sector_num = 0; sector_num < end; ) {
             int64_t next = (sector_num | (sectors_per_chunk - 1)) + 1;
-            ret = bdrv_co_is_allocated_above(bs, base,
-                                             sector_num, next - sector_num, &n);
+            ret = bdrv_is_allocated_above(bs, base,
+                                          sector_num, next - sector_num, &n);
 
             if (ret < 0) {
                 goto immediate_exit;
@@ -356,7 +356,7 @@ static void coroutine_fn mirror_run(void *opaque)
     }
 
     bdrv_dirty_iter_init(bs, &s->hbi);
-    last_pause_ns = qemu_get_clock_ns(rt_clock);
+    last_pause_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     for (;;) {
         uint64_t delay_ns;
         int64_t cnt;
@@ -374,7 +374,7 @@ static void coroutine_fn mirror_run(void *opaque)
          * We do so every SLICE_TIME nanoseconds, or when there is an error,
          * or when the source is clean, whichever comes first.
          */
-        if (qemu_get_clock_ns(rt_clock) - last_pause_ns < SLICE_TIME &&
+        if (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - last_pause_ns < SLICE_TIME &&
             s->common.iostatus == BLOCK_DEVICE_IO_STATUS_OK) {
             if (s->in_flight == MAX_IN_FLIGHT || s->buf_free_count == 0 ||
                 (cnt == 0 && s->in_flight > 0)) {
@@ -439,13 +439,13 @@ static void coroutine_fn mirror_run(void *opaque)
                 delay_ns = 0;
             }
 
-            block_job_sleep_ns(&s->common, rt_clock, delay_ns);
+            block_job_sleep_ns(&s->common, QEMU_CLOCK_REALTIME, delay_ns);
             if (block_job_is_cancelled(&s->common)) {
                 break;
             }
         } else if (!should_complete) {
             delay_ns = (s->in_flight == 0 && cnt == 0 ? SLICE_TIME : 0);
-            block_job_sleep_ns(&s->common, rt_clock, delay_ns);
+            block_job_sleep_ns(&s->common, QEMU_CLOCK_REALTIME, delay_ns);
         } else if (cnt == 0) {
             /* The two disks are in sync.  Exit and report successful
              * completion.
@@ -454,7 +454,7 @@ static void coroutine_fn mirror_run(void *opaque)
             s->common.cancelled = false;
             break;
         }
-        last_pause_ns = qemu_get_clock_ns(rt_clock);
+        last_pause_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     }
 
 immediate_exit:
@@ -480,7 +480,7 @@ immediate_exit:
         bdrv_swap(s->target, s->common.bs);
     }
     bdrv_close(s->target);
-    bdrv_delete(s->target);
+    bdrv_unref(s->target);
     block_job_completed(&s->common, ret);
 }
 
@@ -512,7 +512,7 @@ static void mirror_complete(BlockJob *job, Error **errp)
         char backing_filename[PATH_MAX];
         bdrv_get_full_backing_filename(s->target, backing_filename,
                                        sizeof(backing_filename));
-        error_set(errp, QERR_OPEN_FILE_FAILED, backing_filename);
+        error_setg_file_open(errp, -ret, backing_filename);
         return;
     }
     if (!s->synced) {
@@ -524,7 +524,7 @@ static void mirror_complete(BlockJob *job, Error **errp)
     block_job_resume(job);
 }
 
-static BlockJobType mirror_job_type = {
+static const BlockJobType mirror_job_type = {
     .instance_size = sizeof(MirrorBlockJob),
     .job_type      = "mirror",
     .set_speed     = mirror_set_speed,

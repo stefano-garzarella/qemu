@@ -22,50 +22,43 @@
  * THE SOFTWARE.
  */
 
-#if defined(__ARM_ARCH_7__) ||  \
-    defined(__ARM_ARCH_7A__) || \
-    defined(__ARM_ARCH_7EM__) || \
-    defined(__ARM_ARCH_7M__) || \
-    defined(__ARM_ARCH_7R__)
-#define USE_ARMV7_INSTRUCTIONS
+/* The __ARM_ARCH define is provided by gcc 4.8.  Construct it otherwise.  */
+#ifndef __ARM_ARCH
+# if defined(__ARM_ARCH_7__) || defined(__ARM_ARCH_7A__) \
+     || defined(__ARM_ARCH_7R__) || defined(__ARM_ARCH_7M__) \
+     || defined(__ARM_ARCH_7EM__)
+#  define __ARM_ARCH 7
+# elif defined(__ARM_ARCH_6__) || defined(__ARM_ARCH_6J__) \
+       || defined(__ARM_ARCH_6Z__) || defined(__ARM_ARCH_6ZK__) \
+       || defined(__ARM_ARCH_6K__) || defined(__ARM_ARCH_6T2__)
+#  define __ARM_ARCH 6
+# elif defined(__ARM_ARCH_5__) || defined(__ARM_ARCH_5E__) \
+       || defined(__ARM_ARCH_5T__) || defined(__ARM_ARCH_5TE__) \
+       || defined(__ARM_ARCH_5TEJ__)
+#  define __ARM_ARCH 5
+# else
+#  define __ARM_ARCH 4
+# endif
 #endif
 
-#if defined(USE_ARMV7_INSTRUCTIONS) || \
-    defined(__ARM_ARCH_6J__) || \
-    defined(__ARM_ARCH_6K__) || \
-    defined(__ARM_ARCH_6T2__) || \
-    defined(__ARM_ARCH_6Z__) || \
-    defined(__ARM_ARCH_6ZK__)
-#define USE_ARMV6_INSTRUCTIONS
-#endif
+static int arm_arch = __ARM_ARCH;
 
-#if defined(USE_ARMV6_INSTRUCTIONS) || \
-    defined(__ARM_ARCH_5T__) || \
-    defined(__ARM_ARCH_5TE__) || \
-    defined(__ARM_ARCH_5TEJ__)
-#define USE_ARMV5_INSTRUCTIONS
-#endif
-
-#ifdef USE_ARMV5_INSTRUCTIONS
-static const int use_armv5_instructions = 1;
+#if defined(__ARM_ARCH_5T__) \
+    || defined(__ARM_ARCH_5TE__) || defined(__ARM_ARCH_5TEJ__)
+# define use_armv5t_instructions 1
 #else
-static const int use_armv5_instructions = 0;
+# define use_armv5t_instructions use_armv6_instructions
 #endif
-#undef USE_ARMV5_INSTRUCTIONS
 
-#ifdef USE_ARMV6_INSTRUCTIONS
-static const int use_armv6_instructions = 1;
-#else
-static const int use_armv6_instructions = 0;
-#endif
-#undef USE_ARMV6_INSTRUCTIONS
+#define use_armv6_instructions  (__ARM_ARCH >= 6 || arm_arch >= 6)
+#define use_armv7_instructions  (__ARM_ARCH >= 7 || arm_arch >= 7)
 
-#ifdef USE_ARMV7_INSTRUCTIONS
-static const int use_armv7_instructions = 1;
-#else
-static const int use_armv7_instructions = 0;
+#ifndef use_idiv_instructions
+bool use_idiv_instructions;
 #endif
-#undef USE_ARMV7_INSTRUCTIONS
+#ifdef CONFIG_GETAUXVAL
+# include <sys/auxv.h>
+#endif
 
 #ifndef NDEBUG
 static const char * const tcg_target_reg_names[TCG_TARGET_NB_REGS] = {
@@ -115,21 +108,21 @@ static const int tcg_target_call_oarg_regs[2] = {
 
 #define TCG_REG_TMP  TCG_REG_R12
 
-static inline void reloc_abs32(void *code_ptr, tcg_target_long target)
+static inline void reloc_abs32(void *code_ptr, intptr_t target)
 {
     *(uint32_t *) code_ptr = target;
 }
 
-static inline void reloc_pc24(void *code_ptr, tcg_target_long target)
+static inline void reloc_pc24(void *code_ptr, intptr_t target)
 {
-    uint32_t offset = ((target - ((tcg_target_long) code_ptr + 8)) >> 2);
+    uint32_t offset = ((target - ((intptr_t)code_ptr + 8)) >> 2);
 
     *(uint32_t *) code_ptr = ((*(uint32_t *) code_ptr) & ~0xffffff)
                              | (offset & 0xffffff);
 }
 
 static void patch_reloc(uint8_t *code_ptr, int type,
-                tcg_target_long value, tcg_target_long addend)
+                        intptr_t value, intptr_t addend)
 {
     switch (type) {
     case R_ARM_ABS32:
@@ -1023,7 +1016,7 @@ static inline void tcg_out_call(TCGContext *s, uint32_t addr)
     if (val - 8 < 0x02000000 && val - 8 >= -0x02000000) {
         if (addr & 1) {
             /* Use BLX if the target is in Thumb mode */
-            if (!use_armv5_instructions) {
+            if (!use_armv5t_instructions) {
                 tcg_abort();
             }
             tcg_out_blx_imm(s, val);
@@ -1042,7 +1035,7 @@ static inline void tcg_out_call(TCGContext *s, uint32_t addr)
 
 static inline void tcg_out_callr(TCGContext *s, int cond, int arg)
 {
-    if (use_armv5_instructions) {
+    if (use_armv5t_instructions) {
         tcg_out_blx(s, cond, arg);
     } else {
         tcg_out_dat_reg(s, cond, ARITH_MOV, TCG_REG_R14, 0,
@@ -1064,8 +1057,6 @@ static inline void tcg_out_goto_label(TCGContext *s, int cond, int label_index)
 }
 
 #ifdef CONFIG_SOFTMMU
-
-#include "exec/softmmu_defs.h"
 
 /* helper signature: helper_ld_mmu(CPUState *env, target_ulong addr,
    int mmu_idx) */
@@ -1190,7 +1181,7 @@ static void tcg_out_tlb_read(TCGContext *s, TCGReg addrlo, TCGReg addrhi,
         tcg_out_memop_12(s, COND_AL, INSN_LDR_IMM, TCG_REG_R0,
                          TCG_REG_R2, tlb_offset, 1, 1);
         if (TARGET_LONG_BITS == 64) {
-            tcg_out_memop_12(s, COND_AL, INSN_LDR_IMM, TCG_REG_R0,
+            tcg_out_memop_12(s, COND_AL, INSN_LDR_IMM, TCG_REG_R1,
                              TCG_REG_R2, 4, 1, 0);
         }
     }
@@ -1611,17 +1602,15 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc,
 
     switch (opc) {
     case INDEX_op_exit_tb:
-        {
-            uint8_t *ld_ptr = s->code_ptr;
-            if (args[0] >> 8)
-                tcg_out_ld32_12(s, COND_AL, TCG_REG_R0, TCG_REG_PC, 0);
-            else
-                tcg_out_dat_imm(s, COND_AL, ARITH_MOV, TCG_REG_R0, 0, args[0]);
+        if (use_armv7_instructions || check_fit_imm(args[0])) {
+            tcg_out_movi32(s, COND_AL, TCG_REG_R0, args[0]);
             tcg_out_goto(s, COND_AL, (tcg_target_ulong) tb_ret_addr);
-            if (args[0] >> 8) {
-                *ld_ptr = (uint8_t) (s->code_ptr - ld_ptr) - 8;
-                tcg_out32(s, args[0]);
-            }
+        } else {
+            uint8_t *ld_ptr = s->code_ptr;
+            tcg_out_ld32_12(s, COND_AL, TCG_REG_R0, TCG_REG_PC, 0);
+            tcg_out_goto(s, COND_AL, (tcg_target_ulong) tb_ret_addr);
+            *ld_ptr = (uint8_t) (s->code_ptr - ld_ptr) - 8;
+            tcg_out32(s, args[0]);
         }
         break;
     case INDEX_op_goto_tb:
@@ -1928,18 +1917,6 @@ static inline void tcg_out_op(TCGContext *s, TCGOpcode opc,
     case INDEX_op_divu_i32:
         tcg_out_udiv(s, COND_AL, args[0], args[1], args[2]);
         break;
-    case INDEX_op_rem_i32:
-        tcg_out_sdiv(s, COND_AL, TCG_REG_TMP, args[1], args[2]);
-        tcg_out_mul32(s, COND_AL, TCG_REG_TMP, TCG_REG_TMP, args[2]);
-        tcg_out_dat_reg(s, COND_AL, ARITH_SUB, args[0], args[1], TCG_REG_TMP,
-                        SHIFT_IMM_LSL(0));
-        break;
-    case INDEX_op_remu_i32:
-        tcg_out_udiv(s, COND_AL, TCG_REG_TMP, args[1], args[2]);
-        tcg_out_mul32(s, COND_AL, TCG_REG_TMP, TCG_REG_TMP, args[2]);
-        tcg_out_dat_reg(s, COND_AL, ARITH_SUB, args[0], args[1], TCG_REG_TMP,
-                        SHIFT_IMM_LSL(0));
-        break;
 
     default:
         tcg_abort();
@@ -2043,23 +2020,30 @@ static const TCGTargetOpDef arm_op_defs[] = {
 
     { INDEX_op_deposit_i32, { "r", "0", "rZ" } },
 
-#if TCG_TARGET_HAS_div_i32
     { INDEX_op_div_i32, { "r", "r", "r" } },
-    { INDEX_op_rem_i32, { "r", "r", "r" } },
     { INDEX_op_divu_i32, { "r", "r", "r" } },
-    { INDEX_op_remu_i32, { "r", "r", "r" } },
-#endif
 
     { -1 },
 };
 
 static void tcg_target_init(TCGContext *s)
 {
-#if !defined(CONFIG_USER_ONLY)
-    /* fail safe */
-    if ((1 << CPU_TLB_ENTRY_BITS) != sizeof(CPUTLBEntry))
-        tcg_abort();
-#endif
+#if defined(CONFIG_GETAUXVAL)
+    /* Only probe for the platform and capabilities if we havn't already
+       determined maximum values at compile time.  */
+# if !defined(use_idiv_instructions)
+    {
+        unsigned long hwcap = getauxval(AT_HWCAP);
+        use_idiv_instructions = (hwcap & HWCAP_ARM_IDIVA) != 0;
+    }
+# endif
+    if (__ARM_ARCH < 7) {
+        const char *pl = (const char *)getauxval(AT_PLATFORM);
+        if (pl != NULL && pl[0] == 'v' && pl[1] >= '4' && pl[1] <= '9') {
+            arm_arch = pl[1] - '0';
+        }
+    }
+#endif /* GETAUXVAL */
 
     tcg_regset_set32(tcg_target_available_regs[TCG_TYPE_I32], 0, 0xffff);
     tcg_regset_set32(tcg_target_call_clobber_regs, 0,
@@ -2079,13 +2063,13 @@ static void tcg_target_init(TCGContext *s)
 }
 
 static inline void tcg_out_ld(TCGContext *s, TCGType type, TCGReg arg,
-                              TCGReg arg1, tcg_target_long arg2)
+                              TCGReg arg1, intptr_t arg2)
 {
     tcg_out_ld32u(s, COND_AL, arg, arg1, arg2);
 }
 
 static inline void tcg_out_st(TCGContext *s, TCGType type, TCGReg arg,
-                              TCGReg arg1, tcg_target_long arg2)
+                              TCGReg arg1, intptr_t arg2)
 {
     tcg_out_st32(s, COND_AL, arg, arg1, arg2);
 }
@@ -2102,23 +2086,31 @@ static inline void tcg_out_movi(TCGContext *s, TCGType type,
     tcg_out_movi32(s, COND_AL, ret, arg);
 }
 
+/* Compute frame size via macros, to share between tcg_target_qemu_prologue
+   and tcg_register_jit.  */
+
+#define PUSH_SIZE  ((11 - 4 + 1 + 1) * sizeof(tcg_target_long))
+
+#define FRAME_SIZE \
+    ((PUSH_SIZE \
+      + TCG_STATIC_CALL_ARGS_SIZE \
+      + CPU_TEMP_BUF_NLONGS * sizeof(long) \
+      + TCG_TARGET_STACK_ALIGN - 1) \
+     & -TCG_TARGET_STACK_ALIGN)
+
 static void tcg_target_qemu_prologue(TCGContext *s)
 {
-    int frame_size;
+    int stack_addend;
 
     /* Calling convention requires us to save r4-r11 and lr.  */
     /* stmdb sp!, { r4 - r11, lr } */
     tcg_out32(s, (COND_AL << 28) | 0x092d4ff0);
 
-    /* Allocate the local stack frame.  */
-    frame_size = TCG_STATIC_CALL_ARGS_SIZE;
-    frame_size += CPU_TEMP_BUF_NLONGS * sizeof(long);
-    /* We saved an odd number of registers above; keep an 8 aligned stack.  */
-    frame_size = ((frame_size + TCG_TARGET_STACK_ALIGN - 1)
-                  & -TCG_TARGET_STACK_ALIGN) + 4;
+    /* Reserve callee argument and tcg temp space.  */
+    stack_addend = FRAME_SIZE - PUSH_SIZE;
 
     tcg_out_dat_rI(s, COND_AL, ARITH_SUB, TCG_REG_CALL_STACK,
-                   TCG_REG_CALL_STACK, frame_size, 1);
+                   TCG_REG_CALL_STACK, stack_addend, 1);
     tcg_set_frame(s, TCG_REG_CALL_STACK, TCG_STATIC_CALL_ARGS_SIZE,
                   CPU_TEMP_BUF_NLONGS * sizeof(long));
 
@@ -2129,8 +2121,58 @@ static void tcg_target_qemu_prologue(TCGContext *s)
 
     /* Epilogue.  We branch here via tb_ret_addr.  */
     tcg_out_dat_rI(s, COND_AL, ARITH_ADD, TCG_REG_CALL_STACK,
-                   TCG_REG_CALL_STACK, frame_size, 1);
+                   TCG_REG_CALL_STACK, stack_addend, 1);
 
     /* ldmia sp!, { r4 - r11, pc } */
     tcg_out32(s, (COND_AL << 28) | 0x08bd8ff0);
+}
+
+typedef struct {
+    DebugFrameCIE cie;
+    DebugFrameFDEHeader fde;
+    uint8_t fde_def_cfa[4];
+    uint8_t fde_reg_ofs[18];
+} DebugFrame;
+
+#define ELF_HOST_MACHINE EM_ARM
+
+/* We're expecting a 2 byte uleb128 encoded value.  */
+QEMU_BUILD_BUG_ON(FRAME_SIZE >= (1 << 14));
+
+static DebugFrame debug_frame = {
+    .cie.len = sizeof(DebugFrameCIE)-4, /* length after .len member */
+    .cie.id = -1,
+    .cie.version = 1,
+    .cie.code_align = 1,
+    .cie.data_align = 0x7c,             /* sleb128 -4 */
+    .cie.return_column = 14,
+
+    /* Total FDE size does not include the "len" member.  */
+    .fde.len = sizeof(DebugFrame) - offsetof(DebugFrame, fde.cie_offset),
+
+    .fde_def_cfa = {
+        12, 13,                         /* DW_CFA_def_cfa sp, ... */
+        (FRAME_SIZE & 0x7f) | 0x80,     /* ... uleb128 FRAME_SIZE */
+        (FRAME_SIZE >> 7)
+    },
+    .fde_reg_ofs = {
+        /* The following must match the stmdb in the prologue.  */
+        0x8e, 1,                        /* DW_CFA_offset, lr, -4 */
+        0x8b, 2,                        /* DW_CFA_offset, r11, -8 */
+        0x8a, 3,                        /* DW_CFA_offset, r10, -12 */
+        0x89, 4,                        /* DW_CFA_offset, r9, -16 */
+        0x88, 5,                        /* DW_CFA_offset, r8, -20 */
+        0x87, 6,                        /* DW_CFA_offset, r7, -24 */
+        0x86, 7,                        /* DW_CFA_offset, r6, -28 */
+        0x85, 8,                        /* DW_CFA_offset, r5, -32 */
+        0x84, 9,                        /* DW_CFA_offset, r4, -36 */
+    }
+};
+
+void tcg_register_jit(void *buf, size_t buf_size)
+{
+    debug_frame.fde.func_start = (tcg_target_long) buf;
+    debug_frame.fde.func_len = buf_size;
+
+    tcg_register_jit_int(buf, buf_size, &debug_frame, sizeof(debug_frame));
 }

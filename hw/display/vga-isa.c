@@ -31,43 +31,47 @@
 #include "qemu/timer.h"
 #include "hw/loader.h"
 
+#define TYPE_ISA_VGA "isa-vga"
+#define ISA_VGA(obj) OBJECT_CHECK(ISAVGAState, (obj), TYPE_ISA_VGA)
+
 typedef struct ISAVGAState {
-    ISADevice dev;
+    ISADevice parent_obj;
+
     struct VGACommonState state;
 } ISAVGAState;
 
-static void vga_reset_isa(DeviceState *dev)
+static void vga_isa_reset(DeviceState *dev)
 {
-    ISAVGAState *d = container_of(dev, ISAVGAState, dev.qdev);
+    ISAVGAState *d = ISA_VGA(dev);
     VGACommonState *s = &d->state;
 
     vga_common_reset(s);
 }
 
-static int vga_initfn(ISADevice *dev)
+static void vga_isa_realizefn(DeviceState *dev, Error **errp)
 {
-    ISAVGAState *d = DO_UPCAST(ISAVGAState, dev, dev);
+    ISADevice *isadev = ISA_DEVICE(dev);
+    ISAVGAState *d = ISA_VGA(dev);
     VGACommonState *s = &d->state;
     MemoryRegion *vga_io_memory;
     const MemoryRegionPortio *vga_ports, *vbe_ports;
 
-    vga_common_init(s);
-    s->legacy_address_space = isa_address_space(dev);
-    vga_io_memory = vga_init_io(s, &vga_ports, &vbe_ports);
-    isa_register_portio_list(dev, 0x3b0, vga_ports, s, "vga");
+    vga_common_init(s, OBJECT(dev));
+    s->legacy_address_space = isa_address_space(isadev);
+    vga_io_memory = vga_init_io(s, OBJECT(dev), &vga_ports, &vbe_ports);
+    isa_register_portio_list(isadev, 0x3b0, vga_ports, s, "vga");
     if (vbe_ports) {
-        isa_register_portio_list(dev, 0x1ce, vbe_ports, s, "vbe");
+        isa_register_portio_list(isadev, 0x1ce, vbe_ports, s, "vbe");
     }
-    memory_region_add_subregion_overlap(isa_address_space(dev),
+    memory_region_add_subregion_overlap(isa_address_space(isadev),
                                         isa_mem_base + 0x000a0000,
                                         vga_io_memory, 1);
     memory_region_set_coalescing(vga_io_memory);
     s->con = graphic_console_init(DEVICE(dev), s->hw_ops, s);
 
-    vga_init_vbe(s, isa_address_space(dev));
+    vga_init_vbe(s, OBJECT(dev), isa_address_space(isadev));
     /* ROM BIOS */
     rom_add_vga(VGABIOS_FILENAME);
-    return 0;
 }
 
 static Property vga_isa_properties[] = {
@@ -75,26 +79,27 @@ static Property vga_isa_properties[] = {
     DEFINE_PROP_END_OF_LIST(),
 };
 
-static void vga_class_initfn(ObjectClass *klass, void *data)
+static void vga_isa_class_initfn(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    ISADeviceClass *ic = ISA_DEVICE_CLASS(klass);
-    ic->init = vga_initfn;
-    dc->reset = vga_reset_isa;
+
+    dc->realize = vga_isa_realizefn;
+    dc->reset = vga_isa_reset;
     dc->vmsd = &vmstate_vga_common;
     dc->props = vga_isa_properties;
+    set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
 }
 
-static const TypeInfo vga_info = {
-    .name          = "isa-vga",
+static const TypeInfo vga_isa_info = {
+    .name          = TYPE_ISA_VGA,
     .parent        = TYPE_ISA_DEVICE,
     .instance_size = sizeof(ISAVGAState),
-    .class_init    = vga_class_initfn,
+    .class_init    = vga_isa_class_initfn,
 };
 
-static void vga_register_types(void)
+static void vga_isa_register_types(void)
 {
-    type_register_static(&vga_info);
+    type_register_static(&vga_isa_info);
 }
 
-type_init(vga_register_types)
+type_init(vga_isa_register_types)

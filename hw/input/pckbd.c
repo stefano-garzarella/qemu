@@ -424,15 +424,19 @@ void i8042_mm_init(qemu_irq kbd_irq, qemu_irq mouse_irq,
 
     vmstate_register(NULL, 0, &vmstate_kbd, s);
 
-    memory_region_init_io(region, &i8042_mmio_ops, s, "i8042", size);
+    memory_region_init_io(region, NULL, &i8042_mmio_ops, s, "i8042", size);
 
     s->kbd = ps2_kbd_init(kbd_update_kbd_irq, s);
     s->mouse = ps2_mouse_init(kbd_update_aux_irq, s);
     qemu_register_reset(kbd_reset, s);
 }
 
+#define TYPE_I8042 "i8042"
+#define I8042(obj) OBJECT_CHECK(ISAKBDState, (obj), TYPE_I8042)
+
 typedef struct ISAKBDState {
-    ISADevice dev;
+    ISADevice parent_obj;
+
     KBDState kbd;
     MemoryRegion io[2];
 } ISAKBDState;
@@ -440,14 +444,16 @@ typedef struct ISAKBDState {
 void i8042_isa_mouse_fake_event(void *opaque)
 {
     ISADevice *dev = opaque;
-    KBDState *s = &(DO_UPCAST(ISAKBDState, dev, dev)->kbd);
+    ISAKBDState *isa = I8042(dev);
+    KBDState *s = &isa->kbd;
 
     ps2_mouse_fake_event(s->mouse);
 }
 
 void i8042_setup_a20_line(ISADevice *dev, qemu_irq *a20_out)
 {
-    KBDState *s = &(DO_UPCAST(ISAKBDState, dev, dev)->kbd);
+    ISAKBDState *isa = I8042(dev);
+    KBDState *s = &isa->kbd;
 
     s->a20_out = a20_out;
 }
@@ -483,39 +489,48 @@ static const MemoryRegionOps i8042_cmd_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static int i8042_initfn(ISADevice *dev)
+static void i8042_initfn(Object *obj)
 {
-    ISAKBDState *isa_s = DO_UPCAST(ISAKBDState, dev, dev);
+    ISAKBDState *isa_s = I8042(obj);
     KBDState *s = &isa_s->kbd;
 
-    isa_init_irq(dev, &s->irq_kbd, 1);
-    isa_init_irq(dev, &s->irq_mouse, 12);
+    memory_region_init_io(isa_s->io + 0, obj, &i8042_data_ops, s,
+                          "i8042-data", 1);
+    memory_region_init_io(isa_s->io + 1, obj, &i8042_cmd_ops, s,
+                          "i8042-cmd", 1);
+}
 
-    memory_region_init_io(isa_s->io + 0, &i8042_data_ops, s, "i8042-data", 1);
-    isa_register_ioport(dev, isa_s->io + 0, 0x60);
+static void i8042_realizefn(DeviceState *dev, Error **errp)
+{
+    ISADevice *isadev = ISA_DEVICE(dev);
+    ISAKBDState *isa_s = I8042(dev);
+    KBDState *s = &isa_s->kbd;
 
-    memory_region_init_io(isa_s->io + 1, &i8042_cmd_ops, s, "i8042-cmd", 1);
-    isa_register_ioport(dev, isa_s->io + 1, 0x64);
+    isa_init_irq(isadev, &s->irq_kbd, 1);
+    isa_init_irq(isadev, &s->irq_mouse, 12);
+
+    isa_register_ioport(isadev, isa_s->io + 0, 0x60);
+    isa_register_ioport(isadev, isa_s->io + 1, 0x64);
 
     s->kbd = ps2_kbd_init(kbd_update_kbd_irq, s);
     s->mouse = ps2_mouse_init(kbd_update_aux_irq, s);
     qemu_register_reset(kbd_reset, s);
-    return 0;
 }
 
 static void i8042_class_initfn(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
-    ISADeviceClass *ic = ISA_DEVICE_CLASS(klass);
-    ic->init = i8042_initfn;
+
+    dc->realize = i8042_realizefn;
     dc->no_user = 1;
     dc->vmsd = &vmstate_kbd_isa;
 }
 
 static const TypeInfo i8042_info = {
-    .name          = "i8042",
+    .name          = TYPE_I8042,
     .parent        = TYPE_ISA_DEVICE,
     .instance_size = sizeof(ISAKBDState),
+    .instance_init = i8042_initfn,
     .class_init    = i8042_class_initfn,
 };
 

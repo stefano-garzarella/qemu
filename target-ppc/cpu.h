@@ -119,6 +119,9 @@ enum powerpc_mmu_t {
     /* Architecture 2.06 variant                               */
     POWERPC_MMU_2_06       = POWERPC_MMU_64 | POWERPC_MMU_1TSEG
                              | POWERPC_MMU_AMR | 0x00000003,
+    /* Architecture 2.06 "degraded" (no 1T segments)           */
+    POWERPC_MMU_2_06a      = POWERPC_MMU_64 | POWERPC_MMU_AMR
+                             | 0x00000003,
     /* Architecture 2.06 "degraded" (no 1T segments or AMR)    */
     POWERPC_MMU_2_06d      = POWERPC_MMU_64 | 0x00000003,
 #endif /* defined(TARGET_PPC64) */
@@ -449,6 +452,8 @@ struct ppc_slb_t {
 #define MSR_PMM  2  /* Performance monitor mark on POWER            x        */
 #define MSR_RI   1  /* Recoverable interrupt                        1        */
 #define MSR_LE   0  /* Little-endian mode                           1 hflags */
+
+#define LPCR_ILE (1 << (63-38))
 
 #define msr_sf   ((env->msr >> MSR_SF)   & 1)
 #define msr_isf  ((env->msr >> MSR_ISF)  & 1)
@@ -883,6 +888,8 @@ struct ppc_segment_page_sizes {
 /* The whole PowerPC CPU context */
 #define NB_MMU_MODES 3
 
+#define PPC_CPU_OPCODES_LEN 0x40
+
 struct CPUPPCState {
     /* First are the most commonly used resources
      * during translated code execution
@@ -943,7 +950,7 @@ struct CPUPPCState {
 #if defined(TARGET_PPC64)
     /* PowerPC 64 SLB area */
     ppc_slb_t slb[64];
-    int slb_nr;
+    int32_t slb_nr;
 #endif
     /* segment registers */
     hwaddr htab_base;
@@ -952,11 +959,11 @@ struct CPUPPCState {
     /* externally stored hash table */
     uint8_t *external_htab;
     /* BATs */
-    int nb_BATs;
+    uint32_t nb_BATs;
     target_ulong DBAT[2][8];
     target_ulong IBAT[2][8];
     /* PowerPC TLB registers (for 4xx, e500 and 60x software driven TLBs) */
-    int nb_tlb;      /* Total number of TLB                                  */
+    int32_t nb_tlb;      /* Total number of TLB                              */
     int tlb_per_way; /* Speed-up helper: used to avoid divisions at run time */
     int nb_ways;     /* Number of ways in the TLB set                        */
     int last_way;    /* Last used way used to allocate TLB in a LRU way      */
@@ -1036,7 +1043,7 @@ struct CPUPPCState {
 
     /* Those resources are used only during code translation */
     /* opcode handlers */
-    opc_handler_t *opcodes[0x40];
+    opc_handler_t *opcodes[PPC_CPU_OPCODES_LEN];
 
     /* Those resources are used only in QEMU core */
     target_ulong hflags;      /* hflags is a MSR & HFLAGS_MASK         */
@@ -1171,8 +1178,6 @@ static inline CPUPPCState *cpu_init(const char *cpu_model)
 #define cpu_signal_handler cpu_ppc_signal_handler
 #define cpu_list ppc_cpu_list
 
-#define CPU_SAVE_VERSION 4
-
 /* MMU modes definitions */
 #define MMU_MODE0_SUFFIX _user
 #define MMU_MODE1_SUFFIX _kernel
@@ -1182,15 +1187,6 @@ static inline int cpu_mmu_index (CPUPPCState *env)
 {
     return env->mmu_idx;
 }
-
-#if defined(CONFIG_USER_ONLY)
-static inline void cpu_clone_regs(CPUPPCState *env, target_ulong newsp)
-{
-    if (newsp)
-        env->gpr[1] = newsp;
-    env->gpr[3] = 0;
-}
-#endif
 
 #include "exec/cpu-all.h"
 
@@ -2031,17 +2027,6 @@ static inline void cpu_get_tb_cpu_state(CPUPPCState *env, target_ulong *pc,
     *flags = env->hflags;
 }
 
-static inline void cpu_set_tls(CPUPPCState *env, target_ulong newtls)
-{
-#if defined(TARGET_PPC64)
-    /* The kernel checks TIF_32BIT here; we don't support loading 32-bit
-       binaries on PPC64 yet. */
-    env->gpr[13] = newtls;
-#else
-    env->gpr[2] = newtls;
-#endif
-}
-
 #if !defined(CONFIG_USER_ONLY)
 static inline int booke206_tlbm_id(CPUPPCState *env, ppcmas_tlb_t *tlbm)
 {
@@ -2158,11 +2143,6 @@ static inline bool cpu_has_work(CPUState *cpu)
 }
 
 #include "exec/exec-all.h"
-
-static inline void cpu_pc_from_tb(CPUPPCState *env, TranslationBlock *tb)
-{
-    env->nip = tb->pc;
-}
 
 void dump_mmu(FILE *f, fprintf_function cpu_fprintf, CPUPPCState *env);
 

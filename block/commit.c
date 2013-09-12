@@ -103,14 +103,14 @@ wait:
         /* Note that even when no rate limit is applied we need to yield
          * with no pending I/O here so that bdrv_drain_all() returns.
          */
-        block_job_sleep_ns(&s->common, rt_clock, delay_ns);
+        block_job_sleep_ns(&s->common, QEMU_CLOCK_REALTIME, delay_ns);
         if (block_job_is_cancelled(&s->common)) {
             break;
         }
         /* Copy if allocated above the base */
-        ret = bdrv_co_is_allocated_above(top, base, sector_num,
-                                         COMMIT_BUFFER_SIZE / BDRV_SECTOR_SIZE,
-                                         &n);
+        ret = bdrv_is_allocated_above(top, base, sector_num,
+                                      COMMIT_BUFFER_SIZE / BDRV_SECTOR_SIZE,
+                                      &n);
         copy = (ret == 1);
         trace_commit_one_iteration(s, sector_num, n, ret);
         if (copy) {
@@ -173,7 +173,7 @@ static void commit_set_speed(BlockJob *job, int64_t speed, Error **errp)
     ratelimit_set_speed(&s->limit, speed / BDRV_SECTOR_SIZE, SLICE_TIME);
 }
 
-static BlockJobType commit_job_type = {
+static const BlockJobType commit_job_type = {
     .instance_size = sizeof(CommitBlockJob),
     .job_type      = "commit",
     .set_speed     = commit_set_speed,

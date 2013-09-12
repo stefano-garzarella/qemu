@@ -33,17 +33,13 @@
 #include "qapi/qmp/qerror.h"
 #include "monitor/monitor.h"
 #include "qemu/hbitmap.h"
+#include "block/snapshot.h"
+#include "qemu/main-loop.h"
+#include "qemu/throttle.h"
 
 #define BLOCK_FLAG_ENCRYPT          1
 #define BLOCK_FLAG_COMPAT6          4
 #define BLOCK_FLAG_LAZY_REFCOUNTS   8
-
-#define BLOCK_IO_LIMIT_READ     0
-#define BLOCK_IO_LIMIT_WRITE    1
-#define BLOCK_IO_LIMIT_TOTAL    2
-
-#define BLOCK_IO_SLICE_TIME     100000000
-#define NANOSECONDS_PER_SECOND  1000000000.0
 
 #define BLOCK_OPT_SIZE              "size"
 #define BLOCK_OPT_ENCRYPT           "encryption"
@@ -58,17 +54,15 @@
 #define BLOCK_OPT_LAZY_REFCOUNTS    "lazy_refcounts"
 #define BLOCK_OPT_ADAPTER_TYPE      "adapter_type"
 
-typedef struct BdrvTrackedRequest BdrvTrackedRequest;
-
-typedef struct BlockIOLimit {
-    int64_t bps[3];
-    int64_t iops[3];
-} BlockIOLimit;
-
-typedef struct BlockIOBaseValue {
-    uint64_t bytes[2];
-    uint64_t ios[2];
-} BlockIOBaseValue;
+typedef struct BdrvTrackedRequest {
+    BlockDriverState *bs;
+    int64_t sector_num;
+    int nb_sectors;
+    bool is_write;
+    QLIST_ENTRY(BdrvTrackedRequest) list;
+    Coroutine *co; /* owner, used for deadlock detection */
+    CoQueue wait_queue; /* coroutines blocked on this request */
+} BdrvTrackedRequest;
 
 struct BlockDriver {
     const char *format_name;
@@ -124,7 +118,7 @@ struct BlockDriver {
         int64_t sector_num, int nb_sectors);
     int coroutine_fn (*bdrv_co_discard)(BlockDriverState *bs,
         int64_t sector_num, int nb_sectors);
-    int coroutine_fn (*bdrv_co_is_allocated)(BlockDriverState *bs,
+    int64_t coroutine_fn (*bdrv_co_get_block_status)(BlockDriverState *bs,
         int64_t sector_num, int nb_sectors, int *pnum);
 
     /*
@@ -247,16 +241,15 @@ struct BlockDriverState {
 
     NotifierList close_notifiers;
 
+    /* Callback before write request is processed */
+    NotifierWithReturnList before_write_notifiers;
+
     /* number of in-flight copy-on-read requests */
     unsigned int copy_on_read_in_flight;
 
-    /* the time for latest disk I/O */
-    int64_t slice_start;
-    int64_t slice_end;
-    BlockIOLimit io_limits;
-    BlockIOBaseValue slice_submitted;
-    CoQueue      throttled_reqs;
-    QEMUTimer    *block_timer;
+    /* I/O throttling */
+    ThrottleState throttle_state;
+    CoQueue      throttled_reqs[2];
     bool         io_limits_enabled;
 
     /* I/O stats (display with "info blockstats"). */
@@ -267,6 +260,9 @@ struct BlockDriverState {
 
     /* Whether the disk can expand beyond total_sectors */
     int growable;
+
+    /* Whether produces zeros when read beyond eof */
+    bool zero_beyond_eof;
 
     /* the memory alignment required for the buffers handled by this driver */
     int buffer_alignment;
@@ -281,6 +277,7 @@ struct BlockDriverState {
     BlockDeviceIoStatus iostatus;
     char device_name[32];
     HBitmap *dirty_bitmap;
+    int refcnt;
     int in_use; /* users other than guest access, eg. block migration */
     QTAILQ_ENTRY(BlockDriverState) list;
 
@@ -295,7 +292,17 @@ struct BlockDriverState {
 int get_tmp_filename(char *filename, int size);
 
 void bdrv_set_io_limits(BlockDriverState *bs,
-                        BlockIOLimit *io_limits);
+                        ThrottleConfig *cfg);
+
+
+/**
+ * bdrv_add_before_write_notifier:
+ *
+ * Register a callback that is invoked before write requests are processed but
+ * after any throttling or waiting for overlapping requests.
+ */
+void bdrv_add_before_write_notifier(BlockDriverState *bs,
+                                    NotifierWithReturn *notifier);
 
 /**
  * bdrv_get_aio_context:
@@ -376,5 +383,26 @@ void mirror_start(BlockDriverState *bs, BlockDriverState *target,
                   BlockdevOnError on_target_error,
                   BlockDriverCompletionFunc *cb,
                   void *opaque, Error **errp);
+
+/*
+ * backup_start:
+ * @bs: Block device to operate on.
+ * @target: Block device to write to.
+ * @speed: The maximum speed, in bytes per second, or 0 for unlimited.
+ * @sync_mode: What parts of the disk image should be copied to the destination.
+ * @on_source_error: The action to take upon error reading from the source.
+ * @on_target_error: The action to take upon error writing to the target.
+ * @cb: Completion function for the job.
+ * @opaque: Opaque pointer value passed to @cb.
+ *
+ * Start a backup operation on @bs.  Clusters in @bs are written to @target
+ * until the job is cancelled or manually completed.
+ */
+void backup_start(BlockDriverState *bs, BlockDriverState *target,
+                  int64_t speed, MirrorSyncMode sync_mode,
+                  BlockdevOnError on_source_error,
+                  BlockdevOnError on_target_error,
+                  BlockDriverCompletionFunc *cb, void *opaque,
+                  Error **errp);
 
 #endif /* BLOCK_INT_H */

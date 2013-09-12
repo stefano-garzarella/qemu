@@ -503,9 +503,15 @@ static int emulated_initfn(CCIDCardState *base)
     if (init_pipe_signaling(card) < 0) {
         return -1;
     }
-    card->backend = parse_enumeration(card->backend_str, backend_enum_table, 0);
+
+    card->backend = 0;
+    if (card->backend_str) {
+        card->backend = parse_enumeration(card->backend_str,
+                                          backend_enum_table, 0);
+    }
+
     if (card->backend == 0) {
-        printf("unknown backend, must be one of:\n");
+        printf("backend must be one of:\n");
         for (ptable = backend_enum_table; ptable->name != NULL; ++ptable) {
             printf("%s\n", ptable->name);
         }
@@ -586,6 +592,7 @@ static void emulated_class_initfn(ObjectClass *klass, void *data)
     cc->exitfn = emulated_exitfn;
     cc->get_atr = emulated_get_atr;
     cc->apdu_from_guest = emulated_apdu_from_guest;
+    set_bit(DEVICE_CATEGORY_INPUT, dc->categories);
     dc->desc = "emulated smartcard";
     dc->props = emulated_card_properties;
 }

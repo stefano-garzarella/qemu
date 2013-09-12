@@ -27,6 +27,7 @@
 #define IS_NORM 0
 #define IS_ESC  1
 #define IS_CSI  2
+#define IS_SS3  3
 
 #undef printf
 #define printf do_not_use_printf
@@ -275,7 +276,6 @@ void readline_set_completion_index(ReadLineState *rs, int index)
 
 static void readline_completion(ReadLineState *rs)
 {
-    Monitor *mon = cur_mon;
     int len, i, j, max_width, nb_cols, max_prefix;
     char *cmdline;
 
@@ -284,7 +284,7 @@ static void readline_completion(ReadLineState *rs)
     cmdline = g_malloc(rs->cmd_buf_index + 1);
     memcpy(cmdline, rs->cmd_buf, rs->cmd_buf_index);
     cmdline[rs->cmd_buf_index] = '\0';
-    rs->completion_finder(cmdline);
+    rs->completion_finder(rs->mon, cmdline);
     g_free(cmdline);
 
     /* no completion found */
@@ -299,7 +299,7 @@ static void readline_completion(ReadLineState *rs)
         if (len > 0 && rs->completions[0][len - 1] != '/')
             readline_insert_char(rs, ' ');
     } else {
-        monitor_printf(mon, "\n");
+        monitor_printf(rs->mon, "\n");
         max_width = 0;
         max_prefix = 0;	
         for(i = 0; i < rs->nb_completions; i++) {
@@ -397,6 +397,9 @@ void readline_handle_byte(ReadLineState *rs, int ch)
         if (ch == '[') {
             rs->esc_state = IS_CSI;
             rs->esc_param = 0;
+        } else if (ch == 'O') {
+            rs->esc_state = IS_SS3;
+            rs->esc_param = 0;
         } else {
             rs->esc_state = IS_NORM;
         }
@@ -438,6 +441,17 @@ void readline_handle_byte(ReadLineState *rs, int ch)
         }
         rs->esc_state = IS_NORM;
     the_end:
+        break;
+    case IS_SS3:
+        switch(ch) {
+        case 'F':
+            readline_eol(rs);
+            break;
+        case 'H':
+            readline_bol(rs);
+            break;
+        }
+        rs->esc_state = IS_NORM;
         break;
     }
     readline_update(rs);

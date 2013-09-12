@@ -346,7 +346,8 @@ Send keys to VM.
 Arguments:
 
 keys array:
-    - "key": key sequence (a json-array of key enum values)
+    - "key": key sequence (a json-array of key union values,
+             union can be number or qcode enum)
 
 - hold-time: time to delay key up events, milliseconds. Defaults to 100
              (json-int, optional)
@@ -354,7 +355,9 @@ keys array:
 Example:
 
 -> { "execute": "send-key",
-     "arguments": { 'keys': [ 'ctrl', 'alt', 'delete' ] } }
+     "arguments": { "keys": [ { "type": "qcode", "data": "ctrl" },
+                              { "type": "qcode", "data": "alt" },
+                              { "type": "qcode", "data": "delete" } ] } }
 <- { "return": {} }
 
 EQMP
@@ -381,6 +384,29 @@ Example:
 <- { "return": {} }
 
 Note: CPUs' indexes are obtained with the 'query-cpus' command.
+
+EQMP
+
+    {
+        .name       = "cpu-add",
+        .args_type  = "id:i",
+        .mhandler.cmd_new = qmp_marshal_input_cpu_add,
+    },
+
+SQMP
+cpu-add
+-------
+
+Adds virtual cpu
+
+Arguments:
+
+- "id": cpu id (json-int)
+
+Example:
+
+-> { "execute": "cpu-add", "arguments": { "id": 2 } }
+<- { "return": {} }
 
 EQMP
 
@@ -461,7 +487,7 @@ Example:
 <- { "return": {} }
 
 Note: inject-nmi fails when the guest doesn't support injecting.
-      Currently, only x86 guests do.
+      Currently, only x86 (NMI) and s390x (RESTART) guests do.
 
 EQMP
 
@@ -889,6 +915,57 @@ EQMP
     },
 
     {
+        .name       = "drive-backup",
+        .args_type  = "sync:s,device:B,target:s,speed:i?,mode:s?,format:s?,"
+                      "on-source-error:s?,on-target-error:s?",
+        .mhandler.cmd_new = qmp_marshal_input_drive_backup,
+    },
+
+SQMP
+drive-backup
+------------
+
+Start a point-in-time copy of a block device to a new destination.  The
+status of ongoing drive-backup operations can be checked with
+query-block-jobs where the BlockJobInfo.type field has the value 'backup'.
+The operation can be stopped before it has completed using the
+block-job-cancel command.
+
+Arguments:
+
+- "device": the name of the device which should be copied.
+            (json-string)
+- "target": the target of the new image. If the file exists, or if it is a
+            device, the existing file/device will be used as the new
+            destination.  If it does not exist, a new file will be created.
+            (json-string)
+- "format": the format of the new destination, default is to probe if 'mode' is
+            'existing', else the format of the source
+            (json-string, optional)
+- "sync": what parts of the disk image should be copied to the destination;
+  possibilities include "full" for all the disk, "top" for only the sectors
+  allocated in the topmost image, or "none" to only replicate new I/O
+  (MirrorSyncMode).
+- "mode": whether and how QEMU should create a new image
+          (NewImageMode, optional, default 'absolute-paths')
+- "speed": the maximum speed, in bytes per second (json-int, optional)
+- "on-source-error": the action to take on an error on the source, default
+                     'report'.  'stop' and 'enospc' can only be used
+                     if the block device supports io-status.
+                     (BlockdevOnError, optional)
+- "on-target-error": the action to take on an error on the target, default
+                     'report' (no limitations, since this applies to
+                     a different block device than device).
+                     (BlockdevOnError, optional)
+
+Example:
+-> { "execute": "drive-backup", "arguments": { "device": "drive0",
+                                               "sync": "full",
+                                               "target": "backup.img" } }
+<- { "return": {} }
+EQMP
+
+    {
         .name       = "block-job-set-speed",
         .args_type  = "device:B,speed:o",
         .mhandler.cmd_new = qmp_marshal_input_block_job_set_speed,
@@ -1312,7 +1389,7 @@ EQMP
 
     {
         .name       = "block_set_io_throttle",
-        .args_type  = "device:B,bps:l,bps_rd:l,bps_wr:l,iops:l,iops_rd:l,iops_wr:l",
+        .args_type  = "device:B,bps:l,bps_rd:l,bps_wr:l,iops:l,iops_rd:l,iops_wr:l,bps_max:l?,bps_rd_max:l?,bps_wr_max:l?,iops_max:l?,iops_rd_max:l?,iops_wr_max:l?,iops_size:l?",
         .mhandler.cmd_new = qmp_marshal_input_block_set_io_throttle,
     },
 
@@ -1325,22 +1402,36 @@ Change I/O throttle limits for a block drive.
 Arguments:
 
 - "device": device name (json-string)
-- "bps":  total throughput limit in bytes per second(json-int)
-- "bps_rd":  read throughput limit in bytes per second(json-int)
-- "bps_wr":  read throughput limit in bytes per second(json-int)
-- "iops":  total I/O operations per second(json-int)
-- "iops_rd":  read I/O operations per second(json-int)
-- "iops_wr":  write I/O operations per second(json-int)
+- "bps": total throughput limit in bytes per second (json-int)
+- "bps_rd": read throughput limit in bytes per second (json-int)
+- "bps_wr": write throughput limit in bytes per second (json-int)
+- "iops": total I/O operations per second (json-int)
+- "iops_rd": read I/O operations per second (json-int)
+- "iops_wr": write I/O operations per second (json-int)
+- "bps_max":  total max in bytes (json-int)
+- "bps_rd_max":  read max in bytes (json-int)
+- "bps_wr_max":  write max in bytes (json-int)
+- "iops_max":  total I/O operations max (json-int)
+- "iops_rd_max":  read I/O operations max (json-int)
+- "iops_wr_max":  write I/O operations max (json-int)
+- "iops_size":  I/O size in bytes when limiting (json-int)
 
 Example:
 
 -> { "execute": "block_set_io_throttle", "arguments": { "device": "virtio0",
-                                               "bps": "1000000",
-                                               "bps_rd": "0",
-                                               "bps_wr": "0",
-                                               "iops": "0",
-                                               "iops_rd": "0",
-                                               "iops_wr": "0" } }
+                                               "bps": 1000000,
+                                               "bps_rd": 0,
+                                               "bps_wr": 0,
+                                               "iops": 0,
+                                               "iops_rd": 0,
+                                               "iops_wr": 0,
+                                               "bps_max": 8000000,
+                                               "bps_rd_max": 0,
+                                               "bps_wr_max": 0,
+                                               "iops_max": 0,
+                                               "iops_rd_max": 0,
+                                               "iops_wr_max": 0,
+                                               "iops_size": 0 } }
 <- { "return": {} }
 
 EQMP
@@ -1681,6 +1772,54 @@ Each json-object contain the following:
          - "iops": limit total I/O operations per second (json-int)
          - "iops_rd": limit read operations per second (json-int)
          - "iops_wr": limit write operations per second (json-int)
+         - "bps_max":  total max in bytes (json-int)
+         - "bps_rd_max":  read max in bytes (json-int)
+         - "bps_wr_max":  write max in bytes (json-int)
+         - "iops_max":  total I/O operations max (json-int)
+         - "iops_rd_max":  read I/O operations max (json-int)
+         - "iops_wr_max":  write I/O operations max (json-int)
+         - "iops_size": I/O size when limiting by iops (json-int)
+         - "image": the detail of the image, it is a json-object containing
+            the following:
+             - "filename": image file name (json-string)
+             - "format": image format (json-string)
+             - "virtual-size": image capacity in bytes (json-int)
+             - "dirty-flag": true if image is not cleanly closed, not present
+                             means clean (json-bool, optional)
+             - "actual-size": actual size on disk in bytes of the image, not
+                              present when image does not support thin
+                              provision (json-int, optional)
+             - "cluster-size": size of a cluster in bytes, not present if image
+                               format does not support it (json-int, optional)
+             - "encrypted": true if the image is encrypted, not present means
+                            false or the image format does not support
+                            encryption (json-bool, optional)
+             - "backing_file": backing file name, not present means no backing
+                               file is used or the image format does not
+                               support backing file chain
+                               (json-string, optional)
+             - "full-backing-filename": full path of the backing file, not
+                                        present if it equals backing_file or no
+                                        backing file is used
+                                        (json-string, optional)
+             - "backing-filename-format": the format of the backing file, not
+                                          present means unknown or no backing
+                                          file (json-string, optional)
+             - "snapshots": the internal snapshot info, it is an optional list
+                of json-object containing the following:
+                 - "id": unique snapshot id (json-string)
+                 - "name": snapshot name (json-string)
+                 - "vm-state-size": size of the VM state in bytes (json-int)
+                 - "date-sec": UTC date of the snapshot in seconds (json-int)
+                 - "date-nsec": fractional part in nanoseconds to be used with
+                                date-sec (json-int)
+                 - "vm-clock-sec": VM clock relative to boot in seconds
+                                   (json-int)
+                 - "vm-clock-nsec": fractional part in nanoseconds to be used
+                                    with vm-clock-sec (json-int)
+             - "backing-image": the detail of the backing image, it is an
+                                optional json-object only present when a
+                                backing image present for this image
 
 - "io-status": I/O operation status, only present if the device supports it
                and the VM is configured to stop on errors. It's always reset
@@ -1701,14 +1840,45 @@ Example:
                "ro":false,
                "drv":"qcow2",
                "encrypted":false,
-               "file":"disks/test.img",
-               "backing_file_depth":0,
+               "file":"disks/test.qcow2",
+               "backing_file_depth":1,
                "bps":1000000,
                "bps_rd":0,
                "bps_wr":0,
                "iops":1000000,
                "iops_rd":0,
                "iops_wr":0,
+               "bps_max": 8000000,
+               "bps_rd_max": 0,
+               "bps_wr_max": 0,
+               "iops_max": 0,
+               "iops_rd_max": 0,
+               "iops_wr_max": 0,
+               "iops_size": 0,
+               "image":{
+                  "filename":"disks/test.qcow2",
+                  "format":"qcow2",
+                  "virtual-size":2048000,
+                  "backing_file":"base.qcow2",
+                  "full-backing-filename":"disks/base.qcow2",
+                  "backing-filename-format:"qcow2",
+                  "snapshots":[
+                     {
+                        "id": "1",
+                        "name": "snapshot1",
+                        "vm-state-size": 0,
+                        "date-sec": 10000200,
+                        "date-nsec": 12,
+                        "vm-clock-sec": 206,
+                        "vm-clock-nsec": 30
+                     }
+                  ],
+                  "backing-image":{
+                      "filename":"disks/base.qcow2",
+                      "format":"qcow2",
+                      "virtual-size":2048000
+                  }
+               }
             },
             "type":"unknown"
          },
@@ -2479,6 +2649,12 @@ The main json-object contains the following:
 - "total-time": total amount of ms since migration started.  If
                 migration has ended, it returns the total migration
                 time (json-int)
+- "setup-time" amount of setup time in milliseconds _before_ the
+               iterations begin but _after_ the QMP command is issued.
+               This is designed to provide an accounting of any activities
+               (such as RDMA pinning) which may be expensive, but do not 
+               actually occur during the iterative migration rounds 
+               themselves. (json-int)
 - "downtime": only present when migration has finished correctly
               total amount in ms for downtime that happened (json-int)
 - "expected-downtime": only present while migration is active
@@ -2493,7 +2669,7 @@ The main json-object contains the following:
             byte (json-int)
             These are sent over the wire much more efficiently.
          - "skipped": number of skipped zero pages (json-int)
-         - "normal" : number of whole pages transfered.  I.e. they
+         - "normal" : number of whole pages transferred.  I.e. they
             were not sent as duplicate or xbzrle pages (json-int)
          - "normal-bytes" : number of bytes transferred in whole
             pages. This is just normal pages times size of one page,
@@ -2532,6 +2708,7 @@ Examples:
           "remaining":123,
           "total":246,
           "total-time":12345,
+          "setup-time":12345,
           "downtime":12345,
           "duplicate":123,
           "normal":123,
@@ -2556,6 +2733,7 @@ Examples:
             "remaining":123,
             "total":246,
             "total-time":12345,
+            "setup-time":12345,
             "expected-downtime":12345,
             "duplicate":123,
             "normal":123,
@@ -2575,6 +2753,7 @@ Examples:
             "remaining":1053304,
             "transferred":3720,
             "total-time":12345,
+            "setup-time":12345,
             "expected-downtime":12345,
             "duplicate":123,
             "normal":123,
@@ -2600,6 +2779,7 @@ Examples:
             "remaining":1053304,
             "transferred":3720,
             "total-time":12345,
+            "setup-time":12345,
             "expected-downtime":12345,
             "duplicate":10,
             "normal":3333,
@@ -2907,5 +3087,68 @@ Example:
 
 -> { "execute": "chardev-remove", "arguments": { "id" : "foo" } }
 <- { "return": {} }
+
+EQMP
+    {
+        .name       = "query-rx-filter",
+        .args_type  = "name:s?",
+        .mhandler.cmd_new = qmp_marshal_input_query_rx_filter,
+    },
+
+SQMP
+query-rx-filter
+---------------
+
+Show rx-filter information.
+
+Returns a json-array of rx-filter information for all NICs (or for the
+given NIC), returning an error if the given NIC doesn't exist, or
+given NIC doesn't support rx-filter querying, or given net client
+isn't a NIC.
+
+The query will clear the event notification flag of each NIC, then qemu
+will start to emit event to QMP monitor.
+
+Each array entry contains the following:
+
+- "name": net client name (json-string)
+- "promiscuous": promiscuous mode is enabled (json-bool)
+- "multicast": multicast receive state (one of 'normal', 'none', 'all')
+- "unicast": unicast receive state  (one of 'normal', 'none', 'all')
+- "broadcast-allowed": allow to receive broadcast (json-bool)
+- "multicast-overflow": multicast table is overflowed (json-bool)
+- "unicast-overflow": unicast table is overflowed (json-bool)
+- "main-mac": main macaddr string (json-string)
+- "vlan-table": a json-array of active vlan id
+- "unicast-table": a json-array of unicast macaddr string
+- "multicast-table": a json-array of multicast macaddr string
+
+Example:
+
+-> { "execute": "query-rx-filter", "arguments": { "name": "vnet0" } }
+<- { "return": [
+        {
+            "promiscuous": true,
+            "name": "vnet0",
+            "main-mac": "52:54:00:12:34:56",
+            "unicast": "normal",
+            "vlan-table": [
+                4,
+                0
+            ],
+            "unicast-table": [
+            ],
+            "multicast": "normal",
+            "multicast-overflow": false,
+            "unicast-overflow": false,
+            "multicast-table": [
+                "01:00:5e:00:00:01",
+                "33:33:00:00:00:01",
+                "33:33:ff:12:34:56"
+            ],
+            "broadcast-allowed": false
+        }
+      ]
+   }
 
 EQMP
