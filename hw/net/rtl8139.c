@@ -612,7 +612,7 @@ static void rate_callback(void * opaque)
     csb_dump(s);
 #endif /* PARAVIRT */
 
-    delta = qemu_get_clock_ms(vm_clock) - rate_last_timestamp;
+    delta = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) - rate_last_timestamp;
     printf("Interrupt:           %4.3f KHz\n", (double)rate_irq_int/delta);
     printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
     printf("Tx stream:           %4.3f Mbps\n", (double)(rate_txb*8)/delta/1000.0);
@@ -634,9 +634,9 @@ static void rate_callback(void * opaque)
     rate_tx = rate_txb = 0;
     rate_tx_bh_len = rate_tx_bh_count = 0;
 
-    qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock) +
+    timer_mod(s->rate_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
 		    rate_interval_ms);
-    rate_last_timestamp = qemu_get_clock_ms(vm_clock);
+    rate_last_timestamp = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
 }
 #endif /* RATE */
 
@@ -1382,7 +1382,7 @@ static void rtl8139_reset(DeviceState *d)
     if (s->csb)
 	s->csb->host_isr = 0;
 #endif /* PARAVIRT */
-    IFRATE(qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(vm_clock)
+    IFRATE(timer_mod(s->rate_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL)
 		+ 1000));
 
     rtl8139_update_irq(s);

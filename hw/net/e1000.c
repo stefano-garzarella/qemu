@@ -333,7 +333,7 @@ static void rate_callback(void * opaque)
     csb_dump(s);
 #endif /* CONFIG_E1000_PARAVIRT */
 
-    delta = qemu_get_clock_ms(QEMU_CLOCK_VIRTUAL) - rate_last_timestamp;
+    delta = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) - rate_last_timestamp;
     printf("Interrupt:           %4.3f KHz\n", (double)rate_irq_int/delta);
     printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
     printf("Tx iov packets:      %4.3f KHz\n", (double)rate_tx_iov/delta);
@@ -357,9 +357,9 @@ static void rate_callback(void * opaque)
     rate_tx_bh_len = rate_tx_bh_count = 0;
     rate_txsync = 0;
 
-    qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(QEMU_CLOCK_VIRTUAL) +
+    timer_mod(s->rate_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
 		    rate_interval_ms);
-    rate_last_timestamp = qemu_get_clock_ms(QEMU_CLOCK_VIRTUAL);
+    rate_last_timestamp = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
 }
 #endif /* RATE */
 
@@ -714,7 +714,7 @@ set_ctrl(E1000State *s, int index, uint32_t val)
 {
     /* RST is self clearing */
     s->mac_reg[CTRL] = val & ~E1000_CTRL_RST;
-    IFRATE(qemu_mod_timer(s->rate_timer, qemu_get_clock_ms(QEMU_CLOCK_VIRTUAL)
+    IFRATE(timer_mod(s->rate_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL)
 		+ 1000));
 }
 
