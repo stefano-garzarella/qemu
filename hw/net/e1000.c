@@ -203,7 +203,6 @@ typedef struct E1000State_st {
     uint32_t rxbufs;
 #ifdef CONFIG_E1000_PARAVIRT
     /* used for map ring */
-    uint64_t txring_phi, rxring_phi;  /* phisical address */
     struct e1000_tx_desc *txring;
     struct e1000_rx_desc *rxring;
     struct virtio_net_hdr *vnet_hdr;
@@ -372,7 +371,6 @@ static uint8_t *map_mbufs(E1000State *s, hwaddr addr) // XXX maybe const ?
     struct guest_memreg_map *mb = &s->mbufs;
     uint64_t a = addr;
     AddressSpace *as;
-    /* DMAContext *dma; XXX see below */
 
     for (;;) {
         if (mb->lo < mb->hi && mb->lo <= a && a < mb->hi) {
@@ -382,7 +380,7 @@ static uint8_t *map_mbufs(E1000State *s, hwaddr addr) // XXX maybe const ?
 
         ND("mapping %p is unset", (void *)(uintptr_t)addr);
         /* XXX I couldn't find a replacement for this!
-        if (dma_has_iommu(dma)) {
+        if (dma_has_iommu(DMAContext * dma)) {
             D("iommu range, cannot set");
             break;
         }*/
@@ -395,9 +393,6 @@ static uint8_t *map_mbufs(E1000State *s, hwaddr addr) // XXX maybe const ?
              (void *)(uintptr_t)mb->lo,
              (void *)(uintptr_t)mb->hi,
              (void *)(uintptr_t)mb->ofs);
-
-        ND("mapping txring correct %p computed %p",
-            s->txring, (void *)(uintptr_t)(s->txring_phi + mb->ofs));
     }
     mb->hi = mb->lo = 0; /* empty mapping */
     return NULL;
@@ -936,8 +931,7 @@ e1000_sendv_packet(E1000State *s)
     NetClientState *nc = qemu_get_queue(s->nic);
 
     if (s->phy_reg[PHY_CTRL] & MII_CR_LOOPBACK) {
-	D("e1000_sendv_packet.loopback still to be implemented\n");
-	exit(-1);
+        nc->info->receive_iov(nc, s->iov, s->iovcnt);
     } else {
 	qemu_sendv_packet_async_moreflags(nc, s->iov, s->iovcnt, NULL,
 	    (s->mac_reg[TDT] == s->next_tdh) ? 0: QEMU_NET_PACKET_FLAG_MORE);
@@ -2524,7 +2518,7 @@ static NetClientInfo net_e1000_info = {
     .can_receive = e1000_can_receive,
     .receive = e1000_receive,
 #ifdef CONFIG_E1000_PARAVIRT
-    //.receive_iov = e1000_receive_iov, // TODO reenable, with vnet-hdr!!
+    .receive_iov = e1000_receive_iov,
 #endif	/* CONFIG_E1000_PARAVIRT */
     .cleanup = e1000_cleanup,
     .link_status_changed = e1000_set_link_status,
