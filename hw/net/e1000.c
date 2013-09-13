@@ -1243,7 +1243,6 @@ static uint64_t tx_desc_base(E1000State *s)
 static void
 start_xmit(E1000State *s)
 {
-    PCIDevice *d = PCI_DEVICE(s);
     dma_addr_t base;
     struct e1000_tx_desc desc;
     uint32_t tdh_start = s->mac_reg[TDH], cause = 0;
@@ -1252,17 +1251,6 @@ start_xmit(E1000State *s)
         DBGOUT(TX, "tx disabled\n");
         return;
     }
-
-#ifdef CONFIG_E1000_PARAVIRT
-    base = tx_desc_base(s);
-    if (base != s->txring_phi) {
-        hwaddr desclen = s->mac_reg[TDLEN];
-        s->txring_phi = base;
-        s->txring = address_space_map(pci_get_address_space(d),
-              base, &desclen, 0 /* is_write */);
-        ND("region size is %ld", (long int)desclen);
-    }
-#endif /* CONFIG_E1000_PARAVIRT */
 
 #ifdef CONFIG_E1000_PARAVIRT
     /* hlim prevents staying here for too long */
@@ -1289,11 +1277,12 @@ start_xmit(E1000State *s)
     while (s->mac_reg[TDH] != s->mac_reg[TDT]) {
 #endif /* CONFIG_E1000_PARAVIRT */
 #ifdef CONFIG_E1000_PARAVIRT
+        base = 0;
         desc = s->txring[s->mac_reg[TDH]];
 #else /* !CONFIG_E1000_PARAVIRT */
         base = tx_desc_base(s) +
                sizeof(struct e1000_tx_desc) * s->mac_reg[TDH];
-        pci_dma_read(d, base, &desc, sizeof(desc));
+        pci_dma_read(PCI_DEVICE(s), base, &desc, sizeof(desc));
 #endif /* CONFIG_E1000_PARAVIRT */
 
         DBGOUT(TX, "index %d: %p : %x %x\n", s->mac_reg[TDH],
@@ -1636,18 +1625,11 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
     }
     IFRATE(rate_rx++; rate_rxb += size);
 #ifdef CONFIG_E1000_PARAVIRT
-    base = rx_desc_base(s);
-    if (base != s->rxring_phi) {
-        hwaddr desclen = s->mac_reg[RDLEN];
-        s->rxring_phi = base;
-        s->rxring = address_space_map(pci_get_address_space(d),
-                base, &desclen, 0 /* is_write */);
-    }
     if (csb_mode) {
 	/* Fills in the vnet header at the same index of the first RX
 	   descriptor used for the received frame. */
         if (s->vnet_hdr_ofs) {
-            iov_to_buf(vnet_iov, vnet_iovcnt, 0,
+            iov_to_buf(vnet_iov, vnet_iovcnt, 0*base,
                         &s->vnet_hdr[s->mac_reg[RDH]],
                         sizeof(struct virtio_net_hdr));
         }
@@ -2095,6 +2077,25 @@ set_32bit(E1000State *s, int index, uint32_t val)
         }
     }
 }
+
+static void
+set_dba(E1000State *s, int index, uint32_t val)
+{
+    PCIDevice * d = PCI_DEVICE(s);
+    hwaddr desclen;
+
+    s->mac_reg[index] = val;
+    if (index == TDBAL || index == TDBAH) {
+        desclen = s->mac_reg[TDLEN];
+        s->txring = address_space_map(pci_get_address_space(d),
+                tx_desc_base(s), &desclen, 0 /* is_write */);
+
+    } else { /* if (index == RDBAL || index == RDBAH) */
+        desclen = s->mac_reg[RDLEN];
+        s->rxring = address_space_map(pci_get_address_space(d),
+                rx_desc_base(s), &desclen, 0 /* is_write */);
+    }
+}
 #endif /* CONFIG_E1000_PARAVIRT */
 
 static void
@@ -2206,13 +2207,15 @@ enum { NREADOPS = ARRAY_SIZE(macreg_readops) };
 #define putreg(x)	[x] = mac_writereg
 static void (*macreg_writeops[])(E1000State *, int, uint32_t) = {
     putreg(PBA),	putreg(EERD),	putreg(SWSM),	putreg(WUFC),
-    putreg(TDBAL),	putreg(TDBAH),	putreg(TXDCTL),	putreg(RDBAH),
-    putreg(RDBAL),	putreg(LEDCTL), putreg(VET),
+#ifdef CONFIG_E1000_PARAVIRT
+    [CSBAL] = set_32bit, [CSBAH] = set_32bit, [TDBAL] = set_dba,
+    [TDBAH] = set_dba,   [RDBAL] = set_dba,   [RDBAH] = set_dba,
+#else
+    putreg(TDBAL),	putreg(TDBAH),	putreg(RDBAL),	putreg(RDBAH),
+#endif /* CONFIG_E1000_PARAVIRT */
+    putreg(TXDCTL),	putreg(LEDCTL), putreg(VET),
     [RDTR] = set_16bit, [RADV] = set_16bit,     [TADV] = set_16bit,
     [ITR] = set_16bit,
-#ifdef CONFIG_E1000_PARAVIRT
-    [CSBAL] = set_32bit, [CSBAH] = set_32bit,
-#endif /* CONFIG_E1000_PARAVIRT */
     [TDLEN] = set_dlen,	[RDLEN] = set_dlen,	[TCTL] = set_tctl,
     [TDT] = set_tctl,	[MDIC] = set_mdic,	[ICS] = set_ics,
     [TDH] = set_16bit,	[RDH] = set_16bit,	[RDT] = set_rdt,
