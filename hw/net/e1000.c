@@ -841,31 +841,41 @@ putsum(uint8_t *data, uint32_t n, uint32_t sloc, uint32_t css, uint32_t cse)
 }
 
 #ifdef CONFIG_E1000_PARAVIRT
+typedef const struct iovec * const_iovec_ptr;
+static size_t iov_skip_bytes(const_iovec_ptr *iov, int *iovcnt,
+                             size_t *iov_ofs, unsigned int skip)
+{
+    const_iovec_ptr iv = *iov;
+    int cnt = *iovcnt;
+    size_t ofs = *iov_ofs + skip;
+
+    while (iv->iov_len <= ofs) {
+        ofs -= iv->iov_len;
+        iv++;
+        cnt--;
+    }
+    *iov = iv;
+    *iovcnt = cnt;
+    *iov_ofs = ofs;
+
+    return 0;
+}
+
 static void
-putsum_iov(struct iovec *iov, uint32_t iovcnt, uint32_t n,
+putsum_iov(const struct iovec *iov, int iovcnt, uint32_t n,
 		uint32_t sloc, uint32_t css, uint32_t cse)
 {
-    uint32_t sum;
+    uint16_t check;
+    size_t iov_ofs = 0;
 
     if (cse && cse < n)
         n = cse + 1;
     if (sloc < n-1) {
-	sum = net_checksum_add_iov(iov, iovcnt, css, n-css);
-	while (iovcnt && sloc > iov->iov_len) {
-	    sloc -= iov->iov_len;
-	    iov++;
-	    iovcnt--;
-	}
-	if (iovcnt) {
-	    /* TODO Handle the incredible special case where the
-	       checksum must be inserted at the boundary of two
-	       iovec fragments. */
-	    cpu_to_be16wu((uint16_t *)(iov->iov_base + sloc),
-		    net_checksum_finish(sum));
-	} else {
-	    D("ecceded!\n");
-	    exit(1);
-	}
+        check = net_checksum_finish(net_checksum_add_iov(iov, iovcnt, css, n-css));
+        iov_skip_bytes(&iov, &iovcnt, &iov_ofs, sloc);
+        *((uint8_t *)iov->iov_base + iov_ofs) = check >> 8;
+        iov_skip_bytes(&iov, &iovcnt, &iov_ofs, 1);
+        *((uint8_t *)iov->iov_base + iov_ofs) = check & 0xff;
     }
 }
 #endif /* CONFIG_E1000_PARAVIRT */
@@ -1507,26 +1517,6 @@ static uint64_t rx_desc_base(E1000State *s)
     uint64_t bal = s->mac_reg[RDBAL] & ~0xf;
 
     return (bah << 32) + bal;
-}
-
-typedef const struct iovec * const_iovec_ptr;
-static size_t iov_skip_bytes(const_iovec_ptr *iov, int *iovcnt,
-                             size_t *iov_ofs, unsigned int skip)
-{
-    const_iovec_ptr iv = *iov;
-    int cnt = *iovcnt;
-    size_t ofs = *iov_ofs + skip;
-
-    while (iv->iov_len <= ofs) {
-        ofs -= iv->iov_len;
-        iv++;
-        cnt--;
-    }
-    *iov = iv;
-    *iovcnt = cnt;
-    *iov_ofs = ofs;
-
-    return 0;
 }
 
 static ssize_t
