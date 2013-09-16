@@ -117,17 +117,12 @@ static int netmap_open(struct netmap_state *me)
     pstrcpy(req.nr_name, sizeof(req.nr_name), me->ifname);
     req.nr_ringid = NETMAP_NO_TX_POLL;
     req.nr_version = NETMAP_API;
-    err = ioctl(fd, NIOCGINFO, &req);
-    if (err) {
-        error_report("cannot get info on %s", me->ifname);
-        goto error;
-    }
-    l = me->memsize = req.nr_memsize;
     err = ioctl(fd, NIOCREGIF, &req);
     if (err) {
         error_report("Unable to register %s", me->ifname);
         goto error;
     }
+    l = me->memsize = req.nr_memsize;
 
     me->mem = mmap(0, l, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
     if (me->mem == MAP_FAILED) {
