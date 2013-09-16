@@ -346,6 +346,12 @@ txsync:
     return size;
 }
 
+static ssize_t netmap_receive_iov(NetClientState * nc,
+	    const struct iovec * iov, int iovcnt)
+{
+    return netmap_receive_iov_flags(nc, iov, iovcnt, 0);
+}
+
 static ssize_t netmap_receive_raw(NetClientState *nc,
       const uint8_t *buf, size_t size)
 {
@@ -446,9 +452,9 @@ static NetClientInfo net_netmap_info = {
     .receive_flags = netmap_receive_flags,
     .receive = netmap_receive_raw,
     .receive_iov_flags = netmap_receive_iov_flags,
+    .receive_iov = netmap_receive_iov,
 #if 0 /* not implemented */
     .receive_raw = netmap_receive_raw,
-    .receive_iov = netmap_receive_iov,
 #endif
     .poll = netmap_poll,
     .register_peer_async_callback = netmap_register_peer_async_callback,
