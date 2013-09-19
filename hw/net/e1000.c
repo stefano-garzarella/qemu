@@ -922,6 +922,8 @@ e1000_sendv_packet(E1000State *s)
 	IFRATE(rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0);
     }
     IFRATE(rate_tx_iov++; rate_txb += s->iovsize; rate_tx_bh_len++);
+    s->iovcnt = s->vnet_hdr_ofs;  /* Reset s->iovcnt. */
+    s->iovsize = 0;
 }
 
 static void
@@ -938,7 +940,6 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
     s->iov[s->vnet_hdr_ofs].iov_len = size;
     s->iovcnt = s->vnet_hdr_ofs + 1;
     e1000_sendv_packet(s);
-    s->iovcnt = s->vnet_hdr_ofs;  /* Reset s->iovcnt. */
 }
 #else   /* !CONFIG_E1000_PARAVIRT */
 static void
@@ -1180,8 +1181,6 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
 	    return;
 
 	xmit_seg(s);
-	s->iovcnt = s->vnet_hdr_ofs;
-	s->iovsize = 0;
 
 	goto reset;
     }
