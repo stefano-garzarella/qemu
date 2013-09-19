@@ -938,6 +938,7 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
     s->iov[s->vnet_hdr_ofs].iov_len = size;
     s->iovcnt = s->vnet_hdr_ofs + 1;
     e1000_sendv_packet(s);
+    s->iovcnt = s->vnet_hdr_ofs;  /* Reset s->iovcnt. */
 }
 #else   /* !CONFIG_E1000_PARAVIRT */
 static void
