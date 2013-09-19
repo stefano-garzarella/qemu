@@ -909,27 +909,11 @@ fcs_len(E1000State *s)
     return (s->mac_reg[RCTL] & E1000_RCTL_SECRC) ? 0 : 4;
 }
 
-static void
-e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
-{
-    NetClientState *nc = qemu_get_queue(s->nic);
-
-    if (s->phy_reg[PHY_CTRL] & MII_CR_LOOPBACK) {
-        nc->info->receive(nc, buf, size);
-    } else {
-	qemu_send_packet_async_moreflags(nc, buf, size, NULL,
-	    (s->mac_reg[TDT] == s->next_tdh) ? 0: QEMU_NET_PACKET_FLAG_MORE);
-	IFRATE(rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0);
-    }
-    IFRATE(rate_tx++; rate_txb += size; rate_tx_bh_len++);
-}
-
 #ifdef CONFIG_E1000_PARAVIRT
 static void
 e1000_sendv_packet(E1000State *s)
 {
     NetClientState *nc = qemu_get_queue(s->nic);
-
     if (s->phy_reg[PHY_CTRL] & MII_CR_LOOPBACK) {
         nc->info->receive_iov(nc, s->iov, s->iovcnt);
     } else {
@@ -939,7 +923,36 @@ e1000_sendv_packet(E1000State *s)
     }
     IFRATE(rate_tx_iov++; rate_txb += s->iovsize; rate_tx_bh_len++);
 }
-#endif	/* CONFIG_E1000_PARAVIRT */
+
+static void
+e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
+{
+    if (s->vnet_hdr_ofs) {
+        /* In the past, the backend was asked to use the vnet header, and s->vnet_hdr_ofs was
+           set. However, we are currently in non-paravirtual mode and so we must push a
+           null header to the backend.*/
+        s->iov[0].iov_base = s->tx_hdr;
+        s->iov[0].iov_len = sizeof(struct virtio_net_hdr);
+    }
+    s->iov[s->vnet_hdr_ofs].iov_base = (uint8_t *)buf;
+    s->iov[s->vnet_hdr_ofs].iov_len = size;
+    s->iovcnt = s->vnet_hdr_ofs + 1;
+    e1000_sendv_packet(s);
+}
+#else   /* !CONFIG_E1000_PARAVIRT */
+static void
+e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
+{
+    NetClientState *nc = qemu_get_queue(s->nic);
+    if (s->phy_reg[PHY_CTRL] & MII_CR_LOOPBACK) {
+        nc->info->receive(nc, buf, size);
+    } else {
+        qemu_send_packet(nc, buf, size);
+    }
+}
+
+
+#endif	/* !CONFIG_E1000_PARAVIRT */
 
 static void
 xmit_seg(E1000State *s)
@@ -1541,7 +1554,7 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
     if (s->v1000)
         return size;
 
-    if (csb_mode && s->vnet_hdr_ofs) {
+    if (s->vnet_hdr_ofs) {
         iov_skip_bytes(&iov, &iovcnt, &iov_ofs,
                        sizeof(struct virtio_net_hdr));
 	size -= sizeof(struct virtio_net_hdr);
@@ -2021,7 +2034,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
 		tap_set_offload(s->nic->ncs->peer, 1, 1, 1, 1, 1);
 		s->vnet_hdr_ofs = 1;
 	    } else {
-		s->vnet_hdr_ofs = 0;
+		//s->vnet_hdr_ofs = 0; XXX never reset
                 s->v1000 = false;
 	    }
 	    D("Using VNET header = %d\n", s->vnet_hdr_ofs);
@@ -2057,11 +2070,6 @@ set_32bit(E1000State *s, int index, uint32_t val)
 #endif /* V1000 */
             e1000_tx_ioeventfd_down(s);
             s->msix = false;
-	    if (peer_has_vnet_hdr(s)) {
-		//tap_using_vnet_hdr(s->nic->ncs->peer, false); /* XXX Assertion problem. */
-		tap_set_offload(s->nic->ncs->peer, 0, 0, 0, 0, 0);
-	    }
-            s->vnet_hdr_ofs = 0;
         }
     }
 }
@@ -2115,9 +2123,8 @@ set_dlen(E1000State *s, int index, uint32_t val)
         if (s->tx_hdr) {
             g_free(s->tx_hdr);
         } 
-        s->tx_hdr = g_malloc(s->mac_reg[index]
-                                * sizeof(struct virtio_net_hdr)
-                                / sizeof(struct e1000_tx_desc));
+        s->tx_hdr = g_malloc0(s->mac_reg[index] * sizeof(struct virtio_net_hdr)
+                                                / sizeof(struct e1000_tx_desc));
     }
 #endif
 }
