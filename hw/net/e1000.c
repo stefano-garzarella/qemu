@@ -1546,9 +1546,6 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
     const struct iovec * vnet_iov = iov;
     int vnet_iovcnt = iovcnt;
 
-    if (s->v1000)
-        return size;
-
     if (s->host_hdr_ofs) {
         iov_skip_bytes(&iov, &iovcnt, &iov_ofs,
                        sizeof(struct virtio_net_hdr));
