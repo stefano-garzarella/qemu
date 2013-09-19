@@ -2015,11 +2015,9 @@ set_32bit(E1000State *s, int index, uint32_t val)
             s->msix = !!s->csb->guest_use_msix;
             D("Using MSI-X = %d\n", s->msix);
 
-	    /* TODO tap_using_vnet (UP) and (DOWN) */
 	    if (peer_has_vnet_hdr(s)) {
+		tap_set_vnet_hdr_len(s->nic->ncs->peer, sizeof(struct virtio_net_hdr));
 		tap_using_vnet_hdr(s->nic->ncs->peer, true);
-		tap_set_vnet_hdr_len(s->nic->ncs->peer,
-			sizeof(struct virtio_net_hdr));
 		tap_set_offload(s->nic->ncs->peer, 1, 1, 1, 1, 1);
 		s->vnet_hdr_ofs = 1;
 	    } else {
@@ -2058,6 +2056,12 @@ set_32bit(E1000State *s, int index, uint32_t val)
             e1000_v1000_down(s);
 #endif /* V1000 */
             e1000_tx_ioeventfd_down(s);
+            s->msix = false;
+	    if (peer_has_vnet_hdr(s)) {
+		//tap_using_vnet_hdr(s->nic->ncs->peer, false); /* XXX Assertion problem. */
+		tap_set_offload(s->nic->ncs->peer, 0, 0, 0, 0, 0);
+	    }
+            s->vnet_hdr_ofs = 0;
         }
     }
 }
