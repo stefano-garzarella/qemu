@@ -59,6 +59,7 @@
 #ifdef V1000
 #include "v1000_user.h"
 #endif /* V1000 */
+static struct virtio_net_hdr null_tx_hdr;
 #endif /* CONFIG_E1000_PARAVIRT */
 
 
@@ -220,7 +221,8 @@ typedef struct E1000State_st {
     uint32_t tx_count;	    /* TX processed in last start_xmit round */
     uint32_t txcycles;	    /* TX bottom half spinning counter */
     uint32_t txcycles_lim;  /* Snapshot of s->csb->host_txcycles_lim */
-    int vnet_hdr_ofs;
+    int host_hdr_ofs;
+    int guest_hdr_ofs;
     struct virtio_net_hdr *tx_hdr;
     EventNotifier host_tx_notifier;
     int virq;
@@ -668,7 +670,7 @@ static void e1000_reset(void *opaque)
 #ifdef CONFIG_E1000_PARAVIRT
     d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
-    d->vnet_hdr_ofs = 0;
+    d->host_hdr_ofs = d->guest_hdr_ofs = 0;
     d->msix = false;
     msix_unuse_all_vectors(PCI_DEVICE(d));
     msix_vector_use(PCI_DEVICE(d), E1000_MSIX_CTRL_VECTOR);
@@ -682,7 +684,7 @@ static void e1000_reset(void *opaque)
     else
 	D("qemu_register_peer_async_callback FAILED\n");
 #ifdef CONFIG_E1000_PARAVIRT
-    d->iovcnt = d->vnet_hdr_ofs;
+    d->iovcnt = d->host_hdr_ofs;
 #endif /* CONFIG_E1000_PARAVIRT */
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
@@ -922,23 +924,16 @@ e1000_sendv_packet(E1000State *s)
 	IFRATE(rate_txsync += (s->mac_reg[TDT] == s->next_tdh) ? 1 : 0);
     }
     IFRATE(rate_tx_iov++; rate_txb += s->iovsize; rate_tx_bh_len++);
-    s->iovcnt = s->vnet_hdr_ofs;  /* Reset s->iovcnt. */
+    s->iovcnt = s->host_hdr_ofs;  /* Reset s->iovcnt. */
     s->iovsize = 0;
 }
 
 static void
 e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
 {
-    if (s->vnet_hdr_ofs) {
-        /* In the past, the backend was asked to use the vnet header, and s->vnet_hdr_ofs was
-           set. However, we are currently in non-paravirtual mode and so we must push a
-           null header to the backend.*/
-        s->iov[0].iov_base = s->tx_hdr;
-        s->iov[0].iov_len = sizeof(struct virtio_net_hdr);
-    }
-    s->iov[s->vnet_hdr_ofs].iov_base = (uint8_t *)buf;
-    s->iov[s->vnet_hdr_ofs].iov_len = size;
-    s->iovcnt = s->vnet_hdr_ofs + 1;
+    s->iov[s->host_hdr_ofs].iov_base = (uint8_t *)buf;
+    s->iov[s->host_hdr_ofs].iov_len = size;
+    s->iovcnt = s->host_hdr_ofs + 1;
     e1000_sendv_packet(s);
 }
 #else   /* !CONFIG_E1000_PARAVIRT */
@@ -967,7 +962,7 @@ xmit_seg(E1000State *s)
     struct virtio_net_hdr * hdr;
 
     if (s->csb && s->csb->guest_csb_on) {
-        if (!s->vnet_hdr_ofs && (tp->tse && tp->cptse)) {
+        if (!s->guest_hdr_ofs && (tp->tse && tp->cptse)) {
             /* We have TSO packet while not using the virtio-net header. */
             if (frames == 0) {
                 uint32_t csum;
@@ -988,7 +983,7 @@ xmit_seg(E1000State *s)
                     *((uint16_t*)(tp->data + tp->tucso)) = cpu_to_be16(csum);
             }
         } else {
-            if (!s->vnet_hdr_ofs) {
+            if (!s->guest_hdr_ofs) {
                 /* We are not using the virtio-net header, and this is a
                    potentially fragmented non-TSO packet. E.g., a Linux guest
                    send TCP segments as fragmented packet when the ethtool
@@ -1158,7 +1153,7 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
 
 #ifdef CONFIG_E1000_PARAVIRT
     if (s->csb && s->csb->guest_csb_on &&
-	    (s->vnet_hdr_ofs || !(tp->tse && tp->cptse))) {
+	    (s->guest_hdr_ofs || !(tp->tse && tp->cptse))) {
 	uint8_t *buf;
 
 	buf = map_mbufs(s, addr);
@@ -1170,7 +1165,7 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
 	s->iov[s->iovcnt].iov_len = split_size;
 	s->iovcnt++;
 	if (unlikely(s->iovcnt == E1000_MAX_FRAGS)) {
-	    s->iovcnt = s->vnet_hdr_ofs;
+	    s->iovcnt = s->host_hdr_ofs;
 	    s->iovsize = 0;
 	    goto reset;
 	}
@@ -1554,7 +1549,7 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
     if (s->v1000)
         return size;
 
-    if (s->vnet_hdr_ofs) {
+    if (s->host_hdr_ofs) {
         iov_skip_bytes(&iov, &iovcnt, &iov_ofs,
                        sizeof(struct virtio_net_hdr));
 	size -= sizeof(struct virtio_net_hdr);
@@ -1625,7 +1620,7 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
     if (csb_mode) {
 	/* Fills in the vnet header at the same index of the first RX
 	   descriptor used for the received frame. */
-        if (s->vnet_hdr_ofs) {
+        if (s->guest_hdr_ofs) {
             iov_to_buf(vnet_iov, vnet_iovcnt, 0*base,
                         &s->vnet_hdr[s->mac_reg[RDH]],
                         sizeof(struct virtio_net_hdr));
@@ -2032,12 +2027,11 @@ set_32bit(E1000State *s, int index, uint32_t val)
 		tap_set_vnet_hdr_len(s->nic->ncs->peer, sizeof(struct virtio_net_hdr));
 		tap_using_vnet_hdr(s->nic->ncs->peer, true);
 		tap_set_offload(s->nic->ncs->peer, 1, 1, 1, 1, 1);
-		s->vnet_hdr_ofs = 1;
+		s->host_hdr_ofs = s->guest_hdr_ofs = 1;
 	    } else {
-		//s->vnet_hdr_ofs = 0; XXX never reset
                 s->v1000 = false;
 	    }
-	    D("Using VNET header = %d\n", s->vnet_hdr_ofs);
+	    D("Using VNET header = %d\n", s->guest_hdr_ofs);
 
             /* Map the vnet-header ring. */
             vnet_hdr_phi = ((hwaddr)s->csb->vnet_ring_high << 32) | s->csb->vnet_ring_low;
@@ -2070,6 +2064,15 @@ set_32bit(E1000State *s, int index, uint32_t val)
 #endif /* V1000 */
             e1000_tx_ioeventfd_down(s);
             s->msix = false;
+            s->guest_hdr_ofs = 0;
+            if (s->host_hdr_ofs) {
+		tap_set_offload(s->nic->ncs->peer, 0, 0, 0, 0, 0);
+                /* In the past, the backend was asked to use the vnet header, and
+                   s->host_hdr_ofs was set. However, we are currently in non-paravirtual mode
+                   and so we must push a null header to the backend. Do this only once. */
+                s->iov[0].iov_base = &null_tx_hdr;
+                s->iov[0].iov_len = sizeof(struct virtio_net_hdr);
+            }
         }
     }
 }
