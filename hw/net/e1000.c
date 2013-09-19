@@ -835,7 +835,6 @@ putsum(uint8_t *data, uint32_t n, uint32_t sloc, uint32_t css, uint32_t cse)
     }
 }
 
-#ifdef CONFIG_E1000_PARAVIRT
 typedef const struct iovec * const_iovec_ptr;
 static size_t iov_skip_bytes(const_iovec_ptr *iov, int *iovcnt,
                              size_t *iov_ofs, unsigned int skip)
@@ -856,6 +855,7 @@ static size_t iov_skip_bytes(const_iovec_ptr *iov, int *iovcnt,
     return 0;
 }
 
+#ifdef CONFIG_E1000_PARAVIRT
 static void
 putsum_iov(const struct iovec *iov, int iovcnt, uint32_t n,
 		uint32_t sloc, uint32_t css, uint32_t cse)
@@ -1343,7 +1343,7 @@ static void e1000_peer_async_callback(void *opaque)
         desc = s->txring[s->sync_tdh];
 #else /* !CONFIG_E1000_PARAVIRT */
         base = tx_desc_base(s) + sizeof(struct e1000_tx_desc) * s->sync_tdh;
-        pci_dma_read(&s->dev, base, &desc, sizeof(desc));
+        pci_dma_read(PCI_DEVICE(s), base, &desc, sizeof(desc));
 #endif /* CONFIG_E1000_PARAVIRT */
 	cause |= txdesc_writeback(s, base, &desc);
         if (++s->sync_tdh * sizeof(desc) >= s->mac_reg[TDLEN])
