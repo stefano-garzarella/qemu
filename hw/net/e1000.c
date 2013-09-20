@@ -203,40 +203,35 @@ typedef struct E1000State_st {
 
     uint32_t rxbufs;
 #ifdef CONFIG_E1000_PARAVIRT
-    /* used for map ring */
-    struct e1000_tx_desc *txring;
-    struct e1000_rx_desc *rxring;
-    struct virtio_net_hdr *vnet_hdr;
+    struct e1000_tx_desc *txring;     /* Host virtual address for the TX ring. */
+    struct e1000_rx_desc *rxring;     /* Host virtual address for the RX ring. */
     struct guest_memreg_map mbufs;
     uint32_t iovcnt;
     uint32_t iovsize;
 #define E1000_MAX_FRAGS	64
     struct iovec iov[E1000_MAX_FRAGS];
-#endif /* CONFIG_E1000_PARAVIRT */
-
-#ifdef CONFIG_E1000_PARAVIRT
-    /* used for the communication block */
-    struct paravirt_csb *csb;
-    QEMUBH *tx_bh;
-    uint32_t tx_count;	    /* TX processed in last start_xmit round */
-    uint32_t txcycles;	    /* TX bottom half spinning counter */
-    uint32_t txcycles_lim;  /* Snapshot of s->csb->host_txcycles_lim */
-    int host_hdr_ofs;
-    int guest_hdr_ofs;
-    struct virtio_net_hdr *tx_hdr;
+    struct paravirt_csb *csb;   /* Communication Status Block. */
+    QEMUBH *tx_bh;              /* QEMU bottom-half used for transmission. */
+    uint32_t tx_count;	        /* TX processed in last start_xmit round */
+    uint32_t txcycles;	        /* TX bottom half spinning counter */
+    uint32_t txcycles_lim;      /* Snapshot of s->csb->host_txcycles_lim */
+    int host_hdr_ofs;           /* Is the host using the virtio-net header? */
+    int guest_hdr_ofs;          /* Is the guest using the virtio-net header? */
+    struct virtio_net_hdr *vnet_hdr;  /* Host v.a. for the headers receive ring. */
+    struct virtio_net_hdr *tx_hdr;    /* Private headers transmit ring. */
     EventNotifier host_tx_notifier;
     int virq;
-    bool ioeventfd;	    /* Use ioeventfd for guest --> host kicks. */
-    bool msix;
+    bool ioeventfd;	    /* Are we using ioeventfd for guest --> host kicks? */
+    bool msix;              /* Are we using MSI-X instead of IRQ interrupts? */
 #ifdef V1000
-    bool v1000;
+    bool v1000;             /* Did the user request to use the v1000 accelerator? */
     int v1000_fd;
     EventNotifier host_rx_notifier, guest_notifier;
     struct V1000Config cfg;
 #endif /* V1000 */
 #endif /* CONFIG_E1000_PARAVIRT */
-    bool peer_async;
-    uint32_t sync_tdh;	/* TDH register value (exposed to the guest) */
+    bool peer_async;        /* Is the backend able to do asynchronous processing? */
+    uint32_t sync_tdh;	    /* TDH register value exposed to the guest. */
     uint32_t next_tdh;
     IFRATE(QEMUTimer * rate_timer);
 } E1000State;
