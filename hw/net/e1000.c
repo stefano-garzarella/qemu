@@ -24,6 +24,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 
+
 #define WITH_D	/* include debugging macros from qemu-common.h */
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
@@ -37,8 +38,6 @@
 #include <qemu/iov.h>
 
 #include "e1000_regs.h"
-
-//#define RATE		/* debug rate monitor */
 
 //#undef CONFIG_E1000_PARAVIRT
 #ifdef CONFIG_E1000_PARAVIRT
@@ -62,7 +61,7 @@
 static struct virtio_net_hdr null_tx_hdr;
 #endif /* CONFIG_E1000_PARAVIRT */
 
-
+//#define RATE	    /* Debug rate monitor enable. */
 #ifdef RATE
 #define IFRATE(x) x
 #else
@@ -110,10 +109,6 @@ static int debugflags = DBGBIT(TXERR) | DBGBIT(GENERAL);
  *  Others never tested
  */
 enum { E1000_DEVID = E1000_DEV_ID_82540EM };
-// E1000_DEV_ID_82540EM uses microwire
-//enum { E1000_DEVID = E1000_DEV_ID_82573L }; // eeprom eerd
-// enum { E1000_DEVID = E1000_DEV_ID_82571EB_COPPER }; // eeprom eerd
-
 
 /*
  * May need to specify additional MAC-to-PHY entries --
@@ -201,8 +196,8 @@ typedef struct E1000State_st {
 #define E1000_FLAG_MIT (1 << E1000_FLAG_MIT_BIT)
     uint32_t compat_flags;
 
-    uint32_t rxbufs;
 #ifdef CONFIG_E1000_PARAVIRT
+    uint32_t rxbufs;
     struct e1000_tx_desc *txring;     /* Host virtual address for the TX ring. */
     struct e1000_rx_desc *rxring;     /* Host virtual address for the RX ring. */
     struct guest_memreg_map mbufs;
@@ -600,7 +595,7 @@ e1000_mit_timer(void *opaque)
     set_interrupt_cause(s, 0, s->mac_reg[ICR]);
 }
 
-static inline void
+static void
 set_ics(E1000State *s, int index, uint32_t val)
 {
     DBGOUT(INTERRUPT, "set_ics %x, ICR %x, IMR %x\n", val, s->mac_reg[ICR],
@@ -666,6 +661,7 @@ static void e1000_reset(void *opaque)
     d->csb = NULL;
     qemu_bh_cancel(d->tx_bh);
     d->host_hdr_ofs = d->guest_hdr_ofs = 0;
+    d->iovcnt = d->host_hdr_ofs;
     d->msix = false;
     msix_unuse_all_vectors(PCI_DEVICE(d));
     msix_vector_use(PCI_DEVICE(d), E1000_MSIX_CTRL_VECTOR);
@@ -678,9 +674,6 @@ static void e1000_reset(void *opaque)
 	D("qemu_register_peer_async_callback SUCCESS\n");
     else
 	D("qemu_register_peer_async_callback FAILED\n");
-#ifdef CONFIG_E1000_PARAVIRT
-    d->iovcnt = d->host_hdr_ofs;
-#endif /* CONFIG_E1000_PARAVIRT */
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
     memset(d->mac_reg, 0, sizeof d->mac_reg);
@@ -1432,8 +1425,6 @@ e1000_set_link_status(NetClientState *nc)
         set_ics(s, 0, E1000_ICR_LSC);
 }
 
-#define AVAIL_RXBUFS(s) (((((s)->mac_reg[RDT] < (s)->mac_reg[RDH]) ? (s)->rxbufs : 0) + (s)->mac_reg[RDT]) -(s)->mac_reg[RDH])
-
 static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
 {
 #ifdef CONFIG_E1000_PARAVIRT
@@ -1447,6 +1438,7 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
      *   Otherwise, set csb->host_rxkick_at and do the double check,
      *   possibly clearing the variable if we were wrong.
      */
+#define AVAIL_RXBUFS(s) (((((s)->mac_reg[RDT] < (s)->mac_reg[RDH]) ? (s)->rxbufs : 0) + (s)->mac_reg[RDT]) -(s)->mac_reg[RDH])
     struct paravirt_csb *csb = s->csb && s->csb->guest_csb_on ? s->csb : NULL;
     bool rxq_full = (total_size > AVAIL_RXBUFS(s) * s->rxbuf_size);
     int avail;
@@ -2112,12 +2104,12 @@ static void
 set_dlen(E1000State *s, int index, uint32_t val)
 {
     s->mac_reg[index] = val & 0xfff80;
-    s->rxbufs = s->mac_reg[index] / sizeof(struct e1000_rx_desc);
 #ifdef CONFIG_E1000_PARAVIRT
+    s->rxbufs = s->mac_reg[index] / sizeof(struct e1000_rx_desc);
     if (index == TDLEN) {
         if (s->tx_hdr) {
             g_free(s->tx_hdr);
-        } 
+        }
         s->tx_hdr = g_malloc0(s->mac_reg[index] * sizeof(struct virtio_net_hdr)
                                                 / sizeof(struct e1000_tx_desc));
     }
