@@ -922,7 +922,9 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
     s->iov[s->host_hdr_ofs].iov_base = (uint8_t *)buf;
     s->iov[s->host_hdr_ofs].iov_len = size;
     s->iovcnt = s->host_hdr_ofs + 1;
+    s->iovsize = size;
     e1000_sendv_packet(s);
+    IFRATE(rate_tx_iov--; rate_tx++);
 }
 #else   /* !CONFIG_E1000_PARAVIRT */
 static void
@@ -934,6 +936,7 @@ e1000_send_packet(E1000State *s, const uint8_t *buf, int size)
     } else {
         qemu_send_packet(nc, buf, size);
     }
+    IFRATE(rate_tx++; rate_txb += size; rate_tx_bh_len++);
 }
 
 
