@@ -2065,22 +2065,25 @@ set_32bit(E1000State *s, int index, uint32_t val)
 }
 
 static void
-set_dba(E1000State *s, int index, uint32_t val)
+remap_rings(E1000State *s)
 {
     PCIDevice * d = PCI_DEVICE(s);
     hwaddr desclen;
 
-    s->mac_reg[index] = val;
-    if (index == TDBAL || index == TDBAH) {
-        desclen = s->mac_reg[TDLEN];
-        s->txring = address_space_map(pci_get_address_space(d),
-                tx_desc_base(s), &desclen, 0 /* is_write */);
+    desclen = s->mac_reg[TDLEN];
+    s->txring = address_space_map(pci_get_address_space(d),
+            tx_desc_base(s), &desclen, 0 /* is_write */);
 
-    } else { /* if (index == RDBAL || index == RDBAH) */
-        desclen = s->mac_reg[RDLEN];
-        s->rxring = address_space_map(pci_get_address_space(d),
-                rx_desc_base(s), &desclen, 0 /* is_write */);
-    }
+    desclen = s->mac_reg[RDLEN];
+    s->rxring = address_space_map(pci_get_address_space(d),
+            rx_desc_base(s), &desclen, 0 /* is_write */);
+}
+
+static void
+set_dba(E1000State *s, int index, uint32_t val)
+{
+    s->mac_reg[index] = val;
+    remap_rings(s);
 }
 #endif /* CONFIG_E1000_PARAVIRT */
 
@@ -2116,6 +2119,7 @@ set_dlen(E1000State *s, int index, uint32_t val)
         s->tx_hdr = g_malloc0(s->mac_reg[index] * sizeof(struct virtio_net_hdr)
                                                 / sizeof(struct e1000_tx_desc));
     }
+    remap_rings(s);
 #endif
 }
 
