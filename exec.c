@@ -2110,36 +2110,6 @@ static void cpu_notify_map_clients(void)
     }
 }
 
-/* Helper function returning the contiguous segment containing
- * a guest physical address (gpaddr).
- * Return 0 if not existing, otherwise the segment covers the
- * guest physical region *gpa_low .. *gpa_high - 1, and the
- * guest-physical to host-virtual mapping is obtained as
- *         host_virtual_addr = gp_addr + *g2h_ofs
- */
-int address_space_mappable(AddressSpace *as, hwaddr gp_addr,
-    uint64_t *gpa_lo, uint64_t *gpa_hi, uint64_t *g2h_ofs)
-{
-    AddressSpaceDispatch *d = as->dispatch;
-    MemoryRegionSection *section;
-    RAMBlock *block;
-
-    section = phys_page_find(d->phys_map, gp_addr >> TARGET_PAGE_BITS,
-                            d->nodes, d->sections);
-    if (memory_region_is_ram(section->mr) && !section->readonly) {
-        QTAILQ_FOREACH(block, &ram_list.blocks, next) {
-            if (gp_addr - block->offset < block->length) {
-                *gpa_lo = block->offset;
-                *gpa_hi = block->offset + block->length;
-                *g2h_ofs = (uintptr_t)block->host - block->offset;
-                return 1;
-            }
-        }
-    }
-    *gpa_lo = *gpa_hi = *g2h_ofs = 0;
-    return 0;    /* cannot map */
-}
-
 int ram_block_get(int idx, hwaddr *off, hwaddr *len, uint8_t **va)
 {
     RAMBlock *block;

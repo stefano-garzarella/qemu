@@ -126,10 +126,11 @@ enum {
  * if the pointer is within the region, ofs gives the displacement.
  * hi >= lo means we should try to map it.
  */
-struct guest_memreg_map {
+struct GuestMemoryMapping {
         uint64_t lo;
         uint64_t hi;
         uint64_t ofs;
+        uint8_t *base;
 };
 #endif /* CONFIG_E1000_PARAVIRT */
 
@@ -200,7 +201,9 @@ typedef struct E1000State_st {
     uint32_t rxbufs;
     struct e1000_tx_desc *txring;     /* Host virtual address for the TX ring. */
     struct e1000_rx_desc *rxring;     /* Host virtual address for the RX ring. */
-    struct guest_memreg_map mbufs;
+#define E1000_MAX_MAPPINGS  8
+    struct GuestMemoryMapping mappings[E1000_MAX_MAPPINGS];
+    uint32_t num_mappings;
     uint32_t iovcnt;
     uint32_t iovsize;
 #define E1000_MAX_FRAGS	64
@@ -355,38 +358,79 @@ static void rate_callback(void * opaque)
 #endif /* RATE */
 
 #ifdef CONFIG_E1000_PARAVIRT
-/*
- * try to extract an mbuf region
- */
-static uint8_t *map_mbufs(E1000State *s, hwaddr addr) // XXX maybe const ?
+static uint8_t *translate_guest_paddr(E1000State *s, hwaddr addr, hwaddr len)
 {
-    struct guest_memreg_map *mb = &s->mbufs;
-    uint64_t a = addr;
+    struct GuestMemoryMapping *m = &s->mappings[0];
+    struct GuestMemoryMapping newm;
+    unsigned int i = 0;
+    uint64_t lo = addr;
+    uint64_t hi = addr + len;
+    hwaddr wmaplen;
+    hwaddr rmaplen;
     AddressSpace *as;
 
-    for (;;) {
-        if (mb->lo < mb->hi && mb->lo <= a && a < mb->hi) {
-            return (uint8_t *)(uintptr_t)(a + mb->ofs);
-        }
-        as = pci_get_address_space(PCI_DEVICE(s));
+/*    int j;
+    printf("Current mappings: \n");
+    for (j=0; j<s->num_mappings; j++) {
+        printf("    %p,%p\n", (void*)s->mappings[j].lo, (void*)s->mappings[j].hi);
+    }*/
 
-        ND("mapping %p is unset", (void *)(uintptr_t)addr);
-        /* XXX I couldn't find a replacement for this!
-        if (dma_has_iommu(DMAContext * dma)) {
-            D("iommu range, cannot set");
-            break;
-        }*/
-        if (!address_space_mappable(as, addr,
-                  &mb->lo, &mb->hi, &mb->ofs) || mb->hi <= mb->lo) {
-            D("not mappable, cannot set");
-            break;
+    for (;;) {
+        /* Lookup the translation table. */
+        for (; i < s->num_mappings; i++, m++) {
+            if (m->lo <= lo && hi <= m->hi) {
+                return (uint8_t *)(uintptr_t)(lo + m->ofs);
+            }
         }
-        ND("segment [%p .. %p] delta %p",
-             (void *)(uintptr_t)mb->lo,
-             (void *)(uintptr_t)mb->hi,
-             (void *)(uintptr_t)mb->ofs);
+        /* Translation miss: Try to extend a previous mapping. */
+        as = pci_get_address_space(PCI_DEVICE(s));
+        m = &s->mappings[0];
+        for (i = 0; i < s->num_mappings; i++, m++) {
+            newm = *m;
+            wmaplen = newm.hi - newm.lo;
+            address_space_unmap(as, newm.base, wmaplen, 1, wmaplen);
+            if (lo < newm.lo) {
+                newm.lo = lo;
+            }
+            if (hi > newm.hi) {
+                newm.hi = hi;
+            }
+            wmaplen = rmaplen = newm.hi - newm.lo;
+            newm.base = address_space_map(as, newm.lo, &rmaplen, 1 /* is write */);
+            newm.hi = newm.lo + rmaplen;
+            newm.ofs = (uintptr_t)newm.base - newm.lo;
+            if (rmaplen == wmaplen) {
+                ND("Extended mapping #%d", i);
+                *m = newm;
+                break;
+            }
+            /* This entry cannot be extended anymore: Restore what was
+               previously mapped. */
+            rmaplen = m->hi - m->lo;
+            m->base = address_space_map(as, m->lo, &rmaplen, 1);
+            m->hi = m->lo + rmaplen;
+            m->ofs = (uintptr_t)m->base - m->lo;
+        }
+        if (i == s->num_mappings) {
+            /* No entry was elegible for extension: Create a new one. */
+            if (i == E1000_MAX_MAPPINGS) {
+                break;
+            } else {
+                m->lo = lo;
+                m->hi = hi;
+                wmaplen = rmaplen = m->hi - m->lo;
+                m->base = address_space_map(as, m->lo, &rmaplen, 1);
+                m->ofs = (uintptr_t)m->base - m->lo;
+                if (rmaplen != wmaplen) {
+                    break;
+                }
+                s->num_mappings++;
+                ND("New mapping #%d", i);
+            }
+        }
     }
-    mb->hi = mb->lo = 0; /* empty mapping */
+    D("Cannot map %p + %d", (void*)(uintptr_t)addr, (int)len);
+
     return NULL;
 }
 #endif /* CONFIG_E1000_PARAVIRT */
@@ -1147,7 +1191,7 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
 	    (s->guest_hdr_ofs || !(tp->tse && tp->cptse))) {
 	uint8_t *buf;
 
-	buf = map_mbufs(s, addr);
+	buf = translate_guest_paddr(s, addr, split_size);
 	if (!buf) {
 	    D("SG mapping failed! (still not handled)\n");
 	    exit(-1);
@@ -1636,7 +1680,7 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
                     copy_size = s->rxbuf_size;
                 }
 #ifdef CONFIG_E1000_PARAVIRT
-                guest_buf = map_mbufs(s, ba);
+                guest_buf = translate_guest_paddr(s, ba, copy_size);
 #endif /* CONFIG_E1000_PARAVIRT */
                 do {
                     iov_copy = MIN(copy_size, iov->iov_len - iov_ofs);
@@ -2583,6 +2627,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 	D("msix_init_exclusive_bar(1) failed\n");
 	return i;
     }
+    d->num_mappings = 0;
 #ifdef V1000
     if (d->v1000) {
         d->ioeventfd = false;
