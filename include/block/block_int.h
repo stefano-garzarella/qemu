@@ -67,12 +67,24 @@ typedef struct BdrvTrackedRequest {
 struct BlockDriver {
     const char *format_name;
     int instance_size;
+
+    /* if not defined external snapshots are allowed
+     * future block filters will query their children to build the response
+     */
+    ExtSnapshotPerm (*bdrv_check_ext_snapshot)(BlockDriverState *bs);
+
     int (*bdrv_probe)(const uint8_t *buf, int buf_size, const char *filename);
     int (*bdrv_probe_device)(const char *filename);
 
     /* Any driver implementing this callback is expected to be able to handle
      * NULL file names in its .bdrv_open() implementation */
     void (*bdrv_parse_filename)(const char *filename, QDict *options, Error **errp);
+    /* Drivers not implementing bdrv_parse_filename nor bdrv_open should have
+     * this field set to true, except ones that are defined only by their
+     * child's bs.
+     * An example of the last type will be the quorum block driver.
+     */
+    bool bdrv_needs_filename;
 
     /* For handling image reopen for split or non-split files */
     int (*bdrv_reopen_prepare)(BDRVReopenState *reopen_state,
@@ -80,15 +92,18 @@ struct BlockDriver {
     void (*bdrv_reopen_commit)(BDRVReopenState *reopen_state);
     void (*bdrv_reopen_abort)(BDRVReopenState *reopen_state);
 
-    int (*bdrv_open)(BlockDriverState *bs, QDict *options, int flags);
-    int (*bdrv_file_open)(BlockDriverState *bs, QDict *options, int flags);
+    int (*bdrv_open)(BlockDriverState *bs, QDict *options, int flags,
+                     Error **errp);
+    int (*bdrv_file_open)(BlockDriverState *bs, QDict *options, int flags,
+                          Error **errp);
     int (*bdrv_read)(BlockDriverState *bs, int64_t sector_num,
                      uint8_t *buf, int nb_sectors);
     int (*bdrv_write)(BlockDriverState *bs, int64_t sector_num,
                       const uint8_t *buf, int nb_sectors);
     void (*bdrv_close)(BlockDriverState *bs);
     void (*bdrv_rebind)(BlockDriverState *bs);
-    int (*bdrv_create)(const char *filename, QEMUOptionParameter *options);
+    int (*bdrv_create)(const char *filename, QEMUOptionParameter *options,
+                       Error **errp);
     int (*bdrv_set_key)(BlockDriverState *bs, const char *key);
     int (*bdrv_make_empty)(BlockDriverState *bs);
     /* aio */
@@ -141,8 +156,11 @@ struct BlockDriver {
 
     const char *protocol_name;
     int (*bdrv_truncate)(BlockDriverState *bs, int64_t offset);
+
     int64_t (*bdrv_getlength)(BlockDriverState *bs);
+    bool has_variable_length;
     int64_t (*bdrv_get_allocated_file_size)(BlockDriverState *bs);
+
     int (*bdrv_write_compressed)(BlockDriverState *bs, int64_t sector_num,
                                  const uint8_t *buf, int nb_sectors);
 
@@ -150,12 +168,16 @@ struct BlockDriver {
                                 QEMUSnapshotInfo *sn_info);
     int (*bdrv_snapshot_goto)(BlockDriverState *bs,
                               const char *snapshot_id);
-    int (*bdrv_snapshot_delete)(BlockDriverState *bs, const char *snapshot_id);
+    int (*bdrv_snapshot_delete)(BlockDriverState *bs,
+                                const char *snapshot_id,
+                                const char *name,
+                                Error **errp);
     int (*bdrv_snapshot_list)(BlockDriverState *bs,
                               QEMUSnapshotInfo **psn_info);
     int (*bdrv_snapshot_load_tmp)(BlockDriverState *bs,
                                   const char *snapshot_name);
     int (*bdrv_get_info)(BlockDriverState *bs, BlockDriverInfo *bdi);
+    ImageInfoSpecific *(*bdrv_get_specific_info)(BlockDriverState *bs);
 
     int (*bdrv_save_vmstate)(BlockDriverState *bs, QEMUIOVector *qiov,
                              int64_t pos);
@@ -187,6 +209,9 @@ struct BlockDriver {
      */
     int (*bdrv_check)(BlockDriverState* bs, BdrvCheckResult *result,
         BdrvCheckMode fix);
+
+    int (*bdrv_amend_options)(BlockDriverState *bs,
+        QEMUOptionParameter *options);
 
     void (*bdrv_debug_event)(BlockDriverState *bs, BlkDebugEvent event);
 

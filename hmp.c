@@ -366,8 +366,6 @@ void hmp_info_block(Monitor *mon, const QDict *qdict)
                             info->value->inserted->iops_rd_max,
                             info->value->inserted->iops_wr_max,
                             info->value->inserted->iops_size);
-        } else {
-            monitor_printf(mon, " [not inserted]");
         }
 
         if (verbose) {
@@ -978,6 +976,28 @@ void hmp_snapshot_blkdev(Monitor *mon, const QDict *qdict)
     hmp_handle_error(mon, &errp);
 }
 
+void hmp_snapshot_blkdev_internal(Monitor *mon, const QDict *qdict)
+{
+    const char *device = qdict_get_str(qdict, "device");
+    const char *name = qdict_get_str(qdict, "name");
+    Error *errp = NULL;
+
+    qmp_blockdev_snapshot_internal_sync(device, name, &errp);
+    hmp_handle_error(mon, &errp);
+}
+
+void hmp_snapshot_delete_blkdev_internal(Monitor *mon, const QDict *qdict)
+{
+    const char *device = qdict_get_str(qdict, "device");
+    const char *name = qdict_get_str(qdict, "name");
+    const char *id = qdict_get_try_str(qdict, "id");
+    Error *errp = NULL;
+
+    qmp_blockdev_snapshot_delete_internal_sync(device, !!id, id,
+                                               true, name, &errp);
+    hmp_handle_error(mon, &errp);
+}
+
 void hmp_migrate_cancel(Monitor *mon, const QDict *qdict)
 {
     qmp_migrate_cancel(NULL);
@@ -1141,7 +1161,7 @@ void hmp_block_stream(Monitor *mon, const QDict *qdict)
 
     qmp_block_stream(device, base != NULL, base,
                      qdict_haskey(qdict, "speed"), speed,
-                     BLOCKDEV_ON_ERROR_REPORT, true, &error);
+                     true, BLOCKDEV_ON_ERROR_REPORT, &error);
 
     hmp_handle_error(mon, &error);
 }

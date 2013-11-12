@@ -365,6 +365,7 @@ static void virtio_net_reset(VirtIODevice *vdev)
     n->mac_table.uni_overflow = 0;
     memset(n->mac_table.macs, 0, MAC_TABLE_ENTRIES * ETH_ALEN);
     memcpy(&n->mac[0], &n->nic->conf->macaddr, sizeof(n->mac));
+    qemu_format_nic_info_str(qemu_get_queue(n->nic), n->mac);
     memset(n->vlans, 0, MAX_VLAN >> 3);
 
     IFRATE(qemu_mod_timer(n->rate_timer, qemu_get_clock_ms(vm_clock) + 3000));
@@ -1665,7 +1666,7 @@ static int virtio_net_device_exit(DeviceState *qdev)
         if (q->tx_timer) {
             timer_del(q->tx_timer);
             timer_free(q->tx_timer);
-        } else {
+        } else if (q->tx_bh) {
             qemu_bh_delete(q->tx_bh);
         }
     }

@@ -35,7 +35,7 @@
 #include "sysemu/dma.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
-#include <qemu/iov.h>
+#include "qemu/iov.h"
 
 #include "e1000_regs.h"
 
@@ -626,7 +626,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
     }
 #endif /* CONFIG_E1000_PARAVIRT */
     s->mit_irq_level = (pending_ints != 0);
-    qemu_set_irq(d->irq[0], s->mit_irq_level);
+    pci_set_irq(d, s->mit_irq_level);
 }
 
 static void
@@ -736,6 +736,7 @@ static void e1000_reset(void *opaque)
         d->mac_reg[RA] |= macaddr[i] << (8 * i);
         d->mac_reg[RA + 1] |= (i < 2) ? macaddr[i + 4] << (8 * i) : 0;
     }
+    qemu_format_nic_info_str(qemu_get_queue(d->nic), macaddr);
 }
 
 static void
@@ -864,8 +865,7 @@ putsum(uint8_t *data, uint32_t n, uint32_t sloc, uint32_t css, uint32_t cse)
         n = cse + 1;
     if (sloc < n-1) {
         sum = net_checksum_add(n-css, data+css);
-        cpu_to_be16wu((uint16_t *)(data + sloc),
-                      net_checksum_finish(sum));
+        stw_be_p(data + sloc, net_checksum_finish(sum));
     }
 }
 
@@ -1077,31 +1077,28 @@ xmit_seg(E1000State *s)
         DBGOUT(TXSUM, "frames %d size %d ipcss %d\n",
                frames, tp->size, css);
         if (tp->ip) {		// IPv4
-            cpu_to_be16wu((uint16_t *)(tp->data+css+2),
-                          tp->size - css);
-            cpu_to_be16wu((uint16_t *)(tp->data+css+4),
+            stw_be_p(tp->data+css+2, tp->size - css);
+            stw_be_p(tp->data+css+4,
                           be16_to_cpup((uint16_t *)(tp->data+css+4))+frames);
         } else			// IPv6
-            cpu_to_be16wu((uint16_t *)(tp->data+css+4),
-                          tp->size - css);
+            stw_be_p(tp->data+css+4, tp->size - css);
         css = tp->tucss;
         len = tp->size - css;
         DBGOUT(TXSUM, "tcp %d tucss %d len %d\n", tp->tcp, css, len);
         if (tp->tcp) {
             sofar = frames * tp->mss;
-            cpu_to_be32wu((uint32_t *)(tp->data+css+4),	// seq
-                be32_to_cpupu((uint32_t *)(tp->data+css+4))+sofar);
+            stl_be_p(tp->data+css+4, ldl_be_p(tp->data+css+4)+sofar); /* seq */
             if (tp->paylen - sofar > tp->mss)
                 tp->data[css + 13] &= ~9;		// PSH, FIN
         } else	// UDP
-            cpu_to_be16wu((uint16_t *)(tp->data+css+4), len);
+            stw_be_p(tp->data+css+4, len);
         if (tp->sum_needed & E1000_TXD_POPTS_TXSM) {
             unsigned int phsum;
             // add pseudo-header length before checksum calculation
             sp = (uint16_t *)(tp->data + tp->tucso);
             phsum = be16_to_cpup(sp) + len;
             phsum = (phsum >> 16) + (phsum & 0xffff);
-            cpu_to_be16wu(sp, phsum);
+            stw_be_p(sp, phsum);
         }
         tp->tso_frames++;
     }
@@ -1178,9 +1175,9 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
     if (vlan_enabled(s) && is_vlan_txd(txd_lower) &&
         (tp->cptse || txd_lower & E1000_TXD_CMD_EOP)) {
         tp->vlan_needed = 1;
-        cpu_to_be16wu((uint16_t *)(tp->vlan_header),
+        stw_be_p(tp->vlan_header,
                       le16_to_cpup((uint16_t *)(s->mac_reg + VET)));
-        cpu_to_be16wu((uint16_t *)(tp->vlan_header + 2),
+        stw_be_p(tp->vlan_header + 2,
                       le16_to_cpu(dp->upper.fields.special));
     }
 
@@ -1812,7 +1809,15 @@ mac_read_clr8(E1000State *s, int index)
 static void
 mac_writereg(E1000State *s, int index, uint32_t val)
 {
+    uint32_t macaddr[2];
+
     s->mac_reg[index] = val;
+
+    if (index == RA || index == RA + 1) {
+        macaddr[0] = cpu_to_le32(s->mac_reg[RA]);
+        macaddr[1] = cpu_to_le32(s->mac_reg[RA + 1]);
+        qemu_format_nic_info_str(qemu_get_queue(s->nic), (uint8_t *)macaddr);
+    }
 }
 
 
@@ -2566,9 +2571,7 @@ static NetClientInfo net_e1000_info = {
     .size = sizeof(NICState),
     .can_receive = e1000_can_receive,
     .receive = e1000_receive,
-#ifdef CONFIG_E1000_PARAVIRT
     .receive_iov = e1000_receive_iov,
-#endif	/* CONFIG_E1000_PARAVIRT */
     .cleanup = e1000_cleanup,
     .link_status_changed = e1000_set_link_status,
 };

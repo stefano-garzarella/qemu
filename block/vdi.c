@@ -165,7 +165,7 @@ typedef struct {
     uuid_t uuid_link;
     uuid_t uuid_parent;
     uint64_t unused2[7];
-} VdiHeader;
+} QEMU_PACKED VdiHeader;
 
 typedef struct {
     /* The block map entries are little endian (even in memory). */
@@ -364,7 +364,8 @@ static int vdi_probe(const uint8_t *buf, int buf_size, const char *filename)
     return result;
 }
 
-static int vdi_open(BlockDriverState *bs, QDict *options, int flags)
+static int vdi_open(BlockDriverState *bs, QDict *options, int flags,
+                    Error **errp)
 {
     BDRVVdiState *s = bs->opaque;
     VdiHeader header;
@@ -644,7 +645,8 @@ static int vdi_co_write(BlockDriverState *bs,
     return ret;
 }
 
-static int vdi_create(const char *filename, QEMUOptionParameter *options)
+static int vdi_create(const char *filename, QEMUOptionParameter *options,
+                      Error **errp)
 {
     int fd;
     int result = 0;

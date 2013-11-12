@@ -288,7 +288,7 @@ static QemuOptsList runtime_opts = {
 };
 
 static int qemu_gluster_open(BlockDriverState *bs,  QDict *options,
-                             int bdrv_flags)
+                             int bdrv_flags, Error **errp)
 {
     BDRVGlusterState *s = bs->opaque;
     int open_flags = O_BINARY;
@@ -357,7 +357,7 @@ out:
 }
 
 static int qemu_gluster_create(const char *filename,
-        QEMUOptionParameter *options)
+        QEMUOptionParameter *options, Error **errp)
 {
     struct glfs *glfs;
     struct glfs_fd *fd;
@@ -611,6 +611,7 @@ static BlockDriver bdrv_gluster = {
     .format_name                  = "gluster",
     .protocol_name                = "gluster",
     .instance_size                = sizeof(BDRVGlusterState),
+    .bdrv_needs_filename          = true,
     .bdrv_file_open               = qemu_gluster_open,
     .bdrv_close                   = qemu_gluster_close,
     .bdrv_create                  = qemu_gluster_create,
@@ -631,6 +632,7 @@ static BlockDriver bdrv_gluster_tcp = {
     .format_name                  = "gluster",
     .protocol_name                = "gluster+tcp",
     .instance_size                = sizeof(BDRVGlusterState),
+    .bdrv_needs_filename          = true,
     .bdrv_file_open               = qemu_gluster_open,
     .bdrv_close                   = qemu_gluster_close,
     .bdrv_create                  = qemu_gluster_create,
@@ -651,6 +653,7 @@ static BlockDriver bdrv_gluster_unix = {
     .format_name                  = "gluster",
     .protocol_name                = "gluster+unix",
     .instance_size                = sizeof(BDRVGlusterState),
+    .bdrv_needs_filename          = true,
     .bdrv_file_open               = qemu_gluster_open,
     .bdrv_close                   = qemu_gluster_close,
     .bdrv_create                  = qemu_gluster_create,
@@ -671,6 +674,7 @@ static BlockDriver bdrv_gluster_rdma = {
     .format_name                  = "gluster",
     .protocol_name                = "gluster+rdma",
     .instance_size                = sizeof(BDRVGlusterState),
+    .bdrv_needs_filename          = true,
     .bdrv_file_open               = qemu_gluster_open,
     .bdrv_close                   = qemu_gluster_close,
     .bdrv_create                  = qemu_gluster_create,

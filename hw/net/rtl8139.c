@@ -864,7 +864,7 @@ static void rtl8139_update_irq(RTL8139State *s)
     DPRINTF("Set IRQ to %d (%04x %04x)\n", isr ? 1 : 0, s->IntrStatus,
         s->IntrMask);
 
-    qemu_set_irq(d->irq[0], (isr != 0));
+    pci_set_irq(d, (isr != 0));
 #ifdef RATE
     if (!rate_irq_level && isr) {
 	rate_irq_int++;
@@ -1374,6 +1374,7 @@ static void rtl8139_reset(DeviceState *d)
 
     /* restore MAC address */
     memcpy(s->phys, s->conf.macaddr.a, 6);
+    qemu_format_nic_info_str(qemu_get_queue(s->nic), s->phys);
 
     /* reset interrupt mask */
     s->IntrStatus = 0;
@@ -2970,6 +2971,7 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
     {
         case MAC0 ... MAC0+5:
             s->phys[addr - MAC0] = val;
+            qemu_format_nic_info_str(qemu_get_queue(s->nic), s->phys);
             break;
         case MAC0+6 ... MAC0+7:
             /* reserved */

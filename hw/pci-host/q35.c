@@ -89,22 +89,38 @@ static void q35_host_get_pci_hole64_start(Object *obj, Visitor *v,
                                           void *opaque, const char *name,
                                           Error **errp)
 {
-    Q35PCIHost *s = Q35_HOST_DEVICE(obj);
+    PCIHostState *h = PCI_HOST_BRIDGE(obj);
+    Range w64;
 
-    visit_type_uint64(v, &s->mch.pci_info.w64.begin, name, errp);
+    pci_bus_get_w64_range(h->bus, &w64);
+
+    visit_type_uint64(v, &w64.begin, name, errp);
 }
 
 static void q35_host_get_pci_hole64_end(Object *obj, Visitor *v,
                                         void *opaque, const char *name,
                                         Error **errp)
 {
-    Q35PCIHost *s = Q35_HOST_DEVICE(obj);
+    PCIHostState *h = PCI_HOST_BRIDGE(obj);
+    Range w64;
 
-    visit_type_uint64(v, &s->mch.pci_info.w64.end, name, errp);
+    pci_bus_get_w64_range(h->bus, &w64);
+
+    visit_type_uint64(v, &w64.end, name, errp);
+}
+
+static void q35_host_get_mmcfg_size(Object *obj, Visitor *v,
+                                    void *opaque, const char *name,
+                                    Error **errp)
+{
+    PCIExpressHost *e = PCIE_HOST_BRIDGE(obj);
+    uint32_t value = e->size;
+
+    visit_type_uint32(v, &value, name, errp);
 }
 
 static Property mch_props[] = {
-    DEFINE_PROP_UINT64("MCFG", Q35PCIHost, parent_obj.base_addr,
+    DEFINE_PROP_UINT64(PCIE_HOST_MCFG_BASE, Q35PCIHost, parent_obj.base_addr,
                         MCH_HOST_BRIDGE_PCIEXBAR_DEFAULT),
     DEFINE_PROP_SIZE(PCI_HOST_PROP_PCI_HOLE64_SIZE, Q35PCIHost,
                      mch.pci_hole64_size, DEFAULT_PCI_HOLE64_SIZE),
@@ -152,6 +168,10 @@ static void q35_host_initfn(Object *obj)
 
     object_property_add(obj, PCI_HOST_PROP_PCI_HOLE64_END, "int",
                         q35_host_get_pci_hole64_end,
+                        NULL, NULL, NULL, NULL);
+
+    object_property_add(obj, PCIE_HOST_MCFG_SIZE, "int",
+                        q35_host_get_mmcfg_size,
                         NULL, NULL, NULL, NULL);
 
     /* Leave enough space for the biggest MCFG BAR */
@@ -214,6 +234,16 @@ static void mch_update_pciexbar(MCHPCIState *mch)
     }
     addr = pciexbar & addr_mask;
     pcie_host_mmcfg_update(pehb, enable, addr, length);
+    /* Leave enough space for the MCFG BAR */
+    /*
+     * TODO: this matches current bios behaviour, but it's not a power of two,
+     * which means an MTRR can't cover it exactly.
+     */
+    if (enable) {
+        mch->pci_info.w32.begin = addr + length;
+    } else {
+        mch->pci_info.w32.begin = MCH_HOST_BRIDGE_PCIEXBAR_DEFAULT;
+    }
 }
 
 /* PAM */
@@ -359,6 +389,16 @@ static int mch_init(PCIDevice *d)
     return 0;
 }
 
+uint64_t mch_mcfg_base(void)
+{
+    bool ambiguous;
+    Object *o = object_resolve_path_type("", TYPE_MCH_PCI_DEVICE, &ambiguous);
+    if (!o) {
+        return 0;
+    }
+    return MCH_HOST_BRIDGE_PCIEXBAR_DEFAULT;
+}
+
 static void mch_class_init(ObjectClass *klass, void *data)
 {
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
@@ -372,7 +412,7 @@ static void mch_class_init(ObjectClass *klass, void *data)
     dc->vmsd = &vmstate_mch;
     k->vendor_id = PCI_VENDOR_ID_INTEL;
     k->device_id = PCI_DEVICE_ID_INTEL_Q35_MCH;
-    k->revision = MCH_HOST_BRIDGE_REVISION_DEFUALT;
+    k->revision = MCH_HOST_BRIDGE_REVISION_DEFAULT;
     k->class_id = PCI_CLASS_BRIDGE_HOST;
 }
 

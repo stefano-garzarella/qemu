@@ -235,18 +235,24 @@ static void i440fx_pcihost_get_pci_hole64_start(Object *obj, Visitor *v,
                                                 void *opaque, const char *name,
                                                 Error **errp)
 {
-    I440FXState *s = I440FX_PCI_HOST_BRIDGE(obj);
+    PCIHostState *h = PCI_HOST_BRIDGE(obj);
+    Range w64;
 
-    visit_type_uint64(v, &s->pci_info.w64.begin, name, errp);
+    pci_bus_get_w64_range(h->bus, &w64);
+
+    visit_type_uint64(v, &w64.begin, name, errp);
 }
 
 static void i440fx_pcihost_get_pci_hole64_end(Object *obj, Visitor *v,
                                               void *opaque, const char *name,
                                               Error **errp)
 {
-    I440FXState *s = I440FX_PCI_HOST_BRIDGE(obj);
+    PCIHostState *h = PCI_HOST_BRIDGE(obj);
+    Range w64;
 
-    visit_type_uint64(v, &s->pci_info.w64.end, name, errp);
+    pci_bus_get_w64_range(h->bus, &w64);
+
+    visit_type_uint64(v, &w64.end, name, errp);
 }
 
 static void i440fx_pcihost_initfn(Object *obj)
@@ -408,6 +414,14 @@ PCIBus *i440fx_init(PCII440FXState **pi440fx_state,
     i440fx_update_memory_mappings(f);
 
     return b;
+}
+
+PCIBus *find_i440fx(void)
+{
+    PCIHostState *s = OBJECT_CHECK(PCIHostState,
+                                   object_resolve_path("/machine/i440fx", NULL),
+                                   TYPE_PCI_HOST_BRIDGE);
+    return s ? s->bus : NULL;
 }
 
 /* PIIX3 PCI to ISA bridge */
