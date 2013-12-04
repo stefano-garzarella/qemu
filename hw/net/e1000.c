@@ -1311,7 +1311,7 @@ start_xmit(E1000State *s)
             }
             if (s->tx_count > hlim || s->mac_reg[TDH] == s->mac_reg[TDT]) {
                 /* still dry, we are done */
-                return;
+                break;
             }
         } else if (s->mac_reg[TDH] == s->mac_reg[TDT]) {
             break;
@@ -1348,10 +1348,6 @@ start_xmit(E1000State *s)
 #ifdef CONFIG_E1000_PARAVIRT
 	    if (csb_mode) {
 		s->csb->host_tdh = s->next_tdh;
-		if (s->next_tdh == s->mac_reg[TDT])
-		    cause |= E1000_ICS_TXQE;
-		set_ics(s, 0, cause);
-		cause = 0;
 	    }
 #endif /* CONFIG_E1000_PARAVIRT */
 	}
