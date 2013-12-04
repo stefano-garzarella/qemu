@@ -715,9 +715,9 @@ static void e1000_reset(void *opaque)
 				    &e1000_peer_async_callback, d) == 0);
     d->sync_tdh = 0;
     if (d->peer_async)
-	D("qemu_register_peer_async_callback SUCCESS\n");
+	D("the backend is asynchronous\n");
     else
-	D("qemu_register_peer_async_callback FAILED\n");
+	D("the backend is not asynchronous\n");
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
     memset(d->mac_reg, 0, sizeof d->mac_reg);

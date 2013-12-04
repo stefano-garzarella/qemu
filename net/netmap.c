@@ -418,7 +418,7 @@ static void netmap_send(void *opaque)
     netmap_read_poll(s, true); /* probably useless. */
 }
 
-
+#ifdef USE_INDIRECT_BUFFERS
 static void netmap_register_peer_async_callback(NetClientState *nc,
 		    PeerAsyncCallback *cb, void *opaque)
 {
@@ -427,6 +427,7 @@ static void netmap_register_peer_async_callback(NetClientState *nc,
     s->txsync_callback = cb;
     s->txsync_callback_arg = opaque;
 }
+#endif
 
 /* flush and close */
 static void netmap_cleanup(NetClientState *nc)
@@ -457,7 +458,9 @@ static NetClientInfo net_netmap_info = {
     .receive_raw = netmap_receive_raw,
 #endif
     .poll = netmap_poll,
+#ifdef USE_INDIRECT_BUFFERS
     .register_peer_async_callback = netmap_register_peer_async_callback,
+#endif
     .cleanup = netmap_cleanup,
 };
 
