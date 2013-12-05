@@ -228,6 +228,7 @@ typedef struct E1000State_st {
     struct V1000Config cfg;
 #endif /* V1000 */
 #endif /* CONFIG_E1000_PARAVIRT */
+    uint32_t rx_count;
     bool peer_async;        /* Is the backend able to do asynchronous processing? */
     uint32_t sync_tdh;	    /* TDH register value exposed to the guest. */
     uint32_t next_tdh;
@@ -1549,7 +1550,8 @@ static uint64_t rx_desc_base(E1000State *s)
 }
 
 static ssize_t
-e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
+e1000_receive_iov_flags(NetClientState *nc, const struct iovec *iov, int iovcnt,
+                        unsigned flags)
 {
     E1000State *s = qemu_get_nic_opaque(nc);
     PCIDevice *d = PCI_DEVICE(s);
@@ -1750,9 +1752,20 @@ e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
         s->rxbuf_min_shift)
         n |= E1000_ICS_RXDMT0;
 
-    set_ics(s, 0, n);
+    s->rx_count++;
+    if (!(flags & QEMU_NET_PACKET_FLAG_MORE) ||
+            s->rx_count == s->mac_reg[RDLEN] / sizeof(desc)) {
+        s->rx_count = 50;
+        set_ics(s, 0, n);
+    }
 
     return size;
+}
+
+static ssize_t
+e1000_receive_iov(NetClientState *nc, const struct iovec *iov, int iovcnt)
+{
+    return e1000_receive_iov_flags(nc, iov, iovcnt, 0);
 }
 
 static ssize_t
@@ -1763,7 +1776,7 @@ e1000_receive(NetClientState *nc, const uint8_t *buf, size_t size)
         .iov_len = size
     };
 
-    return e1000_receive_iov(nc, &iov, 1);
+    return e1000_receive_iov_flags(nc, &iov, 1, 0);
 }
 
 static uint32_t
@@ -2568,6 +2581,7 @@ static NetClientInfo net_e1000_info = {
     .can_receive = e1000_can_receive,
     .receive = e1000_receive,
     .receive_iov = e1000_receive_iov,
+    .receive_iov_flags = e1000_receive_iov_flags,
     .cleanup = e1000_cleanup,
     .link_status_changed = e1000_set_link_status,
 };

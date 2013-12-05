@@ -404,8 +404,9 @@ static void netmap_send(void *opaque)
 	    D("no more slot, but incomplete packet\n");
 	}
 
-	iovsize = qemu_sendv_packet_async(&s->nc, iov, iovcnt,
-						    netmap_send_completed);
+	iovsize = qemu_sendv_packet_async_moreflags(&s->nc, iov, iovcnt,
+		    netmap_send_completed,
+                    ring->avail ? QEMU_NET_PACKET_FLAG_MORE : 0);
 
         if (iovsize == 0) {
             /* the guest does not receive anymore. Packet is queued, stop
