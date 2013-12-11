@@ -60,6 +60,7 @@ typedef struct NetmapState {
     struct iovec        iov[IOV_MAX];
     PeerAsyncCallback	*txsync_callback;
     void		*txsync_callback_arg;
+    int                 vnet_hdr_len;  /* Current virtio-net header length. */
 } NetmapState;
 
 #define D(format, ...)                                          \
@@ -457,6 +458,60 @@ static void netmap_cleanup(NetClientState *nc)
     s->me.fd = -1;
 }
 
+/* Offloading manipulation support callbacks.
+ *
+ * Currently we are simply able to pass the virtio-net header
+ * throughout the VALE switch, without modifying it or interpreting it.
+ * For this reason we are always able to support TSO/UFO/CSUM and
+ * different header lengths as long as two virtio-net-header-capable
+ * VMs are attached to the bridge.
+ */
+static bool netmap_has_ufo(NetClientState *nc)
+{
+    return true;
+}
+
+static int netmap_has_vnet_hdr(NetClientState *nc)
+{
+    return true;
+}
+
+static int netmap_has_vnet_hdr_len(NetClientState *nc, int len)
+{
+    return len >= 0 && len <= NETMAP_BDG_MAX_OFFSET;
+}
+
+static void netmap_using_vnet_hdr(NetClientState *nc, bool enable)
+{
+}
+
+static void netmap_set_offload(NetClientState *nc, int csum, int tso4, int tso6,
+                               int ecn, int ufo)
+{
+}
+
+static void netmap_set_vnet_hdr_len(NetClientState *nc, int len)
+{
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
+    int err;
+    struct nmreq req;
+
+    /* Issue a NETMAP_BDG_OFFSET command to change the netmap adapter
+       offset of 'me->ifname'. */
+    memset(&req, 0, sizeof(req));
+    pstrcpy(req.nr_name, sizeof(req.nr_name), s->me.ifname);
+    req.nr_version = NETMAP_API;
+    req.nr_cmd = NETMAP_BDG_OFFSET;
+    req.nr_arg1 = len;
+    err = ioctl(s->me.fd, NIOCREGIF, &req);
+    if (err) {
+        error_report("Unable to execute NETMAP_BDG_OFFSET on %s: %s",
+                     s->me.ifname, strerror(errno));
+    } else {
+        /* Keep track of the current length, may be usefule in the future. */
+        s->vnet_hdr_len = len;
+    }
+}
 
 /* NetClientInfo methods */
 static NetClientInfo net_netmap_info = {
@@ -471,6 +526,12 @@ static NetClientInfo net_netmap_info = {
     .register_peer_async_callback = netmap_register_peer_async_callback,
 #endif
     .cleanup = netmap_cleanup,
+    .has_ufo = netmap_has_ufo,
+    .has_vnet_hdr = netmap_has_vnet_hdr,
+    .has_vnet_hdr_len = netmap_has_vnet_hdr_len,
+    .using_vnet_hdr = netmap_using_vnet_hdr,
+    .set_offload = netmap_set_offload,
+    .set_vnet_hdr_len = netmap_set_vnet_hdr_len,
 };
 
 /* The exported init function
@@ -496,6 +557,7 @@ int net_init_netmap(const NetClientOptions *opts,
     nc = qemu_new_net_client(&net_netmap_info, peer, "netmap", name);
     s = DO_UPCAST(NetmapState, nc, nc);
     s->me = me;
+    s->vnet_hdr_len = 0;
     netmap_read_poll(s, true); /* Initially only poll for reads. */
     s->txsync_callback = s->txsync_callback_arg = NULL;
 
