@@ -378,10 +378,6 @@ static void peer_test_vnet_hdr(VirtIONet *n)
         return;
     }
 
-    if (nc->peer->info->type != NET_CLIENT_OPTIONS_KIND_TAP) {
-        return;
-    }
-
     n->has_vnet_hdr = qemu_peer_has_vnet_hdr(nc);
 }
 

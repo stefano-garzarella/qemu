@@ -1885,9 +1885,7 @@ static bool vmxnet3_peer_has_vnet_hdr(VMXNET3State *s)
 {
     NetClientState *nc = qemu_get_queue(s->nic);
 
-    if ((NULL != nc->peer)                              &&
-        (nc->peer->info->type == NET_CLIENT_OPTIONS_KIND_TAP)   &&
-        qemu_peer_has_vnet_hdr(nc)) {
+    if (qemu_peer_has_vnet_hdr(nc)) {
         return true;
     }
 
