@@ -56,6 +56,12 @@ typedef void (NetClientDestructor)(NetClientState *);
 typedef void (PeerAsyncCallback)(void *);
 typedef void (RegisterPeerAsyncCallback)(NetClientState *, PeerAsyncCallback*, void *);
 typedef RxFilterInfo *(QueryRxFilter)(NetClientState *);
+typedef bool (HasUfo)(NetClientState *);
+typedef int (HasVnetHdr)(NetClientState *);
+typedef int (HasVnetHdrLen)(NetClientState *, int);
+typedef void (UsingVnetHdr)(NetClientState *, bool);
+typedef void (SetOffload)(NetClientState *, int, int, int, int, int);
+typedef void (SetVnetHdrLen)(NetClientState *, int);
 
 typedef struct NetClientInfo {
     NetClientOptionsKind type;
@@ -71,6 +77,12 @@ typedef struct NetClientInfo {
     RegisterPeerAsyncCallback *register_peer_async_callback;
     QueryRxFilter *query_rx_filter;
     NetPoll *poll;
+    HasUfo *has_ufo;
+    HasVnetHdr *has_vnet_hdr;
+    HasVnetHdrLen *has_vnet_hdr_len;
+    UsingVnetHdr *using_vnet_hdr;
+    SetOffload *set_offload;
+    SetVnetHdrLen *set_vnet_hdr_len;
 } NetClientInfo;
 
 struct NetClientState {
@@ -133,6 +145,13 @@ ssize_t qemu_send_packet_async_moreflags(NetClientState *nc, const uint8_t *buf,
 void qemu_purge_queued_packets(NetClientState *nc);
 void qemu_flush_queued_packets(NetClientState *nc);
 void qemu_format_nic_info_str(NetClientState *nc, uint8_t macaddr[6]);
+bool qemu_peer_has_ufo(NetClientState *nc);
+int qemu_peer_has_vnet_hdr(NetClientState *nc);
+int qemu_peer_has_vnet_hdr_len(NetClientState *nc, int len);
+void qemu_peer_using_vnet_hdr(NetClientState *nc, bool enable);
+void qemu_peer_set_offload(NetClientState *nc, int csum, int tso4, int tso6,
+                           int ecn, int ufo);
+void qemu_peer_set_vnet_hdr_len(NetClientState *nc, int len);
 void qemu_macaddr_default_if_unset(MACAddr *macaddr);
 int qemu_show_nic_models(const char *arg, const char *const *models);
 void qemu_check_nic_model(NICInfo *nd, const char *model);
