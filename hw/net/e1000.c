@@ -1480,7 +1480,7 @@ static bool e1000_has_rxbufs(E1000State *s, size_t total_size)
     bool rxq_full = (total_size > AVAIL_RXBUFS(s) * s->rxbuf_size);
     int avail;
 
-    if (s->v1000) {
+    if (unlikely(s->v1000)) {
         return true;
     }
     if (csb) {
@@ -1929,94 +1929,96 @@ static int e1000_v1000_up(E1000State *s)
     int ret;
     int i;
 
-    if (s->v1000) {
-        if ((s->v1000_fd = open("/dev/v1000", O_RDWR)) < 0) {
-            printf("Cannot open '/dev/v1000'\n");
-            return -1;
-        }
+    if (!s->v1000) {
+        return 0;
+    }
 
-        /* Load the translation table. */
-        i = 0;
-        while ((ret = ram_block_get(i, &offset, &length, &vaddr)) == 0) {
-            s->cfg.tr.table[i].phy = offset;
-            s->cfg.tr.table[i].length = length;
-            s->cfg.tr.table[i].virt = vaddr;
-            i++;
-        }
-        if (ret < 0) {
-            printf("ram_block_get() failed!\n");
-            return -1;
-        }
-        s->cfg.tr.num = i;
+    if ((s->v1000_fd = open("/dev/v1000", O_RDWR)) < 0) {
+        printf("Cannot open '/dev/v1000'\n");
+        return -1;
+    }
 
-        /* Create an eventfd to use as an irqfd and configure it. */
-        if (event_notifier_init(&s->guest_notifier, 0)) {
-            printf("Error: event_notifier_init()\n");
-            s->v1000 = false;
-            return -1;
-        }
-        msg = msix_get_message(d, E1000_MSIX_DATA_VECTOR);
-        if ((s->virq = kvm_irqchip_add_msi_route(kvm_state, msg)) < 0) {
-            printf("Error: kvm_irqchip_add_msi_route(): %d\n", -s->virq);
-            return -s->virq;
-        }
-        if (kvm_irqchip_add_irqfd_notifier(kvm_state, &s->guest_notifier,
-                    NULL, s->virq)) {
-            printf("Error: kvm_irqchip_add_irqfd()\n");
-            s->v1000 = false;
-            return -1;
-        }
+    /* Load the translation table. */
+    i = 0;
+    while ((ret = ram_block_get(i, &offset, &length, &vaddr)) == 0) {
+        s->cfg.tr.table[i].phy = offset;
+        s->cfg.tr.table[i].length = length;
+        s->cfg.tr.table[i].virt = vaddr;
+        i++;
+    }
+    if (ret < 0) {
+        printf("ram_block_get() failed!\n");
+        return -1;
+    }
+    s->cfg.tr.num = i;
 
-        /* Create an eventfd to use as rx ioeventfd and
-           bind it to the RDT register writes. */
-        if (event_notifier_init(&s->host_rx_notifier, 0)) {
-            printf("event_notifier_init() error\n");
-            s->v1000 = false;
-            return -1;
-        }
-        memory_region_add_eventfd(&s->mmio, RDT << 2, 4, false, 0,
-                &s->host_rx_notifier);
+    /* Create an eventfd to use as an irqfd and configure it. */
+    if (event_notifier_init(&s->guest_notifier, 0)) {
+        printf("Error: event_notifier_init()\n");
+        s->v1000 = false;
+        return -1;
+    }
+    msg = msix_get_message(d, E1000_MSIX_DATA_VECTOR);
+    if ((s->virq = kvm_irqchip_add_msi_route(kvm_state, msg)) < 0) {
+        printf("Error: kvm_irqchip_add_msi_route(): %d\n", -s->virq);
+        return -s->virq;
+    }
+    if (kvm_irqchip_add_irqfd_notifier(kvm_state, &s->guest_notifier,
+                NULL, s->virq)) {
+        printf("Error: kvm_irqchip_add_irqfd()\n");
+        s->v1000 = false;
+        return -1;
+    }
 
-        /* Configure the RX ring. */
-        s->cfg.rx_ring.phy = rx_desc_base(s);
-        s->cfg.rx_ring.hdr.phy = ((hwaddr)s->csb->vnet_ring_high << 32) | s->csb->vnet_ring_low;
-        s->cfg.rx_ring.num = s->mac_reg[RDLEN] / sizeof(struct e1000_rx_desc);
-        s->cfg.rx_ring.ioeventfd = event_notifier_get_fd(&s->host_rx_notifier);
-        s->cfg.rx_ring.irqfd = event_notifier_get_fd(&s->guest_notifier);
-        s->cfg.rx_ring.resamplefd = ~0U;
+    /* Create an eventfd to use as rx ioeventfd and
+       bind it to the RDT register writes. */
+    if (event_notifier_init(&s->host_rx_notifier, 0)) {
+        printf("event_notifier_init() error\n");
+        s->v1000 = false;
+        return -1;
+    }
+    memory_region_add_eventfd(&s->mmio, RDT << 2, 4, false, 0,
+            &s->host_rx_notifier);
 
-        /* Configure the TX ring. */
-        s->cfg.tx_ring.phy = tx_desc_base(s);
-        s->cfg.tx_ring.hdr.virt = s->tx_hdr;
-        s->cfg.tx_ring.num = s->mac_reg[TDLEN] / sizeof(struct e1000_tx_desc);
-        s->cfg.tx_ring.ioeventfd = event_notifier_get_fd(&s->host_tx_notifier);
-        s->cfg.tx_ring.irqfd = event_notifier_get_fd(&s->guest_notifier);
-        s->cfg.tx_ring.resamplefd = ~0U;
+    /* Configure the RX ring. */
+    s->cfg.rx_ring.phy = rx_desc_base(s);
+    s->cfg.rx_ring.hdr.phy = ((hwaddr)s->csb->vnet_ring_high << 32) | s->csb->vnet_ring_low;
+    s->cfg.rx_ring.num = s->mac_reg[RDLEN] / sizeof(struct e1000_rx_desc);
+    s->cfg.rx_ring.ioeventfd = event_notifier_get_fd(&s->host_rx_notifier);
+    s->cfg.rx_ring.irqfd = event_notifier_get_fd(&s->guest_notifier);
+    s->cfg.rx_ring.resamplefd = ~0U;
 
-        /* Configure the net backend. */
-        s->nic->ncs->peer->info->poll(s->nic->ncs->peer, false);
-        s->cfg.tapfd = tap_get_fd(s->nic->ncs->peer);
+    /* Configure the TX ring. */
+    s->cfg.tx_ring.phy = tx_desc_base(s);
+    s->cfg.tx_ring.hdr.virt = s->tx_hdr;
+    s->cfg.tx_ring.num = s->mac_reg[TDLEN] / sizeof(struct e1000_tx_desc);
+    s->cfg.tx_ring.ioeventfd = event_notifier_get_fd(&s->host_tx_notifier);
+    s->cfg.tx_ring.irqfd = event_notifier_get_fd(&s->guest_notifier);
+    s->cfg.tx_ring.resamplefd = ~0U;
 
-        s->cfg.rxbuf_size = s->rxbuf_size;
-        s->cfg.csb_phy = ((hwaddr)s->mac_reg[CSBAH] << 32)
-                            | s->mac_reg[CSBAL];
+    /* Configure the net backend. */
+    s->nic->ncs->peer->info->poll(s->nic->ncs->peer, false);
+    s->cfg.tapfd = tap_get_fd(s->nic->ncs->peer);
 
-length = 4096;
-printf("csb_phy = %lu, %p\n", s->cfg.csb_phy, address_space_map(as, s->cfg.csb_phy, &length, 1));
-length = s->cfg.tx_ring.num * sizeof(struct e1000_tx_desc);
-printf("tx_ring.phy = %lu, %p\n", s->cfg.tx_ring.phy, address_space_map(as, s->cfg.tx_ring.phy, &length, 1));
-length = s->cfg.rx_ring.num * sizeof(struct e1000_rx_desc);
-printf("rx_ring.phy = %lu, %p\n", s->cfg.rx_ring.phy, address_space_map(as, s->cfg.rx_ring.phy, &length, 1));
-length = s->cfg.rx_ring.num * sizeof(struct virtio_net_hdr);
-printf("rx_ring.hdr.phy = %lu, %p\n", s->cfg.rx_ring.hdr.phy, address_space_map(as, s->cfg.rx_ring.hdr.phy, &length, 1));
-printf("tx_hdr = %p\n", s->cfg.tx_ring.hdr.virt);
+    s->cfg.rxbuf_size = s->rxbuf_size;
+    s->cfg.csb_phy = ((hwaddr)s->mac_reg[CSBAH] << 32)
+        | s->mac_reg[CSBAL];
 
-        /* Configure the v1000 device instance. */
-        i = write(s->v1000_fd, &s->cfg, sizeof(s->cfg));
-        if (i != sizeof(s->cfg)) {
-            printf("v1000 configuration error(%d).\n", i);
-            return -1;
-        }
+    length = 4096;
+    printf("csb_phy = %lu, %p\n", s->cfg.csb_phy, address_space_map(as, s->cfg.csb_phy, &length, 1));
+    length = s->cfg.tx_ring.num * sizeof(struct e1000_tx_desc);
+    printf("tx_ring.phy = %lu, %p\n", s->cfg.tx_ring.phy, address_space_map(as, s->cfg.tx_ring.phy, &length, 1));
+    length = s->cfg.rx_ring.num * sizeof(struct e1000_rx_desc);
+    printf("rx_ring.phy = %lu, %p\n", s->cfg.rx_ring.phy, address_space_map(as, s->cfg.rx_ring.phy, &length, 1));
+    length = s->cfg.rx_ring.num * sizeof(struct virtio_net_hdr);
+    printf("rx_ring.hdr.phy = %lu, %p\n", s->cfg.rx_ring.hdr.phy, address_space_map(as, s->cfg.rx_ring.hdr.phy, &length, 1));
+    printf("tx_hdr = %p\n", s->cfg.tx_ring.hdr.virt);
+
+    /* Configure the v1000 device instance. */
+    i = write(s->v1000_fd, &s->cfg, sizeof(s->cfg));
+    if (i != sizeof(s->cfg)) {
+        printf("v1000 configuration error(%d).\n", i);
+        return -1;
     }
 
     return 0;
