@@ -228,44 +228,53 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
 {
     NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
     struct netmap_ring *ring = s->me.tx;
+    uint32_t i;
+    uint32_t idx;
+    uint8_t *dst;
 
-    if (size > ring->nr_buf_size) {
-        RD(5, "drop packet of size %d > %d", (int)size, ring->nr_buf_size);
+    if (unlikely(!ring)) {
+        /* Drop. */
         return size;
     }
 
-    if (ring) {
-        if (ring->avail == 0) {
-            /* No available slots in the netmap TX ring. */
-            netmap_write_poll(s, true);
-            return 0;
-        }
-        uint32_t i = ring->cur;
-        uint32_t idx = ring->slot[i].buf_idx;
-        uint8_t *dst = (uint8_t *)NETMAP_BUF(ring, idx);
-
-        ring->slot[i].len = size;
-
-#ifdef USE_INDIRECT_BUFFERS
-	ring->slot[i].flags = NS_INDIRECT;
-	*((const uint8_t **)dst) = buf;
-#else
-	ring->slot[i].flags = 0;
-        pkt_copy(buf, dst, size);
-#endif
-        ring->cur = NETMAP_RING_NEXT(ring, i);
-        ring->avail--;
-        if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
-	    /* XXX should we require s->txsync_callback != NULL when
-		QEMU_NET_PACKET_FLAG_MORE is set? There could be semantic
-		problems, because the frontend expects the packet to be gone?
-	    */
-            ioctl(s->me.fd, NIOCTXSYNC, NULL);
-	    if (s->txsync_callback) {
-		s->txsync_callback(s->txsync_callback_arg);
-	    }
-	}
+    if (unlikely(size > ring->nr_buf_size)) {
+        RD(5, "[netmap_receive] drop packet of size %d > %d\n",
+                                    (int)size, ring->nr_buf_size);
+        return size;
     }
+
+    if (ring->avail == 0) {
+        /* No available slots in the netmap TX ring. */
+        netmap_write_poll(s, true);
+        return 0;
+    }
+
+    i = ring->cur;
+    idx = ring->slot[i].buf_idx;
+    dst = (uint8_t *)NETMAP_BUF(ring, idx);
+
+    ring->slot[i].len = size;
+#ifdef USE_INDIRECT_BUFFERS
+    ring->slot[i].flags = NS_INDIRECT;
+    *((const uint8_t **)dst) = buf;
+#else
+    ring->slot[i].flags = 0;
+    pkt_copy(buf, dst, size);
+#endif
+    ring->cur = NETMAP_RING_NEXT(ring, i);
+    ring->avail--;
+
+    if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
+        /* XXX should we require s->txsync_callback != NULL when
+           QEMU_NET_PACKET_FLAG_MORE is set? There could be semantic
+           problems, because the frontend expects the packet to be gone?
+           */
+        ioctl(s->me.fd, NIOCTXSYNC, NULL);
+        if (s->txsync_callback) {
+            s->txsync_callback(s->txsync_callback_arg);
+        }
+    }
+
     return size;
 }
 
@@ -275,75 +284,79 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
     NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
     struct netmap_ring *ring = s->me.tx;
     size_t size = iov_size(iov, iovcnt);
+    uint32_t last;
+    uint32_t idx;
+    uint8_t *dst;
+    int j;
+    uint32_t i;
+    uint32_t avail;
 
-    if (ring) {
-        uint32_t i = 0;
-        uint32_t idx;
-        uint8_t *dst;
-	int j;
-	uint32_t cur = ring->cur, avail = ring->avail;
-	int iov_frag_size;
-	int nm_frag_size;
-	int offset;
+    if (unlikely(!ring)) {
+        /* Drop the packet. */
+        return size;
+    }
 
-	if (avail < iovcnt) {
-	    /* Not enough netmap slots. */
-            netmap_write_poll(s, true);
-	    size = 0;
-	    goto txsync;
-	}
+    last = i = ring->cur;
+    avail = ring->avail;
 
-	for (j=0; j<iovcnt; j++) {
-	    iov_frag_size = iov[j].iov_len;
-	    offset = 0;
+    if (avail < iovcnt) {
+        /* Not enough netmap slots. */
+        netmap_write_poll(s, true);
+        size = 0;
+        goto txsync;
+    }
 
-	    /* Split each iovec fragment over more netmap slots, if
-	       necessary (without performing data copy). */
-	    while (iov_frag_size) {
-		nm_frag_size = MIN(iov_frag_size, ring->nr_buf_size);
+    for (j = 0; j < iovcnt; j++) {
+        int iov_frag_size = iov[j].iov_len;
+        int offset = 0;
+        int nm_frag_size;
 
-		if (unlikely(avail == 0)) {
-		    /* We run out of netmap slots while splitting the
-		       iovec fragments. */
-                    netmap_write_poll(s, true);
-		    size = 0;
-		    goto txsync;
-		}
+        /* Split each iovec fragment over more netmap slots, if
+           necessary (without performing data copy). */
+        while (iov_frag_size) {
+            nm_frag_size = MIN(iov_frag_size, ring->nr_buf_size);
 
-		i = cur;
-		idx = ring->slot[i].buf_idx;
-		dst = (uint8_t *)NETMAP_BUF(ring, idx);
+            if (unlikely(avail == 0)) {
+                /* We run out of netmap slots while splitting the
+                   iovec fragments. */
+                netmap_write_poll(s, true);
+                size = 0;
+                goto txsync;
+            }
 
-		ring->slot[i].len = nm_frag_size;
+            idx = ring->slot[i].buf_idx;
+            dst = (uint8_t *)NETMAP_BUF(ring, idx);
+
+            ring->slot[i].len = nm_frag_size;
 #ifdef USE_INDIRECT_BUFFERS
-		ring->slot[i].flags = NS_MOREFRAG | NS_INDIRECT;
-		*((const uint8_t **)dst) = iov[j].iov_base + offset;
+            ring->slot[i].flags = NS_MOREFRAG | NS_INDIRECT;
+            *((const uint8_t **)dst) = iov[j].iov_base + offset;
 #else	/* !USE_INDIRECT_BUFFERS */
-		ring->slot[i].flags = NS_MOREFRAG;
-		pkt_copy(iov[j].iov_base + offset, dst, nm_frag_size);
+            ring->slot[i].flags = NS_MOREFRAG;
+            pkt_copy(iov[j].iov_base + offset, dst, nm_frag_size);
 #endif	/* !USING_INDIRECT_BUFFERS */
 
-		cur = NETMAP_RING_NEXT(ring, i);
-		avail--;
+            last = i;
+            i = NETMAP_RING_NEXT(ring, i);
+            avail--;
 
-		offset += nm_frag_size;
-		iov_frag_size -= nm_frag_size;
-	    }
-	}
-	/* The last slot must not have NS_MOREFRAG set. */
-	ring->slot[i].flags &= ~NS_MOREFRAG;
+            offset += nm_frag_size;
+            iov_frag_size -= nm_frag_size;
+        }
+    }
+    /* The last slot must not have NS_MOREFRAG set. */
+    ring->slot[last].flags &= ~NS_MOREFRAG;
 
-	/* Now update ring->cur and ring->avail. */
-	ring->cur = cur;
-	ring->avail = avail;
+    /* Now update ring->cur and ring->avail. */
+    ring->cur = i;
+    ring->avail = avail;
 
-        if (avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
+    if (avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
 txsync:
-            ioctl(s->me.fd, NIOCTXSYNC, NULL);
-	    if (s->txsync_callback) {
-		s->txsync_callback(s->txsync_callback_arg);
-	    }
-	}
+        ioctl(s->me.fd, NIOCTXSYNC, NULL);
+        if (s->txsync_callback) {
+            s->txsync_callback(s->txsync_callback_arg);
+        }
     }
 
     return size;
