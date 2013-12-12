@@ -369,7 +369,7 @@ static ssize_t netmap_receive_iov(NetClientState * nc,
     return netmap_receive_iov_flags(nc, iov, iovcnt, 0);
 }
 
-static ssize_t netmap_receive_raw(NetClientState *nc,
+static ssize_t netmap_receive(NetClientState *nc,
       const uint8_t *buf, size_t size)
 {
 	return netmap_receive_flags(nc, buf, size, 0);
@@ -518,7 +518,7 @@ static NetClientInfo net_netmap_info = {
     .type = NET_CLIENT_OPTIONS_KIND_NETMAP,
     .size = sizeof(NetmapState),
     .receive_flags = netmap_receive_flags,
-    .receive = netmap_receive_raw,
+    .receive = netmap_receive,
     .receive_iov_flags = netmap_receive_iov_flags,
     .receive_iov = netmap_receive_iov,
     .poll = netmap_poll,

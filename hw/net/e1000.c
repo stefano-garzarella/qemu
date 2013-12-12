@@ -2068,7 +2068,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
 		qemu_peer_set_vnet_hdr_len(s->nic->ncs, sizeof(struct virtio_net_hdr));
 		qemu_peer_using_vnet_hdr(s->nic->ncs, true);
 		qemu_peer_set_offload(s->nic->ncs, 1, 1, 1, 1, 1);
-		s->host_hdr_ofs = s->guest_hdr_ofs = 1;
+		s->host_hdr_ofs = s->guest_hdr_ofs = s->iovcnt = 1;
 	    } else {
                 s->v1000 = false;
 	    }
