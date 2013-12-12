@@ -47,6 +47,7 @@ static void pcibus_dev_print(Monitor *mon, DeviceState *dev, int indent);
 static char *pcibus_get_dev_path(DeviceState *dev);
 static char *pcibus_get_fw_dev_path(DeviceState *dev);
 static int pcibus_reset(BusState *qbus);
+static void pci_bus_finalize(Object *obj);
 
 static Property pci_props[] = {
     DEFINE_PROP_PCI_DEVFN("addr", PCIDevice, devfn, -1),
@@ -73,6 +74,7 @@ static const TypeInfo pci_bus_info = {
     .name = TYPE_PCI_BUS,
     .parent = TYPE_BUS,
     .instance_size = sizeof(PCIBus),
+    .instance_finalize = pci_bus_finalize,
     .class_init = pci_bus_class_init,
 };
 
@@ -283,24 +285,6 @@ const char *pci_root_bus_path(PCIDevice *dev)
     return rootbus->qbus.name;
 }
 
-static uint64_t master_abort_mem_read(void *opaque, hwaddr addr, unsigned size)
-{
-   return -1ULL;
-}
-
-static void master_abort_mem_write(void *opaque, hwaddr addr, uint64_t val,
-                                   unsigned size)
-{
-}
-
-static const MemoryRegionOps master_abort_mem_ops = {
-    .read = master_abort_mem_read,
-    .write = master_abort_mem_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
-
-#define MASTER_ABORT_MEM_PRIORITY INT_MIN
-
 static void pci_bus_init(PCIBus *bus, DeviceState *parent,
                          const char *name,
                          MemoryRegion *address_space_mem,
@@ -311,14 +295,6 @@ static void pci_bus_init(PCIBus *bus, DeviceState *parent,
     bus->devfn_min = devfn_min;
     bus->address_space_mem = address_space_mem;
     bus->address_space_io = address_space_io;
-
-
-    memory_region_init_io(&bus->master_abort_mem, OBJECT(bus),
-                          &master_abort_mem_ops, bus, "pci-master-abort",
-                          memory_region_size(bus->address_space_mem));
-    memory_region_add_subregion_overlap(bus->address_space_mem,
-                                        0, &bus->master_abort_mem,
-                                        MASTER_ABORT_MEM_PRIORITY);
 
     /* host bridge */
     QLIST_INIT(&bus->child);
@@ -399,6 +375,12 @@ int pci_bus_num(PCIBus *s)
     if (pci_bus_is_root(s))
         return 0;       /* pci host bridge */
     return s->parent_dev->config[PCI_SECONDARY_BUS];
+}
+
+static void pci_bus_finalize(Object *obj)
+{
+    PCIBus *bus = PCI_BUS(obj);
+    vmstate_unregister(NULL, &vmstate_pcibus, bus);
 }
 
 static int get_pci_config_device(QEMUFile *f, void *pv, size_t size)

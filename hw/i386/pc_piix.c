@@ -57,8 +57,7 @@ static const int ide_iobase[MAX_IDE_BUS] = { 0x1f0, 0x170 };
 static const int ide_iobase2[MAX_IDE_BUS] = { 0x3f6, 0x376 };
 static const int ide_irq[MAX_IDE_BUS] = { 14, 15 };
 
-static bool has_pvpanic;
-static bool has_pci_info = true;
+static bool has_pci_info;
 static bool has_acpi_build = true;
 
 /* PC hardware initialisation */
@@ -229,10 +228,6 @@ static void pc_init1(QEMUMachineInitArgs *args,
     if (pci_enabled) {
         pc_pci_device_init(pci_bus);
     }
-
-    if (has_pvpanic) {
-        pvpanic_init(isa_bus);
-    }
 }
 
 static void pc_init_pci(QEMUMachineInitArgs *args)
@@ -250,13 +245,11 @@ static void pc_compat_1_6(QEMUMachineInitArgs *args)
 static void pc_compat_1_5(QEMUMachineInitArgs *args)
 {
     pc_compat_1_6(args);
-    has_pvpanic = true;
 }
 
 static void pc_compat_1_4(QEMUMachineInitArgs *args)
 {
     pc_compat_1_5(args);
-    has_pvpanic = false;
     x86_cpu_compat_set_features("n270", FEAT_1_ECX, 0, CPUID_EXT_MOVBE);
     x86_cpu_compat_set_features("Westmere", FEAT_1_ECX, 0, CPUID_EXT_PCLMULQDQ);
 }
@@ -346,13 +339,24 @@ static void pc_xen_hvm_init(QEMUMachineInitArgs *args)
     .desc = "Standard PC (i440FX + PIIX, 1996)", \
     .hot_add_cpu = pc_hot_add_cpu
 
-#define PC_I440FX_1_7_MACHINE_OPTIONS PC_I440FX_MACHINE_OPTIONS
-static QEMUMachine pc_i440fx_machine_v1_7 = {
-    PC_I440FX_1_7_MACHINE_OPTIONS,
-    .name = "pc-i440fx-1.7",
+#define PC_I440FX_2_0_MACHINE_OPTIONS                           \
+    PC_I440FX_MACHINE_OPTIONS,                                  \
+    .default_machine_opts = "firmware=bios-256k.bin"
+
+static QEMUMachine pc_i440fx_machine_v2_0 = {
+    PC_I440FX_2_0_MACHINE_OPTIONS,
+    .name = "pc-i440fx-2.0",
     .alias = "pc",
     .init = pc_init_pci,
     .is_default = 1,
+};
+
+#define PC_I440FX_1_7_MACHINE_OPTIONS PC_I440FX_MACHINE_OPTIONS
+
+static QEMUMachine pc_i440fx_machine_v1_7 = {
+    PC_I440FX_1_7_MACHINE_OPTIONS,
+    .name = "pc-i440fx-1.7",
+    .init = pc_init_pci,
 };
 
 #define PC_I440FX_1_6_MACHINE_OPTIONS PC_I440FX_MACHINE_OPTIONS
@@ -754,6 +758,7 @@ static QEMUMachine xenfv_machine = {
 
 static void pc_machine_init(void)
 {
+    qemu_register_machine(&pc_i440fx_machine_v2_0);
     qemu_register_machine(&pc_i440fx_machine_v1_7);
     qemu_register_machine(&pc_i440fx_machine_v1_6);
     qemu_register_machine(&pc_i440fx_machine_v1_5);

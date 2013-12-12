@@ -290,7 +290,7 @@ static int count_contiguous_clusters(uint64_t nb_clusters, int cluster_size,
         uint64_t *l2_table, uint64_t stop_flags)
 {
     int i;
-    uint64_t mask = stop_flags | L2E_OFFSET_MASK | QCOW2_CLUSTER_COMPRESSED;
+    uint64_t mask = stop_flags | L2E_OFFSET_MASK | QCOW_OFLAG_COMPRESSED;
     uint64_t first_entry = be64_to_cpu(l2_table[0]);
     uint64_t offset = first_entry & mask;
 
@@ -1401,7 +1401,7 @@ int qcow2_discard_clusters(BlockDriverState *bs, uint64_t offset,
 
     /* Round start up and end down */
     offset = align_offset(offset, s->cluster_size);
-    end_offset &= ~(s->cluster_size - 1);
+    end_offset = start_of_cluster(s, end_offset);
 
     if (offset > end_offset) {
         return 0;
@@ -1613,7 +1613,7 @@ static int expand_zero_clusters_in_l1(BlockDriverState *bs, uint64_t *l1_table,
             }
 
             ret = bdrv_write_zeroes(bs->file, offset / BDRV_SECTOR_SIZE,
-                                    s->cluster_sectors);
+                                    s->cluster_sectors, 0);
             if (ret < 0) {
                 if (!preallocated) {
                     qcow2_free_clusters(bs, offset, s->cluster_size,

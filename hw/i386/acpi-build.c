@@ -285,18 +285,20 @@ static inline void build_append_array(GArray *array, GArray *val)
     g_array_append_vals(array, val->data, val->len);
 }
 
-static void build_append_nameseg(GArray *array, const char *format, ...)
+static void GCC_FMT_ATTR(2, 3)
+build_append_nameseg(GArray *array, const char *format, ...)
 {
-    GString *s = g_string_new("");
+    /* It would be nicer to use g_string_vprintf but it's only there in 2.22 */
+    char s[] = "XXXX";
+    int len;
     va_list args;
 
     va_start(args, format);
-    g_string_vprintf(s, format, args);
+    len = vsnprintf(s, sizeof s, format, args);
     va_end(args);
 
-    assert(s->len == 4);
-    g_array_append_vals(array, s->str, s->len);
-    g_string_free(s, true);
+    assert(len == 4);
+    g_array_append_vals(array, s, len);
 }
 
 /* 5.4 Definition Block Encoding */
@@ -424,7 +426,10 @@ static inline void *acpi_data_push(GArray *table_data, unsigned size)
 
 static unsigned acpi_data_len(GArray *table)
 {
-    return table->len * g_array_get_element_size(table);
+#if GLIB_CHECK_VERSION(2, 22, 0)
+    assert(g_array_get_element_size(table) == 1);
+#endif
+    return table->len;
 }
 
 static void acpi_align_size(GArray *blob, unsigned align)
@@ -432,9 +437,7 @@ static void acpi_align_size(GArray *blob, unsigned align)
     /* Align size to multiple of given size. This reduces the chance
      * we need to change size in the future (breaking cross version migration).
      */
-    g_array_set_size(blob, (ROUND_UP(acpi_data_len(blob), align) +
-                            g_array_get_element_size(blob) - 1) /
-                             g_array_get_element_size(blob));
+    g_array_set_size(blob, ROUND_UP(acpi_data_len(blob), align));
 }
 
 /* Get pointer within table in a safe manner */
@@ -628,7 +631,7 @@ build_append_notify(GArray *device, const char *name,
     GArray *method = build_alloc_array();
     uint8_t op = 0x14; /* MethodOp */
 
-    build_append_nameseg(method, name);
+    build_append_nameseg(method, "%s", name);
     build_append_byte(method, 0x02); /* MethodFlags: ArgCount */
     for (i = skip; i < count; i++) {
         GArray *target = build_alloc_array();
@@ -1179,6 +1182,11 @@ void acpi_setup(PcGuestInfo *guest_info)
 
     if (!guest_info->has_acpi_build) {
         ACPI_BUILD_DPRINTF(3, "ACPI build disabled. Bailing out.\n");
+        return;
+    }
+
+    if (!acpi_enabled) {
+        ACPI_BUILD_DPRINTF(3, "ACPI disabled. Bailing out.\n");
         return;
     }
 

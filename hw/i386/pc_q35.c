@@ -47,8 +47,7 @@
 /* ICH9 AHCI has 6 ports */
 #define MAX_SATA_PORTS     6
 
-static bool has_pvpanic;
-static bool has_pci_info = true;
+static bool has_pci_info;
 static bool has_acpi_build = true;
 
 /* PC hardware initialisation */
@@ -216,10 +215,6 @@ static void pc_q35_init(QEMUMachineInitArgs *args)
     if (pci_enabled) {
         pc_pci_device_init(host_bus);
     }
-
-    if (has_pvpanic) {
-        pvpanic_init(isa_bus);
-    }
 }
 
 static void pc_compat_1_6(QEMUMachineInitArgs *args)
@@ -232,13 +227,11 @@ static void pc_compat_1_6(QEMUMachineInitArgs *args)
 static void pc_compat_1_5(QEMUMachineInitArgs *args)
 {
     pc_compat_1_6(args);
-    has_pvpanic = true;
 }
 
 static void pc_compat_1_4(QEMUMachineInitArgs *args)
 {
     pc_compat_1_5(args);
-    has_pvpanic = false;
     x86_cpu_compat_set_features("n270", FEAT_1_ECX, 0, CPUID_EXT_MOVBE);
     x86_cpu_compat_set_features("Westmere", FEAT_1_ECX, 0, CPUID_EXT_PCLMULQDQ);
 }
@@ -266,12 +259,22 @@ static void pc_q35_init_1_4(QEMUMachineInitArgs *args)
     .desc = "Standard PC (Q35 + ICH9, 2009)", \
     .hot_add_cpu = pc_hot_add_cpu
 
+#define PC_Q35_2_0_MACHINE_OPTIONS                      \
+    PC_Q35_MACHINE_OPTIONS,                             \
+    .default_machine_opts = "firmware=bios-256k.bin"
+
+static QEMUMachine pc_q35_machine_v2_0 = {
+    PC_Q35_2_0_MACHINE_OPTIONS,
+    .name = "pc-q35-2.0",
+    .alias = "q35",
+    .init = pc_q35_init,
+};
+
 #define PC_Q35_1_7_MACHINE_OPTIONS PC_Q35_MACHINE_OPTIONS
 
 static QEMUMachine pc_q35_machine_v1_7 = {
     PC_Q35_1_7_MACHINE_OPTIONS,
     .name = "pc-q35-1.7",
-    .alias = "q35",
     .init = pc_q35_init,
 };
 
@@ -313,6 +316,7 @@ static QEMUMachine pc_q35_machine_v1_4 = {
 
 static void pc_q35_machine_init(void)
 {
+    qemu_register_machine(&pc_q35_machine_v2_0);
     qemu_register_machine(&pc_q35_machine_v1_7);
     qemu_register_machine(&pc_q35_machine_v1_6);
     qemu_register_machine(&pc_q35_machine_v1_5);

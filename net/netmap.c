@@ -22,64 +22,80 @@
  * THE SOFTWARE.
  */
 
-#define WITH_D	/* include debugging macros from qemu-common.h */
-
-#include "config-host.h"
-
-/* note paths are different for -head and 1.3 */
-#include "net/net.h"
-#include "clients.h"
-#include "sysemu/sysemu.h"
-#include "qemu-common.h"
-#include "qemu/error-report.h"
 
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <sys/mman.h>
+#include <stdint.h>
 #include <net/netmap.h>
 #include <net/netmap_user.h>
-#include <net/checksum.h>
-#include <qemu/iov.h>
 
+#include "net/net.h"
+#include "clients.h"
+#include "sysemu/sysemu.h"
+#include "qemu/error-report.h"
+#include "qemu/iov.h"
 
 /* XXX Use at your own risk: a synchronization problem in the netmap module
    can freeze your (host) machine. */
 //#define USE_INDIRECT_BUFFERS
 
-/*
- * private netmap device info
- */
-struct netmap_state {
+/* Private netmap device info. */
+typedef struct NetmapPriv {
     int                 fd;
-    int                 memsize;
+    size_t              memsize;
     void                *mem;
     struct netmap_if    *nifp;
     struct netmap_ring  *rx;
     struct netmap_ring  *tx;
-    char                fdname[128];        /* normally /dev/netmap */
-    char                ifname[128];        /* maybe the nmreq here ? */
-};
+    char                fdname[PATH_MAX];        /* Normally "/dev/netmap". */
+    char                ifname[IFNAMSIZ];
+} NetmapPriv;
 
-struct nm_state {
+typedef struct NetmapState {
     NetClientState      nc;
-    struct netmap_state me;
-    unsigned int        read_poll;
-    unsigned int        write_poll;
+    NetmapPriv          me;
+    bool                read_poll;
+    bool                write_poll;
+    struct iovec        iov[IOV_MAX];
     PeerAsyncCallback	*txsync_callback;
     void		*txsync_callback_arg;
-};
+} NetmapState;
+
+#define D(format, ...)                                          \
+    do {                                                        \
+        struct timeval __xxts;                                  \
+        gettimeofday(&__xxts, NULL);                            \
+        printf("%03d.%06d %s [%d] " format "\n",                \
+                (int)__xxts.tv_sec % 1000, (int)__xxts.tv_usec, \
+                __func__, __LINE__, ##__VA_ARGS__);         \
+    } while (0)
+
+/* Rate limited version of "D", lps indicates how many per second */
+#define RD(lps, format, ...)                                    \
+    do {                                                        \
+        static int t0, __cnt;                                   \
+        struct timeval __xxts;                                  \
+        gettimeofday(&__xxts, NULL);                            \
+        if (t0 != __xxts.tv_sec) {                              \
+            t0 = __xxts.tv_sec;                                 \
+            __cnt = 0;                                          \
+        }                                                       \
+        if (__cnt++ < lps) {                                    \
+            D(format, ##__VA_ARGS__);                           \
+        }                                                       \
+    } while (0)
+
 
 #ifndef __FreeBSD__
 #define pkt_copy bcopy
 #else
-/* a fast copy routine only for multiples of 64 bytes, non overlapped. */
+/* A fast copy routine only for multiples of 64 bytes, non overlapped. */
 static inline void
 pkt_copy(const void *_src, void *_dst, int l)
 {
     const uint64_t *src = _src;
     uint64_t *dst = _dst;
-#define likely(x)       __builtin_expect(!!(x), 1)
-#define unlikely(x)       __builtin_expect(!!(x), 0)
     if (unlikely(l >= 1024)) {
         bcopy(src, dst, l);
         return;
@@ -97,36 +113,38 @@ pkt_copy(const void *_src, void *_dst, int l)
 }
 #endif /* __FreeBSD__ */
 
-
 /*
- * open a netmap device. We assume there is only one queue
+ * Open a netmap device. We assume there is only one queue
  * (which is the case for the VALE bridge).
  */
-static int netmap_open(struct netmap_state *me)
+static int netmap_open(NetmapPriv *me)
 {
-    int fd, err;
+    int fd;
+    int err;
     size_t l;
     struct nmreq req;
 
     me->fd = fd = open(me->fdname, O_RDWR);
     if (fd < 0) {
-        error_report("Unable to open netmap device '%s'", me->fdname);
+        error_report("Unable to open netmap device '%s' (%s)",
+                        me->fdname, strerror(errno));
         return -1;
     }
-    bzero(&req, sizeof(req));
+    memset(&req, 0, sizeof(req));
     pstrcpy(req.nr_name, sizeof(req.nr_name), me->ifname);
     req.nr_ringid = NETMAP_NO_TX_POLL;
     req.nr_version = NETMAP_API;
     err = ioctl(fd, NIOCREGIF, &req);
     if (err) {
-        error_report("Unable to register %s", me->ifname);
+        error_report("Unable to register %s: %s", me->ifname, strerror(errno));
         goto error;
     }
     l = me->memsize = req.nr_memsize;
 
     me->mem = mmap(0, l, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
     if (me->mem == MAP_FAILED) {
-        error_report("Unable to mmap");
+        error_report("Unable to mmap netmap shared memory: %s",
+                        strerror(errno));
         me->mem = NULL;
         goto error;
     }
@@ -141,10 +159,11 @@ error:
     return -1;
 }
 
-/* XXX do we need the can-send routine ? */
+/* Tell the event-loop if the netmap backend can send packets
+   to the frontend. */
 static int netmap_can_send(void *opaque)
 {
-    struct nm_state *s = opaque;
+    NetmapState *s = opaque;
 
     return qemu_can_send_packet(&s->nc);
 }
@@ -152,10 +171,8 @@ static int netmap_can_send(void *opaque)
 static void netmap_send(void *opaque);
 static void netmap_writable(void *opaque);
 
-/*
- * set the handlers for the device
- */
-static void netmap_update_fd_handler(struct nm_state *s)
+/* Set the event-loop handlers for the netmap backend. */
+static void netmap_update_fd_handler(NetmapState *s)
 {
     qemu_set_fd_handler2(s->me.fd,
                          s->read_poll  ? netmap_can_send : NULL,
@@ -164,17 +181,17 @@ static void netmap_update_fd_handler(struct nm_state *s)
                          s);
 }
 
-/* update the read handler */
-static void netmap_read_poll(struct nm_state *s, bool enable)
+/* Update the read handler. */
+static void netmap_read_poll(NetmapState *s, bool enable)
 {
-    if (s->read_poll != enable) { /* do nothing if not changed */
+    if (s->read_poll != enable) { /* Do nothing if not changed. */
         s->read_poll = enable;
         netmap_update_fd_handler(s);
     }
 }
 
-/* update the write handler */
-static void netmap_write_poll(struct nm_state *s, bool enable)
+/* Update the write handler. */
+static void netmap_write_poll(NetmapState *s, bool enable)
 {
     if (s->write_poll != enable) {
         s->write_poll = enable;
@@ -184,7 +201,7 @@ static void netmap_write_poll(struct nm_state *s, bool enable)
 
 static void netmap_poll(NetClientState *nc, bool enable)
 {
-    struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
 
     if (s->read_poll != enable || s->write_poll != enable) {
         s->read_poll = enable;
@@ -194,25 +211,22 @@ static void netmap_poll(NetClientState *nc, bool enable)
 }
 
 /*
- * the fd_write() callback, invoked if the fd is marked as
- * writable after a poll. Reset the handler and flush any
+ * The fd_write() callback, invoked if the fd is marked as
+ * writable after a poll. Unregister the handler and flush any
  * buffered packets.
  */
 static void netmap_writable(void *opaque)
 {
-    struct nm_state *s = opaque;
+    NetmapState *s = opaque;
 
     netmap_write_poll(s, false);
     qemu_flush_queued_packets(&s->nc);
 }
 
-/*
- * new data guest --> backend
- */
 static ssize_t netmap_receive_flags(NetClientState *nc,
       const uint8_t *buf, size_t size, unsigned flags)
 {
-    struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
     struct netmap_ring *ring = s->me.tx;
 
     if (size > ring->nr_buf_size) {
@@ -221,12 +235,9 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
     }
 
     if (ring) {
-        /* request an early notification to avoid running dry */
-        if (ring->avail < ring->num_slots / 2 && s->write_poll == false) {
+        if (ring->avail == 0) {
+            /* No available slots in the netmap TX ring. */
             netmap_write_poll(s, true);
-        }
-        if (ring->avail == 0) { /* cannot write */
-	    // XXX useless??? see TXSYNC below
             return 0;
         }
         uint32_t i = ring->cur;
@@ -239,7 +250,7 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
 	ring->slot[i].flags = NS_INDIRECT;
 	*((const uint8_t **)dst) = buf;
 #else
-	ring->slot[i].flags = 0;    /* XXX useless? */
+	ring->slot[i].flags = 0;
         pkt_copy(buf, dst, size);
 #endif
         ring->cur = NETMAP_RING_NEXT(ring, i);
@@ -261,7 +272,7 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
 static ssize_t netmap_receive_iov_flags(NetClientState * nc,
 	    const struct iovec * iov, int iovcnt, unsigned flags)
 {
-    struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
     struct netmap_ring *ring = s->me.tx;
     size_t size = iov_size(iov, iovcnt);
 
@@ -275,15 +286,9 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
 	int nm_frag_size;
 	int offset;
 
-        /* request an early notification to avoid running dry */
-	/* XXX if TXSYNC is synchronous, can we avoid at all having
-	   netmap_write_poll == true?? probably yes!! */
-        if (avail < ring->num_slots / 2 && s->write_poll == false) {
-            netmap_write_poll(s, true);
-        }
-
 	if (avail < iovcnt) {
 	    /* Not enough netmap slots. */
+            netmap_write_poll(s, true);
 	    size = 0;
 	    goto txsync;
 	}
@@ -300,6 +305,7 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
 		if (unlikely(avail == 0)) {
 		    /* We run out of netmap slots while splitting the
 		       iovec fragments. */
+                    netmap_write_poll(s, true);
 		    size = 0;
 		    goto txsync;
 		}
@@ -312,10 +318,10 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
 #ifdef USE_INDIRECT_BUFFERS
 		ring->slot[i].flags = NS_MOREFRAG | NS_INDIRECT;
 		*((const uint8_t **)dst) = iov[j].iov_base + offset;
-#else	/* !MAP_RING */
+#else	/* !USE_INDIRECT_BUFFERS */
 		ring->slot[i].flags = NS_MOREFRAG;
 		pkt_copy(iov[j].iov_base + offset, dst, nm_frag_size);
-#endif	/* !MAP_RING */
+#endif	/* !USING_INDIRECT_BUFFERS */
 
 		cur = NETMAP_RING_NEXT(ring, i);
 		avail--;
@@ -331,10 +337,6 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
 	ring->cur = cur;
 	ring->avail = avail;
 
-	/* Compute the checksum if necessary. XXX don't do it here
-	if (flags & QEMU_NET_PACKET_FLAG_NEED_CHECKSUM)
-	    net_checksum_calculate(dst, size); */
-
         if (avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
 txsync:
             ioctl(s->me.fd, NIOCTXSYNC, NULL);
@@ -343,6 +345,7 @@ txsync:
 	    }
 	}
     }
+
     return size;
 }
 
@@ -358,10 +361,11 @@ static ssize_t netmap_receive_raw(NetClientState *nc,
 	return netmap_receive_flags(nc, buf, size, 0);
 }
 
-/* complete a previous send (backend --> guest), enable the fd_read callback */
+/* Complete a previous send (backend --> guest) and enable the
+   fd_read callback. */
 static void netmap_send_completed(NetClientState *nc, ssize_t len)
 {
-    struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
 
     netmap_read_poll(s, true);
 }
@@ -372,28 +376,24 @@ static void netmap_send_completed(NetClientState *nc, ssize_t len)
  */
 static void netmap_send(void *opaque)
 {
-    struct nm_state *s = opaque;
+    NetmapState *s = opaque;
     struct netmap_ring *ring = s->me.rx;
-    struct iovec iov[64]; /* XXX max size? */
 
-    /* only check ring->avail, let the packet be queued
-     * with qemu_send_packet_async() if needed
-     * XXX until we fix the propagation on the bridge we need to stop early
-     */
+    /* Keep sending while there are available packets into the netmap
+       RX ring and the forwarding path towards the peer is open. */
     while (ring->avail > 0 && qemu_can_send_packet(&s->nc)) {
         uint32_t i;
         uint32_t idx;
 	bool morefrag;
 	int iovcnt = 0;
-        int iovsize = 0;
+        int iovsize;
 
 	do {
 	    i = ring->cur;
 	    idx = ring->slot[i].buf_idx;
 	    morefrag = (ring->slot[i].flags & NS_MOREFRAG);
-	    iov[iovcnt].iov_base = (u_char *)NETMAP_BUF(ring, idx);
-	    iov[iovcnt].iov_len = ring->slot[i].len;
-	    iovsize += iov[iovcnt].iov_len;
+	    s->iov[iovcnt].iov_base = (u_char *)NETMAP_BUF(ring, idx);
+	    s->iov[iovcnt].iov_len = ring->slot[i].len;
 	    iovcnt++;
 
 	    ring->cur = NETMAP_RING_NEXT(ring, i);
@@ -401,39 +401,39 @@ static void netmap_send(void *opaque)
 	} while (ring->avail && morefrag);
 
 	if (unlikely(!ring->avail && morefrag)) {
-	    D("no more slot, but incomplete packet\n");
+            RD(5, "[netmap_send] ran out of slots, with a pending"
+                   "incomplete packet\n");
 	}
 
-	iovsize = qemu_sendv_packet_async_moreflags(&s->nc, iov, iovcnt,
+	iovsize = qemu_sendv_packet_async_moreflags(&s->nc, s->iov, iovcnt,
 		    netmap_send_completed,
                     ring->avail ? QEMU_NET_PACKET_FLAG_MORE : 0);
 
         if (iovsize == 0) {
-            /* the guest does not receive anymore. Packet is queued, stop
+            /* The peer does not receive anymore. Packet is queued, stop
              * reading from the backend until netmap_send_completed()
              */
             netmap_read_poll(s, false);
             return;
         }
     }
-    netmap_read_poll(s, true); /* probably useless. */
 }
 
 #ifdef USE_INDIRECT_BUFFERS
 static void netmap_register_peer_async_callback(NetClientState *nc,
 		    PeerAsyncCallback *cb, void *opaque)
 {
-    struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
+    struct NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
 
     s->txsync_callback = cb;
     s->txsync_callback_arg = opaque;
 }
 #endif
 
-/* flush and close */
+/* Flush and close. */
 static void netmap_cleanup(NetClientState *nc)
 {
-    struct nm_state *s = DO_UPCAST(struct nm_state, nc, nc);
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
 
     qemu_purge_queued_packets(nc);
 
@@ -445,19 +445,14 @@ static void netmap_cleanup(NetClientState *nc)
 }
 
 
-
-/* fd support */
-
+/* NetClientInfo methods */
 static NetClientInfo net_netmap_info = {
     .type = NET_CLIENT_OPTIONS_KIND_NETMAP,
-    .size = sizeof(struct nm_state),
+    .size = sizeof(NetmapState),
     .receive_flags = netmap_receive_flags,
     .receive = netmap_receive_raw,
     .receive_iov_flags = netmap_receive_iov_flags,
     .receive_iov = netmap_receive_iov,
-#if 0 /* not implemented */
-    .receive_raw = netmap_receive_raw,
-#endif
     .poll = netmap_poll,
 #ifdef USE_INDIRECT_BUFFERS
     .register_peer_async_callback = netmap_register_peer_async_callback,
@@ -465,9 +460,8 @@ static NetClientInfo net_netmap_info = {
     .cleanup = netmap_cleanup,
 };
 
-/* the external calls */
-
-/*
+/* The exported init function
+ *
  * ... -net netmap,ifname="..."
  */
 int net_init_netmap(const NetClientOptions *opts,
@@ -475,22 +469,21 @@ int net_init_netmap(const NetClientOptions *opts,
 {
     const NetdevNetmapOptions *netmap_opts = opts->netmap;
     NetClientState *nc;
-    struct netmap_state me;
-    struct nm_state *s;
+    NetmapPriv me;
+    NetmapState *s;
 
-    pstrcpy(me.fdname, sizeof(me.fdname), 
+    pstrcpy(me.fdname, sizeof(me.fdname),
         netmap_opts->has_devname ? netmap_opts->devname : "/dev/netmap");
-    /* set default name for the port if not supplied */
-    pstrcpy(me.ifname, sizeof(me.ifname),
-        netmap_opts->has_ifname ? netmap_opts->ifname : "vale0");
+    /* Set default name for the port if not supplied. */
+    pstrcpy(me.ifname, sizeof(me.ifname), netmap_opts->ifname);
     if (netmap_open(&me)) {
         return -1;
     }
-    /* create the object -- XXX use name or ifname ? */
+    /* Create the object. */
     nc = qemu_new_net_client(&net_netmap_info, peer, "netmap", name);
-    s = DO_UPCAST(struct nm_state, nc, nc);
+    s = DO_UPCAST(NetmapState, nc, nc);
     s->me = me;
-    netmap_read_poll(s, true); /* initially only poll for reads. */
+    netmap_read_poll(s, true); /* Initially only poll for reads. */
     s->txsync_callback = s->txsync_callback_arg = NULL;
 
     return 0;

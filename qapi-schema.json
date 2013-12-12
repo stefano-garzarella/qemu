@@ -227,7 +227,7 @@
 ##
 # @ImageInfoSpecificVmdk:
 #
-# @create_type: The create type of VMDK image
+# @create-type: The create type of VMDK image
 #
 # @cid: Content id of image
 #
@@ -948,8 +948,8 @@
 # @tray_open: #optional True if the device has a tray and it is open
 #             (only present if removable is true)
 #
-# @dirty: #optional dirty bitmap information (only present if the dirty
-#         bitmap is enabled)
+# @dirty-bitmaps: #optional dirty bitmaps information (only present if the
+#                 driver has one or more dirty bitmaps) (Since 1.8)
 #
 # @io-status: #optional @BlockDeviceIoStatus. Only present if the device
 #             supports it and the VM is configured to stop on errors
@@ -963,7 +963,7 @@
   'data': {'device': 'str', 'type': 'str', 'removable': 'bool',
            'locked': 'bool', '*inserted': 'BlockDeviceInfo',
            '*tray_open': 'bool', '*io-status': 'BlockDeviceIoStatus',
-           '*dirty': 'BlockDirtyInfo' } }
+           '*dirty-bitmaps': ['BlockDirtyInfo'] } }
 
 ##
 # @query-block:
@@ -1736,7 +1736,8 @@
 # @existing: QEMU should look for an existing image file.
 #
 # @absolute-paths: QEMU should create a new image with absolute paths
-# for the backing file.
+# for the backing file. If there is no backing file available, the new
+# image will not be backed either.
 #
 # Since: 1.1
 ##
@@ -3010,19 +3011,23 @@
 ##
 # @NetdevNetmapOptions
 #
-# Connect two or more net clients through a VALE switch
+# Connect a client to a netmap-enabled NIC or to a VALE switch port
 #
-# @ifname: optional name of the VALE port
+# @ifname: Either the name of an existing network interface supported by
+#          netmap, or the name of a VALE port (created on the fly).
+#          A VALE port name is in the form 'valeXXX:YYY', where XXX and
+#          YYY are non-negative integers. XXX identifies a switch and
+#          YYY identifies a port of the switch. VALE ports having the
+#          same XXX are therefore connected to the same switch.
 #
-# @devname: optional path of the netmap device
+# @devname: #optional path of the netmap device (default: '/dev/netmap').
 #
-# Since 1.2
+# Since 1.8
 ##
 { 'type': 'NetdevNetmapOptions',
   'data': {
-    '*ifname':     'str',
+    'ifname':     'str',
     '*devname':    'str' } }
-
 
 ##
 # @NetClientOptions
