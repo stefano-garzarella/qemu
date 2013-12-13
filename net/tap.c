@@ -320,6 +320,7 @@ static NetClientInfo net_tap_info = {
     .using_vnet_hdr = tap_using_vnet_hdr,
     .set_offload = tap_set_offload,
     .set_vnet_hdr_len = tap_set_vnet_hdr_len,
+    .get_fd = tap_get_fd,
 };
 
 static TAPState *net_tap_fd_init(NetClientState *peer,

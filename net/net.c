@@ -436,6 +436,15 @@ void qemu_peer_set_vnet_hdr_len(NetClientState *nc, int len)
     nc->peer->info->set_vnet_hdr_len(nc->peer, len);
 }
 
+int qemu_peer_get_fd(NetClientState *nc)
+{
+    if (!nc->peer || !nc->peer->info->get_fd) {
+        return -1;
+    }
+
+    return nc->peer->info->get_fd(nc->peer);
+}
+
 int qemu_can_send_packet(NetClientState *sender)
 {
     if (!sender->peer) {

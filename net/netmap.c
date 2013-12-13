@@ -513,6 +513,13 @@ static void netmap_set_vnet_hdr_len(NetClientState *nc, int len)
     }
 }
 
+static int netmap_get_fd(NetClientState *nc)
+{
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
+
+    return s->me.fd;
+}
+
 /* NetClientInfo methods */
 static NetClientInfo net_netmap_info = {
     .type = NET_CLIENT_OPTIONS_KIND_NETMAP,
@@ -532,6 +539,7 @@ static NetClientInfo net_netmap_info = {
     .using_vnet_hdr = netmap_using_vnet_hdr,
     .set_offload = netmap_set_offload,
     .set_vnet_hdr_len = netmap_set_vnet_hdr_len,
+    .get_fd = netmap_get_fd,
 };
 
 /* The exported init function

@@ -1998,7 +1998,7 @@ static int e1000_v1000_up(E1000State *s)
 
     /* Configure the net backend. */
     s->nic->ncs->peer->info->poll(s->nic->ncs->peer, false);
-    s->cfg.tapfd = tap_get_fd(s->nic->ncs->peer);
+    s->cfg.tapfd = qemu_peer_get_fd(s->nic->ncs);
 
     s->cfg.rxbuf_size = s->rxbuf_size;
     s->cfg.csb_phy = ((hwaddr)s->mac_reg[CSBAH] << 32)
