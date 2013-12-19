@@ -445,6 +445,15 @@ int qemu_peer_get_fd(NetClientState *nc)
     return nc->peer->info->get_fd(nc->peer);
 }
 
+VHostNetState *qemu_peer_get_vhost_net(NetClientState *nc)
+{
+    if (!nc->peer || !nc->peer->info->get_vhost_net) {
+        return NULL;
+    }
+
+    return nc->peer->info->get_vhost_net(nc->peer);
+}
+
 int qemu_can_send_packet(NetClientState *sender)
 {
     if (!sender->peer) {

@@ -63,6 +63,9 @@ typedef void (UsingVnetHdr)(NetClientState *, bool);
 typedef void (SetOffload)(NetClientState *, int, int, int, int, int);
 typedef void (SetVnetHdrLen)(NetClientState *, int);
 typedef int (GetFd)(NetClientState *);
+struct vhost_net;
+typedef struct vhost_net VHostNetState;
+typedef VHostNetState *(GetVhostNet)(NetClientState *);
 
 typedef struct NetClientInfo {
     NetClientOptionsKind type;
@@ -85,6 +88,7 @@ typedef struct NetClientInfo {
     SetOffload *set_offload;
     SetVnetHdrLen *set_vnet_hdr_len;
     GetFd *get_fd;
+    GetVhostNet *get_vhost_net;
 } NetClientInfo;
 
 struct NetClientState {
@@ -155,6 +159,7 @@ void qemu_peer_set_offload(NetClientState *nc, int csum, int tso4, int tso6,
                            int ecn, int ufo);
 void qemu_peer_set_vnet_hdr_len(NetClientState *nc, int len);
 int qemu_peer_get_fd(NetClientState *nc);
+VHostNetState *qemu_peer_get_vhost_net(NetClientState *nc);
 void qemu_macaddr_default_if_unset(MACAddr *macaddr);
 int qemu_show_nic_models(const char *arg, const char *const *models);
 void qemu_check_nic_model(NICInfo *nd, const char *model);

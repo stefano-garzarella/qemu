@@ -35,6 +35,7 @@
 #include "sysemu/sysemu.h"
 #include "qemu/error-report.h"
 #include "qemu/iov.h"
+#include "net/vhost_net.h"
 
 /* XXX Use at your own risk: a synchronization problem in the netmap module
    can freeze your (host) machine. */
@@ -61,6 +62,7 @@ typedef struct NetmapState {
     PeerAsyncCallback	*txsync_callback;
     void		*txsync_callback_arg;
     int                 vnet_hdr_len;  /* Current virtio-net header length. */
+    VHostNetState *vhost_net;
 } NetmapState;
 
 #define D(format, ...)                                          \
@@ -449,6 +451,12 @@ static void netmap_cleanup(NetClientState *nc)
 {
     NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
 
+    if (s->vhost_net) {
+        vhost_net_cleanup(s->vhost_net);
+        s->vhost_net = NULL;
+        D("vhost cleanup\n");
+    }
+
     qemu_purge_queued_packets(nc);
 
     netmap_poll(nc, false);
@@ -520,6 +528,13 @@ static int netmap_get_fd(NetClientState *nc)
     return s->me.fd;
 }
 
+static VHostNetState *netmap_get_vhost_net(NetClientState *nc)
+{
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
+
+    return s->vhost_net;
+}
+
 /* NetClientInfo methods */
 static NetClientInfo net_netmap_info = {
     .type = NET_CLIENT_OPTIONS_KIND_NETMAP,
@@ -540,6 +555,7 @@ static NetClientInfo net_netmap_info = {
     .set_offload = netmap_set_offload,
     .set_vnet_hdr_len = netmap_set_vnet_hdr_len,
     .get_fd = netmap_get_fd,
+    .get_vhost_net = netmap_get_vhost_net,
 };
 
 /* The exported init function
@@ -568,6 +584,15 @@ int net_init_netmap(const NetClientOptions *opts,
     s->vnet_hdr_len = 0;
     netmap_read_poll(s, true); /* Initially only poll for reads. */
     s->txsync_callback = s->txsync_callback_arg = NULL;
+
+    if (netmap_opts->has_vhost && netmap_opts->vhost) {
+        s->vhost_net = vhost_net_init(&s->nc, -1, 0);
+        if (!s->vhost_net) {
+            error_report("vhost-net requested but could not be initialized");
+            return -1;
+        }
+        D("vhost init\n");
+    }
 
     return 0;
 }

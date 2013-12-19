@@ -3022,12 +3022,15 @@
 #
 # @devname: #optional path of the netmap device (default: '/dev/netmap').
 #
+# @vhost: #optional vhost accelerator
+#
 # Since 1.8
 ##
 { 'type': 'NetdevNetmapOptions',
   'data': {
-    'ifname':     'str',
-    '*devname':    'str' } }
+    'ifname':       'str',
+    '*devname':     'str',
+    '*vhost' :      'bool' } }
 
 ##
 # @NetClientOptions
