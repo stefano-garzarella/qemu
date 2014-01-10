@@ -226,6 +226,28 @@ static void netmap_writable(void *opaque)
     qemu_flush_queued_packets(&s->nc);
 }
 
+/* Some simple abstractions on the netmap API to cope with
+   differences between new and old API. */
+#if (NETMAP_API >= 10)
+
+#define ring_space(r) nm_ring_space(r)
+#define ring_empty(r) nm_ring_empty(r)
+#define ring_update(r, pos, num) ring->cur = ring->head = pos
+#define ring_next(r, i) nm_ring_next(r, i)
+
+#else   /* old API */
+
+#define ring_space(r) r->avail
+#define ring_empty(r) (r->avail == 0)
+#define ring_update(r, pos, num) \
+                        do { \
+                            r->avail -= num; \
+                            r->cur = pos; \
+                        } while (0)
+#define ring_next(r, i) NETMAP_RING_NEXT(r, i)
+
+#endif  /* old API */
+
 static ssize_t netmap_receive_flags(NetClientState *nc,
       const uint8_t *buf, size_t size, unsigned flags)
 {
@@ -246,7 +268,7 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
         return size;
     }
 
-    if (ring->avail == 0) {
+    if (ring_empty(ring)) {
         /* No available slots in the netmap TX ring. */
         netmap_write_poll(s, true);
         return 0;
@@ -264,10 +286,9 @@ static ssize_t netmap_receive_flags(NetClientState *nc,
     ring->slot[i].flags = 0;
     pkt_copy(buf, dst, size);
 #endif
-    ring->cur = NETMAP_RING_NEXT(ring, i);
-    ring->avail--;
+    ring_update(ring, ring_next(ring, i), 1);
 
-    if (ring->avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
+    if (ring_empty(ring) || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
         /* XXX should we require s->txsync_callback != NULL when
            QEMU_NET_PACKET_FLAG_MORE is set? There could be semantic
            problems, because the frontend expects the packet to be gone?
@@ -292,7 +313,7 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
     uint8_t *dst;
     int j;
     uint32_t i;
-    uint32_t avail;
+    int consumed = 0;
 
     if (unlikely(!ring)) {
         /* Drop the packet. */
@@ -300,9 +321,8 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
     }
 
     last = i = ring->cur;
-    avail = ring->avail;
 
-    if (avail < iovcnt) {
+    if (ring_space(ring) < iovcnt) {
         /* Not enough netmap slots. */
         netmap_write_poll(s, true);
         size = 0;
@@ -319,7 +339,7 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
         while (iov_frag_size) {
             nm_frag_size = MIN(iov_frag_size, ring->nr_buf_size);
 
-            if (unlikely(avail == 0)) {
+            if (unlikely(ring_empty(ring))) {
                 /* We run out of netmap slots while splitting the
                    iovec fragments. */
                 netmap_write_poll(s, true);
@@ -340,8 +360,8 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
 #endif	/* !USING_INDIRECT_BUFFERS */
 
             last = i;
-            i = NETMAP_RING_NEXT(ring, i);
-            avail--;
+            i = ring_next(ring, i);
+            consumed++;
 
             offset += nm_frag_size;
             iov_frag_size -= nm_frag_size;
@@ -351,10 +371,9 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
     ring->slot[last].flags &= ~NS_MOREFRAG;
 
     /* Now update ring->cur and ring->avail. */
-    ring->cur = i;
-    ring->avail = avail;
+    ring_update(ring, i, consumed);
 
-    if (avail == 0 || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
+    if (ring_empty(ring) || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
 txsync:
         ioctl(s->me.fd, NIOCTXSYNC, NULL);
         if (s->txsync_callback) {
@@ -397,7 +416,7 @@ static void netmap_send(void *opaque)
 
     /* Keep sending while there are available packets into the netmap
        RX ring and the forwarding path towards the peer is open. */
-    while (ring->avail > 0 && qemu_can_send_packet(&s->nc)) {
+    while (!ring_empty(ring) && qemu_can_send_packet(&s->nc)) {
         uint32_t i;
         uint32_t idx;
 	bool morefrag;
@@ -412,18 +431,17 @@ static void netmap_send(void *opaque)
 	    s->iov[iovcnt].iov_len = ring->slot[i].len;
 	    iovcnt++;
 
-	    ring->cur = NETMAP_RING_NEXT(ring, i);
-	    ring->avail--;
-	} while (ring->avail && morefrag);
+            ring_update(ring, ring_next(ring, i), 1);
+        } while (!ring_empty(ring) && morefrag);
 
-	if (unlikely(!ring->avail && morefrag)) {
+	if (unlikely(ring_empty(ring) && morefrag)) {
             RD(5, "[netmap_send] ran out of slots, with a pending"
                    "incomplete packet\n");
 	}
 
 	iovsize = qemu_sendv_packet_async_moreflags(&s->nc, s->iov, iovcnt,
 		    netmap_send_completed,
-                    ring->avail ? QEMU_NET_PACKET_FLAG_MORE : 0);
+                    ring_empty(ring) ? 0 : QEMU_NET_PACKET_FLAG_MORE);
 
         if (iovsize == 0) {
             /* The peer does not receive anymore. Packet is queued, stop
