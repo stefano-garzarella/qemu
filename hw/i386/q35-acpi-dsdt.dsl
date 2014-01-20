@@ -333,7 +333,7 @@ DefinitionBlock (
             }
             Return (0x0B)
         }
-        Method(IQCR, 1, NotSerialized) {
+        Method(IQCR, 1, Serialized) {
             // _CRS method - get current settings
             Name(PRR0, ResourceTemplate() {
                 Interrupt(, Level, ActiveHigh, Shared) { 0 }
@@ -417,10 +417,10 @@ DefinitionBlock (
         Method(_L00) {
         }
         Method(_L01) {
+        }
+        Method(_E02) {
             // CPU hotplug event
             \_SB.PRSC()
-        }
-        Method(_L02) {
         }
         Method(_L03) {
         }
