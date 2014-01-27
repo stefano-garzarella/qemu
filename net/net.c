@@ -390,7 +390,7 @@ bool qemu_peer_has_ufo(NetClientState *nc)
     return nc->peer->info->has_ufo(nc->peer);
 }
 
-int qemu_peer_has_vnet_hdr(NetClientState *nc)
+bool qemu_peer_has_vnet_hdr(NetClientState *nc)
 {
     if (!nc->peer || !nc->peer->info->has_vnet_hdr) {
         return false;
@@ -399,7 +399,7 @@ int qemu_peer_has_vnet_hdr(NetClientState *nc)
     return nc->peer->info->has_vnet_hdr(nc->peer);
 }
 
-int qemu_peer_has_vnet_hdr_len(NetClientState *nc, int len)
+bool qemu_peer_has_vnet_hdr_len(NetClientState *nc, int len)
 {
     if (!nc->peer || !nc->peer->info->has_vnet_hdr_len) {
         return false;

@@ -31,6 +31,7 @@
 #include <net/netmap_user.h>
 
 #include "net/net.h"
+#include "net/tap.h"
 #include "clients.h"
 #include "sysemu/sysemu.h"
 #include "qemu/error-report.h"
@@ -484,35 +485,24 @@ static void netmap_cleanup(NetClientState *nc)
     s->me.fd = -1;
 }
 
-/* Offloading manipulation support callbacks.
- *
- * Currently we are simply able to pass the virtio-net header
- * throughout the VALE switch, without modifying it or interpreting it.
- * For this reason we are always able to support TSO/UFO/CSUM and
- * different header lengths as long as two virtio-net-header-capable
- * VMs are attached to the bridge.
- */
+/* Offloading manipulation support callbacks. */
 static bool netmap_has_ufo(NetClientState *nc)
 {
     return true;
 }
 
-static int netmap_has_vnet_hdr(NetClientState *nc)
+static bool netmap_has_vnet_hdr(NetClientState *nc)
 {
     return true;
 }
 
-static int netmap_has_vnet_hdr_len(NetClientState *nc, int len)
+static bool netmap_has_vnet_hdr_len(NetClientState *nc, int len)
 {
-    return len >= 0 && len <= NETMAP_BDG_MAX_OFFSET;
+    return len == 0 || len == sizeof(struct virtio_net_hdr) ||
+                len == sizeof(struct virtio_net_hdr_mrg_rxbuf);
 }
 
 static void netmap_using_vnet_hdr(NetClientState *nc, bool enable)
-{
-}
-
-static void netmap_set_offload(NetClientState *nc, int csum, int tso4, int tso6,
-                               int ecn, int ufo)
 {
 }
 
@@ -522,20 +512,34 @@ static void netmap_set_vnet_hdr_len(NetClientState *nc, int len)
     int err;
     struct nmreq req;
 
-    /* Issue a NETMAP_BDG_OFFSET command to change the netmap adapter
-       offset of 'me->ifname'. */
+    /* Issue a NETMAP_BDG_VNET_HDR command to change the virtio-net header
+     * length for the netmap adapter associated to 'me->ifname'.
+     */
     memset(&req, 0, sizeof(req));
     pstrcpy(req.nr_name, sizeof(req.nr_name), s->me.ifname);
     req.nr_version = NETMAP_API;
-    req.nr_cmd = NETMAP_BDG_OFFSET;
+    req.nr_cmd = NETMAP_BDG_VNET_HDR;
     req.nr_arg1 = len;
     err = ioctl(s->me.fd, NIOCREGIF, &req);
     if (err) {
-        error_report("Unable to execute NETMAP_BDG_OFFSET on %s: %s",
+        error_report("Unable to execute NETMAP_BDG_VNET_HDR on %s: %s",
                      s->me.ifname, strerror(errno));
     } else {
-        /* Keep track of the current length, may be usefule in the future. */
+        /* Keep track of the current length. */
         s->vnet_hdr_len = len;
+    }
+}
+
+static void netmap_set_offload(NetClientState *nc, int csum, int tso4, int tso6,
+                               int ecn, int ufo)
+{
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
+
+    /* Setting a virtio-net header length greater than zero automatically
+     * enables the offloadings.
+     */
+    if (!s->vnet_hdr_len) {
+        netmap_set_vnet_hdr_len(nc, sizeof(struct virtio_net_hdr));
     }
 }
 
