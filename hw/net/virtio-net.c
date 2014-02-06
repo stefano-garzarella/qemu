@@ -52,7 +52,7 @@ static void rate_callback(void * opaque)
     VirtIONet* n = opaque;
     int64_t delta;
 
-    delta = qemu_get_clock_ms(vm_clock) - rate_last_timestamp;
+    delta = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) - rate_last_timestamp;
     printf("Interrupt:           %4.3f KHz\n", (double)rate_ints/delta);
     printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
     printf("Tx stream:           %4.3f Mbps\n", (double)(rate_txb*8)/delta/1000.0);
@@ -69,9 +69,9 @@ static void rate_callback(void * opaque)
     rate_tx = rate_txb = 0;
     rate_tx_bh_len = rate_tx_bh_count = 0;
 
-    qemu_mod_timer(n->rate_timer, qemu_get_clock_ms(vm_clock) +
+    timer_mod(n->rate_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
 		    rate_interval_ms);
-    rate_last_timestamp = qemu_get_clock_ms(vm_clock);
+    rate_last_timestamp = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
 }
 #endif
 
@@ -365,7 +365,7 @@ static void virtio_net_reset(VirtIODevice *vdev)
     qemu_format_nic_info_str(qemu_get_queue(n->nic), n->mac);
     memset(n->vlans, 0, MAX_VLAN >> 3);
 
-    IFRATE(qemu_mod_timer(n->rate_timer, qemu_get_clock_ms(vm_clock) + 3000));
+    IFRATE(timer_mod(n->rate_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 3000));
 }
 
 static void peer_test_vnet_hdr(VirtIONet *n)
@@ -1627,7 +1627,7 @@ static void virtio_net_device_realize(DeviceState *dev, Error **errp)
                     virtio_net_save, virtio_net_load, n);
 
     add_boot_device_path(n->nic_conf.bootindex, dev, "/ethernet-phy@0");
-    IFRATE(n->rate_timer = qemu_new_timer_ms(vm_clock, &rate_callback, n));
+    IFRATE(n->rate_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, &rate_callback, n));
 }
 
 static void virtio_net_device_unrealize(DeviceState *dev, Error **errp)
@@ -1667,8 +1667,8 @@ static void virtio_net_device_unrealize(DeviceState *dev, Error **errp)
         }
     }
 
-    IFRATE(qemu_del_timer(n->rate_timer));
-    IFRATE(qemu_free_timer(n->rate_timer));
+    IFRATE(timer_del(n->rate_timer));
+    IFRATE(timer_free(n->rate_timer));
 
     g_free(n->vqs);
     qemu_del_nic(n->nic);
