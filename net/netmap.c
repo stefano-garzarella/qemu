@@ -59,17 +59,7 @@ typedef struct NetmapState {
     VHostNetState *vhost_net;
 } NetmapState;
 
-#undef D
 #undef RD
-#define D(format, ...)                                          \
-    do {                                                        \
-        struct timeval __xxts;                                  \
-        gettimeofday(&__xxts, NULL);                            \
-        printf("%03d.%06d %s [%d] " format "\n",                \
-                (int)__xxts.tv_sec % 1000, (int)__xxts.tv_usec, \
-                __func__, __LINE__, ##__VA_ARGS__);         \
-    } while (0)
-
 /* Rate limited version of "D", lps indicates how many per second */
 #define RD(lps, format, ...)                                    \
     do {                                                        \
