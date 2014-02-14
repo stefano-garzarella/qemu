@@ -59,22 +59,6 @@ typedef struct NetmapState {
     VHostNetState *vhost_net;
 } NetmapState;
 
-#undef RD
-/* Rate limited version of "D", lps indicates how many per second */
-#define RD(lps, format, ...)                                    \
-    do {                                                        \
-        static int t0, __cnt;                                   \
-        struct timeval __xxts;                                  \
-        gettimeofday(&__xxts, NULL);                            \
-        if (t0 != __xxts.tv_sec) {                              \
-            t0 = __xxts.tv_sec;                                 \
-            __cnt = 0;                                          \
-        }                                                       \
-        if (__cnt++ < lps) {                                    \
-            D(format, ##__VA_ARGS__);                           \
-        }                                                       \
-    } while (0)
-
 #ifndef __FreeBSD__
 #define pkt_copy bcopy
 #else
@@ -528,7 +512,7 @@ int net_init_netmap(const NetClientOptions *opts,
     struct nm_desc *nmd;
     NetmapState *s;
 
-    nmd = nm_open(netmap_opts->ifname, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL, NULL);
+    nmd = nm_open(netmap_opts->ifname, NULL, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL, NULL);
     if (nmd == NULL) {
         return -1;
     }
