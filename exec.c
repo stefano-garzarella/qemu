@@ -2207,6 +2207,29 @@ static void cpu_notify_map_clients(void)
     }
 }
 
+int ram_block_get(int idx, hwaddr *off, hwaddr *len, uint8_t **va)
+{
+    RAMBlock *block;
+    int i = 0;
+
+    if (!off || !len || !va)
+        return -1;
+
+    QTAILQ_FOREACH(block, &ram_list.blocks, next) {
+        if (i == idx) {
+            *off = block->offset;
+            *len = block->length;
+            *va = block->host;
+            return 0;
+        }
+        i++;
+	/*printf("offset=%lu, length=%lu, host=%p\n", block->offset,
+		    block->length, block->host); */
+    }
+
+    return 1;
+}
+
 bool address_space_access_valid(AddressSpace *as, hwaddr addr, int len, bool is_write)
 {
     MemoryRegion *mr;

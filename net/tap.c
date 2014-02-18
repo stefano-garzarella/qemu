@@ -219,7 +219,7 @@ bool tap_has_ufo(NetClientState *nc)
     return s->has_ufo;
 }
 
-int tap_has_vnet_hdr(NetClientState *nc)
+bool tap_has_vnet_hdr(NetClientState *nc)
 {
     TAPState *s = DO_UPCAST(TAPState, nc, nc);
 
@@ -228,7 +228,7 @@ int tap_has_vnet_hdr(NetClientState *nc)
     return !!s->host_vnet_hdr_len;
 }
 
-int tap_has_vnet_hdr_len(NetClientState *nc, int len)
+bool tap_has_vnet_hdr_len(NetClientState *nc, int len)
 {
     TAPState *s = DO_UPCAST(TAPState, nc, nc);
 
@@ -314,6 +314,14 @@ static NetClientInfo net_tap_info = {
     .receive_iov = tap_receive_iov,
     .poll = tap_poll,
     .cleanup = tap_cleanup,
+    .has_ufo = tap_has_ufo,
+    .has_vnet_hdr = tap_has_vnet_hdr,
+    .has_vnet_hdr_len = tap_has_vnet_hdr_len,
+    .using_vnet_hdr = tap_using_vnet_hdr,
+    .set_offload = tap_set_offload,
+    .set_vnet_hdr_len = tap_set_vnet_hdr_len,
+    .get_fd = tap_get_fd,
+    .get_vhost_net = tap_get_vhost_net,
 };
 
 static TAPState *net_tap_fd_init(NetClientState *peer,

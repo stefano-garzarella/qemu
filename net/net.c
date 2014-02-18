@@ -378,6 +378,79 @@ void qemu_foreach_nic(qemu_nic_foreach func, void *opaque)
     }
 }
 
+bool qemu_peer_has_ufo(NetClientState *nc)
+{
+    if (!nc->peer || !nc->peer->info->has_ufo) {
+        return false;
+    }
+
+    return nc->peer->info->has_ufo(nc->peer);
+}
+
+bool qemu_peer_has_vnet_hdr(NetClientState *nc)
+{
+    if (!nc->peer || !nc->peer->info->has_vnet_hdr) {
+        return false;
+    }
+
+    return nc->peer->info->has_vnet_hdr(nc->peer);
+}
+
+bool qemu_peer_has_vnet_hdr_len(NetClientState *nc, int len)
+{
+    if (!nc->peer || !nc->peer->info->has_vnet_hdr_len) {
+        return false;
+    }
+
+    return nc->peer->info->has_vnet_hdr_len(nc->peer, len);
+}
+
+void qemu_peer_using_vnet_hdr(NetClientState *nc, bool enable)
+{
+    if (!nc->peer || !nc->peer->info->using_vnet_hdr) {
+        return;
+    }
+
+    nc->peer->info->using_vnet_hdr(nc->peer, enable);
+}
+
+void qemu_peer_set_offload(NetClientState *nc, int csum, int tso4, int tso6,
+                          int ecn, int ufo)
+{
+    if (!nc->peer || !nc->peer->info->set_offload) {
+        return;
+    }
+
+    nc->peer->info->set_offload(nc->peer, csum, tso4, tso6, ecn, ufo);
+}
+
+void qemu_peer_set_vnet_hdr_len(NetClientState *nc, int len)
+{
+    if (!nc->peer || !nc->peer->info->set_vnet_hdr_len) {
+        return;
+    }
+
+    nc->peer->info->set_vnet_hdr_len(nc->peer, len);
+}
+
+int qemu_peer_get_fd(NetClientState *nc)
+{
+    if (!nc->peer || !nc->peer->info->get_fd) {
+        return -1;
+    }
+
+    return nc->peer->info->get_fd(nc->peer);
+}
+
+VHostNetState *qemu_peer_get_vhost_net(NetClientState *nc)
+{
+    if (!nc->peer || !nc->peer->info->get_vhost_net) {
+        return NULL;
+    }
+
+    return nc->peer->info->get_vhost_net(nc->peer);
+}
+
 int qemu_can_send_packet(NetClientState *sender)
 {
     if (!sender->peer) {
@@ -410,7 +483,9 @@ ssize_t qemu_deliver_packet(NetClientState *sender,
         return 0;
     }
 
-    if (flags & QEMU_NET_PACKET_FLAG_RAW && nc->info->receive_raw) {
+    if (nc->info->receive_flags) {
+        ret = nc->info->receive_flags(nc, data, size, flags);
+    } else if (flags & QEMU_NET_PACKET_FLAG_RAW && nc->info->receive_raw) {
         ret = nc->info->receive_raw(nc, data, size);
     } else {
         ret = nc->info->receive(nc, data, size);
@@ -483,6 +558,14 @@ void qemu_send_packet(NetClientState *nc, const uint8_t *buf, int size)
     qemu_send_packet_async(nc, buf, size, NULL);
 }
 
+ssize_t qemu_send_packet_async_moreflags(NetClientState *sender,
+                               const uint8_t *buf, int size,
+                               NetPacketSent *sent_cb, unsigned more)
+{
+    return qemu_send_packet_async_with_flags(sender, QEMU_NET_PACKET_FLAG_NONE | more,
+                                             buf, size, sent_cb);
+}
+
 ssize_t qemu_send_packet_raw(NetClientState *nc, const uint8_t *buf, int size)
 {
     return qemu_send_packet_async_with_flags(nc, QEMU_NET_PACKET_FLAG_RAW,
@@ -517,7 +600,9 @@ ssize_t qemu_deliver_packet_iov(NetClientState *sender,
         return 0;
     }
 
-    if (nc->info->receive_iov) {
+    if (nc->info->receive_iov_flags) {
+	ret = nc->info->receive_iov_flags(nc, iov, iovcnt, flags);
+    } else if (nc->info->receive_iov) {
         ret = nc->info->receive_iov(nc, iov, iovcnt);
     } else {
         ret = nc_sendv_compat(nc, iov, iovcnt);
@@ -544,6 +629,23 @@ ssize_t qemu_sendv_packet_async(NetClientState *sender,
 
     return qemu_net_queue_send_iov(queue, sender,
                                    QEMU_NET_PACKET_FLAG_NONE,
+                                   iov, iovcnt, sent_cb);
+}
+
+ssize_t qemu_sendv_packet_async_moreflags(NetClientState *sender,
+                                const struct iovec *iov, int iovcnt,
+                                NetPacketSent *sent_cb, unsigned more)
+{
+    NetQueue *queue;
+
+    if (sender->link_down || !sender->peer) {
+        return iov_size(iov, iovcnt);
+    }
+
+    queue = sender->peer->incoming_queue;
+
+    return qemu_net_queue_send_iov(queue, sender,
+                                   QEMU_NET_PACKET_FLAG_NONE | more,
                                    iov, iovcnt, sent_cb);
 }
 
@@ -731,6 +833,9 @@ static int (* const net_client_init_fun[NET_CLIENT_OPTIONS_KIND_MAX])(
         [NET_CLIENT_OPTIONS_KIND_BRIDGE]    = net_init_bridge,
 #endif
         [NET_CLIENT_OPTIONS_KIND_HUBPORT]   = net_init_hubport,
+#ifdef CONFIG_NETMAP
+        [NET_CLIENT_OPTIONS_KIND_NETMAP]    = net_init_netmap,
+#endif
 };
 
 
@@ -1042,6 +1147,17 @@ void do_info_network(Monitor *mon, const QDict *qdict)
             print_net_client(mon, peer);
         }
     }
+}
+
+int qemu_register_peer_async_callback(NetClientState * nc, 
+				    PeerAsyncCallback* cb, void *opaque)
+{
+    if (!nc->peer || !nc->peer->info->register_peer_async_callback)
+	return -1;
+
+    nc->peer->info->register_peer_async_callback(nc->peer, cb, opaque);
+
+    return 0;
 }
 
 void qmp_set_link(const char *name, bool up, Error **errp)

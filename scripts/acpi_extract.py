@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/local/bin/python
 # Copyright (C) 2011 Red Hat, Inc., Michael S. Tsirkin <mst@redhat.com>
 #
 # This program is free software; you can redistribute it and/or modify

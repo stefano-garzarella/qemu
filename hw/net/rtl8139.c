@@ -48,6 +48,8 @@
  *  2011-Mar-22  Benjamin Poirier:  Implemented VLAN offloading
  */
 
+#define WITH_D	/* include debugging macros from qemu-common.h */
+
 /* For crc32 */
 #include <zlib.h>
 
@@ -59,6 +61,20 @@
 #include "hw/loader.h"
 #include "sysemu/sysemu.h"
 #include "qemu/iov.h"
+
+#define PARAVIRT
+#ifdef PARAVIRT
+#define RTL8139CP_PARAVIRT_SUBDEV 0x1101
+#include "net/paravirt.h"
+#endif /* PARAVIRT */
+//#define RATE		/* debug rate monitor */
+
+#ifdef RATE
+#define IFRATE(x) x
+#else
+#define IFRATE(x)
+#endif
+
 
 /* debug RTL8139 card */
 //#define DEBUG_RTL8139 1
@@ -144,6 +160,10 @@ enum RTL8139_registers {
     RxRingAddrLO    = 0xE4, /* 64-bit start addr of Rx ring */
     RxRingAddrHI    = 0xE8, /* 64-bit start addr of Rx ring */
     TxThresh    = 0xEC, /* Early Tx threshold */
+#ifdef PARAVIRT
+    CsbAddrLO   = 0xF0,
+    CsbAddrHI   = 0xF4,
+#endif /* PARAVIRT */
 };
 
 enum ClearBitMasks {
@@ -501,6 +521,23 @@ typedef struct RTL8139State {
     /* Tally counters */
     RTL8139TallyCounters tally_counters;
 
+    uint16_t	IntrMitigate;
+#ifdef PARAVIRT
+    QEMUTimer	*mit_timer;
+    uint32_t	mit_timer_on;     /* mitigation timer active       */
+    uint32_t	mit_irq_level;
+
+    uint32_t	CsbAddrHI;
+    uint32_t	CsbAddrLO;
+    struct paravirt_csb * csb;
+    QEMUBH	*tx_bh;
+    uint32_t	tx_count;
+    uint32_t	txcycles;
+    uint32_t	txcycles_lim;
+    uint32_t	force_txkick;
+#endif /* PARAVIRT */
+    IFRATE(QEMUTimer * rate_timer);
+
     /* Non-persistent data */
     uint8_t   *cplus_txbuffer;
     int        cplus_txbuffer_len;
@@ -516,6 +553,93 @@ typedef struct RTL8139State {
     /* Support migration to/from old versions */
     int rtl8139_mmio_io_addr_dummy;
 } RTL8139State;
+
+/* Rate monitor: shows the communication statistics. */
+#ifdef RATE
+static int64_t rate_last_timestamp = 0;
+static int rate_interval_ms = 1000;
+
+/* rate mmio accesses */
+static int rate_mmio_write = 0;
+static int rate_mmio_read = 0;
+
+/* rate interrupts */
+static int rate_irq_int = 0;
+static int rate_irq_level = 0;
+static int rate_ntfy_txfull = 0;
+
+/* rate guest notifications */
+static int rate_ntfy_tx = 0;    // new TX descriptors
+static int rate_ntfy_ic = 0;    // interrupt acknowledge (interrupt clear)
+static int rate_ntfy_rx = 0;
+
+/* rate tx packets */
+static int rate_tx = 0;
+static int64_t rate_txb = 0;
+
+/* rate rx packet */
+static int rate_rx = 0;  // received packet counter
+static int64_t rate_rxb = 0;
+
+static int rate_tx_bh_len = 0;
+static int rate_tx_bh_count = 0;
+
+#ifdef PARAVIRT
+static void csb_dump(RTL8139State * s) {
+    if (s->csb) {
+	printf("guest_csb_on = %X\n", s->csb->guest_csb_on);
+	printf("guest_tdt = %X\n", s->csb->guest_tdt);
+	printf("guest_rdt = %X\n", s->csb->guest_rdt);
+	printf("guest_need_txkick = %X\n", s->csb->guest_need_txkick);
+	printf("guest_need_rxkick = %X\n", s->csb->guest_need_rxkick);
+	printf("host_tdh = %X\n", s->csb->host_tdh);
+	printf("host_rdh = %X\n", s->csb->host_rdh);
+	printf("host_need_txkick = %X\n", s->csb->host_need_txkick);
+	printf("host_need_rxkick = %X\n", s->csb->host_need_rxkick);
+	printf("host_txcycles_lim = %X\n", s->csb->host_txcycles_lim);
+	printf("host_txcycles = %X\n", s->csb->host_txcycles);
+	printf("host_isr = %X\n", s->csb->host_isr);
+    }
+}
+#endif /* PARAVIRT */
+
+static void rate_callback(void * opaque)
+{
+    RTL8139State* s = opaque;
+    int64_t delta;
+
+#ifdef PARAVIRT
+    csb_dump(s);
+#endif /* PARAVIRT */
+
+    delta = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) - rate_last_timestamp;
+    printf("Interrupt:           %4.3f KHz\n", (double)rate_irq_int/delta);
+    printf("Tx packets:          %4.3f KHz\n", (double)rate_tx/delta);
+    printf("Tx stream:           %4.3f Mbps\n", (double)(rate_txb*8)/delta/1000.0);
+    if (rate_tx_bh_count)
+	printf("Avg BH work:         %4.3f\n", (double)rate_tx_bh_len/(double)rate_tx_bh_count);
+    printf("Rx packets:          %4.3f Kpps\n", (double)rate_rx/delta);
+    printf("Rx stream:           %4.3f Mbps\n", (double)(rate_rxb*8)/delta/1000.0);
+    printf("Tx notifications:    %4.3f KHz\n", (double)rate_ntfy_tx/delta);
+    printf("TX full notif.:      %4.3f KHz\n", (double)rate_ntfy_txfull/delta);
+    printf("Rx notifications:    %4.3f KHz\n", (double)rate_ntfy_rx/delta);
+    printf("MMIO writes:         %4.3f KHz\n", (double)rate_mmio_write/delta);
+    printf("MMIO reads:          %4.3f KHz\n", (double)rate_mmio_read/delta);
+    printf("\n");
+    rate_irq_int = 0;
+    rate_ntfy_txfull = 0;
+    rate_ntfy_tx = rate_ntfy_ic = rate_ntfy_rx = 0;
+    rate_mmio_read = rate_mmio_write = 0;
+    rate_rx = rate_rxb = 0;
+    rate_tx = rate_txb = 0;
+    rate_tx_bh_len = rate_tx_bh_count = 0;
+
+    timer_mod(s->rate_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+		    rate_interval_ms);
+    rate_last_timestamp = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+}
+#endif /* RATE */
+
 
 /* Writes tally counters to memory via DMA */
 static void RTL8139TallyCounters_dma_write(RTL8139State *s, dma_addr_t tc_addr);
@@ -713,10 +837,40 @@ static void rtl8139_update_irq(RTL8139State *s)
     int isr;
     isr = (s->IntrStatus & s->IntrMask) & 0xffff;
 
+#ifdef PARAVIRT
+    if (s->csb && s->csb->guest_csb_on) {
+	s->csb->host_isr = s->IntrStatus;
+	if (isr && !s->force_txkick && !(s->csb->guest_need_rxkick &&
+	    (s->IntrStatus & (RxOK | RxErr | RxOverflow | RxFIFOOver))) &&
+	    !(s->csb->guest_need_txkick && (s->IntrStatus & (TxOK | TxErr))))
+	    return;
+    }
+
+    if (!s->mit_irq_level && isr) {
+	/* Rising edge detected. */
+	if (s->mit_timer_on)  /* Filter out if we have a pending timer. */
+	    return;
+	else if (s->IntrMitigate) {
+	    /* Let the interrupt go, but start the mitigation timer. */
+	    s->mit_timer_on = 1;
+	    timer_mod(s->mit_timer,
+		    qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + s->IntrMitigate * 1000);
+	}
+    }
+    s->force_txkick = 0;
+    s->mit_irq_level = (isr != 0);
+#endif /* PARAVIRT */
+
     DPRINTF("Set IRQ to %d (%04x %04x)\n", isr ? 1 : 0, s->IntrStatus,
         s->IntrMask);
 
     pci_set_irq(d, (isr != 0));
+#ifdef RATE
+    if (!rate_irq_level && isr) {
+	rate_irq_int++;
+    }
+    rate_irq_level = (isr != 0);
+#endif
 }
 
 static int rtl8139_RxWrap(RTL8139State *s)
@@ -817,6 +971,13 @@ static int rtl8139_can_receive(NetClientState *nc)
     }
 }
 
+struct CplusDesc {
+    uint32_t w0;
+    uint32_t w1;
+    uint32_t bufLO;
+    uint32_t bufHI;
+} CplusDesc;
+
 static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t size_, int do_interrupt)
 {
     RTL8139State *s = qemu_get_nic_opaque(nc);
@@ -847,6 +1008,8 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
         DPRINTF("receiver disabled ================\n");
         return -1;
     }
+
+    IFRATE(rate_rx++; rate_rxb += size);
 
     /* XXX: check this */
     if (s->RxConfig & AcceptAllPhys) {
@@ -983,21 +1146,19 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
             "%08x %08x = "DMA_ADDR_FMT"\n", descriptor, s->RxRingAddrHI,
             s->RxRingAddrLO, cplus_rx_ring_desc);
 
-        uint32_t val, rxdw0,rxdw1,rxbufLO,rxbufHI;
+        uint32_t val;
+	struct CplusDesc rxd;
 
-        pci_dma_read(d, cplus_rx_ring_desc, &val, 4);
-        rxdw0 = le32_to_cpu(val);
-        pci_dma_read(d, cplus_rx_ring_desc+4, &val, 4);
-        rxdw1 = le32_to_cpu(val);
-        pci_dma_read(d, cplus_rx_ring_desc+8, &val, 4);
-        rxbufLO = le32_to_cpu(val);
-        pci_dma_read(d, cplus_rx_ring_desc+12, &val, 4);
-        rxbufHI = le32_to_cpu(val);
+        pci_dma_read(d, cplus_rx_ring_desc, &rxd, sizeof(struct CplusDesc));
+	rxd.w0 = le32_to_cpu(rxd.w0);
+	rxd.w1 = le32_to_cpu(rxd.w1);
+	rxd.bufLO = le32_to_cpu(rxd.bufLO);
+	rxd.bufHI = le32_to_cpu(rxd.bufHI);
 
         DPRINTF("+++ C+ mode RX descriptor %d %08x %08x %08x %08x\n",
-            descriptor, rxdw0, rxdw1, rxbufLO, rxbufHI);
+            descriptor, rxd.w0, rxd.w1, rxd.bufLO, rxd.bufHI);
 
-        if (!(rxdw0 & CP_RX_OWN))
+        if (!(rxd.w0 & CP_RX_OWN))
         {
             DPRINTF("C+ Rx mode : descriptor %d is owned by host\n",
                 descriptor);
@@ -1013,7 +1174,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
             return size_;
         }
 
-        uint32_t rx_space = rxdw0 & CP_RX_BUFFER_SIZE_MASK;
+        uint32_t rx_space = rxd.w0 & CP_RX_BUFFER_SIZE_MASK;
 
         /* write VLAN info to descriptor variables. */
         if (s->CpCmd & CPlusRxVLAN && be16_to_cpup((uint16_t *)
@@ -1025,16 +1186,16 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
                 size = MIN_BUF_SIZE;
             }
 
-            rxdw1 &= ~CP_RX_VLAN_TAG_MASK;
+            rxd.w1 &= ~CP_RX_VLAN_TAG_MASK;
             /* BE + ~le_to_cpu()~ + cpu_to_le() = BE */
-            rxdw1 |= CP_RX_TAVA | le16_to_cpup((uint16_t *)
+            rxd.w1 |= CP_RX_TAVA | le16_to_cpup((uint16_t *)
                 &dot1q_buf[ETHER_TYPE_LEN]);
 
             DPRINTF("C+ Rx mode : extracted vlan tag with tci: ""%u\n",
                 be16_to_cpup((uint16_t *)&dot1q_buf[ETHER_TYPE_LEN]));
         } else {
             /* reset VLAN tag flag */
-            rxdw1 &= ~CP_RX_TAVA;
+            rxd.w1 &= ~CP_RX_TAVA;
         }
 
         /* TODO: scatter the packet over available receive ring descriptors space */
@@ -1055,7 +1216,7 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
             return size_;
         }
 
-        dma_addr_t rx_addr = rtl8139_addr64(rxbufLO, rxbufHI);
+        dma_addr_t rx_addr = rtl8139_addr64(rxd.bufLO, rxd.bufHI);
 
         /* receive/copy to target memory */
         if (dot1q_buf) {
@@ -1098,37 +1259,36 @@ static ssize_t rtl8139_do_receive(NetClientState *nc, const uint8_t *buf, size_t
 #define CP_RX_STATUS_TCPF (1<<13)
 
         /* transfer ownership to target */
-        rxdw0 &= ~CP_RX_OWN;
+        rxd.w0 &= ~CP_RX_OWN;
 
         /* set first segment bit */
-        rxdw0 |= CP_RX_STATUS_FS;
+        rxd.w0 |= CP_RX_STATUS_FS;
 
         /* set last segment bit */
-        rxdw0 |= CP_RX_STATUS_LS;
+        rxd.w0 |= CP_RX_STATUS_LS;
 
         /* set received packet type flags */
         if (packet_header & RxBroadcast)
-            rxdw0 |= CP_RX_STATUS_BAR;
+            rxd.w0 |= CP_RX_STATUS_BAR;
         if (packet_header & RxMulticast)
-            rxdw0 |= CP_RX_STATUS_MAR;
+            rxd.w0 |= CP_RX_STATUS_MAR;
         if (packet_header & RxPhysical)
-            rxdw0 |= CP_RX_STATUS_PAM;
+            rxd.w0 |= CP_RX_STATUS_PAM;
 
         /* set received size */
-        rxdw0 &= ~CP_RX_BUFFER_SIZE_MASK;
-        rxdw0 |= (size+4);
+        rxd.w0 &= ~CP_RX_BUFFER_SIZE_MASK;
+        rxd.w0 |= (size+4);
 
         /* update ring data */
-        val = cpu_to_le32(rxdw0);
-        pci_dma_write(d, cplus_rx_ring_desc, (uint8_t *)&val, 4);
-        val = cpu_to_le32(rxdw1);
-        pci_dma_write(d, cplus_rx_ring_desc+4, (uint8_t *)&val, 4);
+        rxd.w0 = cpu_to_le32(rxd.w0);
+        rxd.w1 = cpu_to_le32(rxd.w1);
+        pci_dma_write(d, cplus_rx_ring_desc, (uint8_t *)&rxd, sizeof(rxd.w0) + sizeof(rxd.w1));
 
         /* update tally counter */
         ++s->tally_counters.RxOk;
 
         /* seek to next Rx descriptor */
-        if (rxdw0 & CP_RX_EOR)
+        if (rxd.w0 & CP_RX_EOR)
         {
             s->currCPlusRxDesc = 0;
         }
@@ -1219,6 +1379,12 @@ static void rtl8139_reset(DeviceState *d)
     /* reset interrupt mask */
     s->IntrStatus = 0;
     s->IntrMask = 0;
+#ifdef PARAVIRT
+    if (s->csb)
+	s->csb->host_isr = 0;
+#endif /* PARAVIRT */
+    IFRATE(timer_mod(s->rate_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL)
+		+ 1000));
 
     rtl8139_update_irq(s);
 
@@ -1285,6 +1451,13 @@ static void rtl8139_reset(DeviceState *d)
 
     /* reset tally counters */
     RTL8139TallyCounters_clear(&s->tally_counters);
+
+    s->IntrMitigate = 0;
+#ifdef PARAVIRT
+    s->mit_timer_on = 0;
+    s->mit_irq_level = 0;
+    s->force_txkick = 0;
+#endif /* PARAVIRT */
 }
 
 static void RTL8139TallyCounters_clear(RTL8139TallyCounters* counters)
@@ -1464,11 +1637,12 @@ static uint32_t rtl8139_CpCmd_read(RTL8139State *s)
 static void rtl8139_IntrMitigate_write(RTL8139State *s, uint32_t val)
 {
     DPRINTF("C+ IntrMitigate register write(w) val=0x%04x\n", val);
+    s->IntrMitigate = val;
 }
 
 static uint32_t rtl8139_IntrMitigate_read(RTL8139State *s)
 {
-    uint32_t ret = 0;
+    uint32_t ret = s->IntrMitigate;
 
     DPRINTF("C+ IntrMitigate register read(w) val=0x%04x\n", ret);
 
@@ -1815,8 +1989,10 @@ static void rtl8139_transfer_frame(RTL8139State *s, uint8_t *buf, int size,
     {
         if (iov) {
             qemu_sendv_packet(qemu_get_queue(s->nic), iov, 3);
+	    IFRATE(rate_tx++; rate_txb += iov_size(iov, 3));
         } else {
             qemu_send_packet(qemu_get_queue(s->nic), buf, size);
+	    IFRATE(rate_tx++; rate_txb += size);
         }
     }
 }
@@ -1977,19 +2153,17 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         "%08x %08x = 0x"DMA_ADDR_FMT"\n", descriptor, s->TxAddr[1],
         s->TxAddr[0], cplus_tx_ring_desc);
 
-    uint32_t val, txdw0,txdw1,txbufLO,txbufHI;
+    uint32_t val;
+    struct CplusDesc txd;
 
-    pci_dma_read(d, cplus_tx_ring_desc,    (uint8_t *)&val, 4);
-    txdw0 = le32_to_cpu(val);
-    pci_dma_read(d, cplus_tx_ring_desc+4,  (uint8_t *)&val, 4);
-    txdw1 = le32_to_cpu(val);
-    pci_dma_read(d, cplus_tx_ring_desc+8,  (uint8_t *)&val, 4);
-    txbufLO = le32_to_cpu(val);
-    pci_dma_read(d, cplus_tx_ring_desc+12, (uint8_t *)&val, 4);
-    txbufHI = le32_to_cpu(val);
+    pci_dma_read(d, cplus_tx_ring_desc, (uint8_t *)&txd, sizeof(CplusDesc));
+    txd.w0 = le32_to_cpu(txd.w0);
+    txd.w1 = le32_to_cpu(txd.w1);
+    txd.bufLO = le32_to_cpu(txd.bufLO);
+    txd.bufHI = le32_to_cpu(txd.bufHI);
 
     DPRINTF("+++ C+ mode TX descriptor %d %08x %08x %08x %08x\n", descriptor,
-        txdw0, txdw1, txbufLO, txbufHI);
+        txd.w0, txd.w1, txd.bufLO, txd.bufHI);
 
 /* w0 ownership flag */
 #define CP_TX_OWN (1<<31)
@@ -2033,15 +2207,22 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
 /* excessive collisions flag */
 #define CP_TX_STATUS_EXC (1<<20)
 
-    if (!(txdw0 & CP_TX_OWN))
+    if (!(txd.w0 & CP_TX_OWN))
     {
         DPRINTF("C+ Tx mode : descriptor %d is owned by host\n", descriptor);
         return 0 ;
     }
+#ifdef PARAVIRT
+    if (s->csb && s->csb->guest_csb_on &&
+		s->currCPlusTxDesc == s->csb->guest_txkick_at) {
+	s->force_txkick = 1;
+    }
+#endif
+    
 
     DPRINTF("+++ C+ Tx mode : transmitting from descriptor %d\n", descriptor);
 
-    if (txdw0 & CP_TX_FS)
+    if (txd.w0 & CP_TX_FS)
     {
         DPRINTF("+++ C+ Tx mode : descriptor %d is first segment "
             "descriptor\n", descriptor);
@@ -2050,14 +2231,15 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         s->cplus_txbuffer_offset = 0;
     }
 
-    int txsize = txdw0 & CP_TX_BUFFER_SIZE_MASK;
-    dma_addr_t tx_addr = rtl8139_addr64(txbufLO, txbufHI);
+    int txsize = txd.w0 & CP_TX_BUFFER_SIZE_MASK;
+    dma_addr_t tx_addr = rtl8139_addr64(txd.bufLO, txd.bufHI);
 
     /* make sure we have enough space to assemble the packet */
     if (!s->cplus_txbuffer)
     {
         s->cplus_txbuffer_len = CP_TX_BUFFER_SIZE;
         s->cplus_txbuffer = g_malloc(s->cplus_txbuffer_len);
+printf("mallocing\n");
         s->cplus_txbuffer_offset = 0;
 
         DPRINTF("+++ C+ mode transmission buffer allocated space %d\n",
@@ -2096,8 +2278,8 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
                  s->cplus_txbuffer + s->cplus_txbuffer_offset, txsize);
     s->cplus_txbuffer_offset += txsize;
 
-    /* seek to next Rx descriptor */
-    if (txdw0 & CP_TX_EOR)
+    /* seek to next Tx descriptor */
+    if (txd.w0 & CP_TX_EOR)
     {
         s->currCPlusTxDesc = 0;
     }
@@ -2109,21 +2291,21 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
     }
 
     /* transfer ownership to target */
-    txdw0 &= ~CP_RX_OWN;
+    txd.w0 &= ~CP_TX_OWN;
 
     /* reset error indicator bits */
-    txdw0 &= ~CP_TX_STATUS_UNF;
-    txdw0 &= ~CP_TX_STATUS_TES;
-    txdw0 &= ~CP_TX_STATUS_OWC;
-    txdw0 &= ~CP_TX_STATUS_LNKF;
-    txdw0 &= ~CP_TX_STATUS_EXC;
+    txd.w0 &= ~CP_TX_STATUS_UNF;
+    txd.w0 &= ~CP_TX_STATUS_TES;
+    txd.w0 &= ~CP_TX_STATUS_OWC;
+    txd.w0 &= ~CP_TX_STATUS_LNKF;
+    txd.w0 &= ~CP_TX_STATUS_EXC;
 
     /* update ring data */
-    val = cpu_to_le32(txdw0);
+    val = cpu_to_le32(txd.w0);
     pci_dma_write(d, cplus_tx_ring_desc, (uint8_t *)&val, 4);
 
     /* Now decide if descriptor being processed is holding the last segment of packet */
-    if (txdw0 & CP_TX_LS)
+    if (txd.w0 & CP_TX_LS)
     {
         uint8_t dot1q_buffer_space[VLAN_HLEN];
         uint16_t *dot1q_buffer;
@@ -2138,16 +2320,16 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         int      saved_buffer_len = s->cplus_txbuffer_len;
 
         /* create vlan tag */
-        if (txdw1 & CP_TX_TAGC) {
+        if (txd.w1 & CP_TX_TAGC) {
             /* the vlan tag is in BE byte order in the descriptor
              * BE + le_to_cpu() + ~swap()~ = cpu */
             DPRINTF("+++ C+ Tx mode : inserting vlan tag with ""tci: %u\n",
-                bswap16(txdw1 & CP_TX_VLAN_TAG_MASK));
+                bswap16(txd.w1 & CP_TX_VLAN_TAG_MASK));
 
             dot1q_buffer = (uint16_t *) dot1q_buffer_space;
             dot1q_buffer[0] = cpu_to_be16(ETH_P_8021Q);
             /* BE + le_to_cpu() + ~cpu_to_le()~ = BE */
-            dot1q_buffer[1] = cpu_to_le16(txdw1 & CP_TX_VLAN_TAG_MASK);
+            dot1q_buffer[1] = cpu_to_le16(txd.w1 & CP_TX_VLAN_TAG_MASK);
         } else {
             dot1q_buffer = NULL;
         }
@@ -2157,7 +2339,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
         s->cplus_txbuffer_offset = 0;
         s->cplus_txbuffer_len = 0;
 
-        if (txdw0 & (CP_TX_IPCS | CP_TX_UDPCS | CP_TX_TCPCS | CP_TX_LGSEN))
+        if (txd.w0 & (CP_TX_IPCS | CP_TX_UDPCS | CP_TX_TCPCS | CP_TX_LGSEN))
         {
             DPRINTF("+++ C+ mode offloaded task checksum\n");
 
@@ -2195,7 +2377,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
 
             if (ip)
             {
-                if (txdw0 & CP_TX_IPCS)
+                if (txd.w0 & CP_TX_IPCS)
                 {
                     DPRINTF("+++ C+ mode need IP checksum\n");
 
@@ -2212,9 +2394,9 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
                     }
                 }
 
-                if ((txdw0 & CP_TX_LGSEN) && ip_protocol == IP_PROTO_TCP)
+                if ((txd.w0 & CP_TX_LGSEN) && ip_protocol == IP_PROTO_TCP)
                 {
-                    int large_send_mss = (txdw0 >> 16) & CP_TC_LGSEN_MSS_MASK;
+                    int large_send_mss = (txd.w0 >> 16) & CP_TC_LGSEN_MSS_MASK;
 
                     DPRINTF("+++ C+ mode offloaded task TSO MTU=%d IP data %d "
                         "frame data %d specified MSS=%d\n", ETH_MTU,
@@ -2326,7 +2508,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
                     /* Stop sending this frame */
                     saved_size = 0;
                 }
-                else if (txdw0 & (CP_TX_TCPCS|CP_TX_UDPCS))
+                else if (txd.w0 & (CP_TX_TCPCS|CP_TX_UDPCS))
                 {
                     DPRINTF("+++ C+ mode need TCP or UDP checksum\n");
 
@@ -2341,7 +2523,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
                     /* copy IP source and destination fields */
                     memcpy(data_to_checksum, saved_ip_header + 12, 8);
 
-                    if ((txdw0 & CP_TX_TCPCS) && ip_protocol == IP_PROTO_TCP)
+                    if ((txd.w0 & CP_TX_TCPCS) && ip_protocol == IP_PROTO_TCP)
                     {
                         DPRINTF("+++ C+ mode calculating TCP checksum for "
                             "packet with %d bytes data\n", ip_data_len);
@@ -2361,7 +2543,7 @@ static int rtl8139_cplus_transmit_one(RTL8139State *s)
 
                         p_tcp_hdr->th_sum = tcp_checksum;
                     }
-                    else if ((txdw0 & CP_TX_UDPCS) && ip_protocol == IP_PROTO_UDP)
+                    else if ((txd.w0 & CP_TX_UDPCS) && ip_protocol == IP_PROTO_UDP)
                     {
                         DPRINTF("+++ C+ mode calculating UDP checksum for "
                             "packet with %d bytes data\n", ip_data_len);
@@ -2437,6 +2619,9 @@ static void rtl8139_cplus_transmit(RTL8139State *s)
         s->IntrStatus |= TxOK;
         rtl8139_update_irq(s);
     }
+#ifdef PARAVIRT
+    s->tx_count = txcount;
+#endif /* PARAVIRT */
 }
 
 static void rtl8139_transmit(RTL8139State *s)
@@ -2572,6 +2757,48 @@ static uint16_t rtl8139_CSCR_read(RTL8139State *s)
     return ret;
 }
 
+#ifdef PARAVIRT
+static void rtl8139_tx_bh(void * opaque)
+{
+    RTL8139State *s = opaque;
+    struct paravirt_csb *csb = s->csb;
+    uint32_t w0;
+
+    s->tx_count = 0;
+    rtl8139_cplus_transmit(s);
+    IFRATE(rate_tx_bh_count++; rate_tx_bh_len += s->tx_count);
+    s->txcycles = (s->tx_count > 0) ? 0 : s->txcycles+1;
+    if (s->txcycles >= s->txcycles_lim) {
+        /* Prepare to sleep, with race avoidance */
+        s->txcycles = 0;
+        csb->host_need_txkick = 1;
+	ND("tx bh going to sleep, set txkick");
+        smp_mb();
+	pci_dma_read(PCI_DEVICE(s), rtl8139_addr64(s->TxAddr[0], s->TxAddr[1]) +
+		16 * s->currCPlusTxDesc, (uint8_t *)&w0, 4);
+	if (le32_to_cpu(w0) & CP_TX_OWN) {
+	    ND("tx bh race avoidance, clear txkick");
+            csb->host_need_txkick = 0;
+	}
+    }
+    if (csb->host_need_txkick == 0) {
+        qemu_bh_schedule(s->tx_bh);
+    }
+}
+
+static void rtl8139_mit_timer(void *opaque)
+{
+    RTL8139State *s = opaque;
+
+    s->mit_timer_on = 0;
+    if (s->IntrStatus == 0) { /* no events pending, we are done */
+        return;
+    }
+
+    rtl8139_update_irq(s);
+}
+#endif
+
 static void rtl8139_TxAddr_write(RTL8139State *s, uint32_t txAddrOffset, uint32_t val)
 {
     DPRINTF("TxAddr write offset=0x%x val=0x%08x\n", txAddrOffset, val);
@@ -2694,6 +2921,7 @@ static void rtl8139_IntrStatus_write(RTL8139State *s, uint32_t val)
     rtl8139_update_irq(s);
 
 #endif
+    IFRATE(rate_ntfy_ic++);
 }
 
 static uint32_t rtl8139_IntrStatus_read(RTL8139State *s)
@@ -2812,8 +3040,16 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
             if (val & (1 << 6))
             {
                 DPRINTF("C+ TxPoll normal priority transmission\n");
+#ifdef PARAVIRT
+		if (s->csb && s->csb->guest_csb_on) {
+		    s->csb->host_need_txkick = 0;
+		    smp_mb();
+		    qemu_bh_schedule(s->tx_bh);
+		} else
+#endif /* PARAVIRT */
                 rtl8139_cplus_transmit(s);
             }
+	    IFRATE(rate_ntfy_tx++);
 
             break;
 
@@ -2822,6 +3058,7 @@ static void rtl8139_io_writeb(void *opaque, uint8_t addr, uint32_t val)
                 val);
             break;
     }
+    IFRATE(rate_mmio_write++);
 }
 
 static void rtl8139_io_writew(void *opaque, uint8_t addr, uint32_t val)
@@ -2880,6 +3117,7 @@ static void rtl8139_io_writew(void *opaque, uint8_t addr, uint32_t val)
             rtl8139_io_writeb(opaque, addr + 1, (val >> 8) & 0xff);
             break;
     }
+    IFRATE(rate_mmio_write++);
 }
 
 static void rtl8139_set_next_tctr_time(RTL8139State *s, int64_t current_time)
@@ -2976,7 +3214,23 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
                 rtl8139_set_next_tctr_time(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
             }
             break;
+#ifdef PARAVIRT
+	case CsbAddrHI:
+	    s->CsbAddrHI = val;
+	    break;
 
+	case CsbAddrLO:
+	    s->CsbAddrLO = val;
+	    paravirt_configure_csb(&s->csb, s->CsbAddrLO, s->CsbAddrHI,
+				    s->tx_bh,
+                                    pci_get_address_space(PCI_DEVICE(s)));
+	    if (s->csb) {
+		s->txcycles_lim = s->csb->host_txcycles_lim;
+		s->txcycles = 0;
+	    }
+	    break;
+
+#endif /* PARAVIRT */
         default:
             DPRINTF("ioport write(l) addr=0x%x val=0x%08x via write(b)\n",
                 addr, val);
@@ -2986,6 +3240,7 @@ static void rtl8139_io_writel(void *opaque, uint8_t addr, uint32_t val)
             rtl8139_io_writeb(opaque, addr + 3, (val >> 24) & 0xff);
             break;
     }
+    IFRATE(rate_mmio_write++);
 }
 
 static uint32_t rtl8139_io_readb(void *opaque, uint8_t addr)
@@ -3061,6 +3316,7 @@ static uint32_t rtl8139_io_readb(void *opaque, uint8_t addr)
             ret = 0;
             break;
     }
+    IFRATE(rate_mmio_read++);
 
     return ret;
 }
@@ -3139,6 +3395,7 @@ static uint32_t rtl8139_io_readw(void *opaque, uint8_t addr)
             DPRINTF("ioport read(w) addr=0x%x val=0x%04x\n", addr, ret);
             break;
     }
+    IFRATE(rate_mmio_read++);
 
     return ret;
 }
@@ -3209,6 +3466,7 @@ static uint32_t rtl8139_io_readl(void *opaque, uint8_t addr)
             DPRINTF("read(l) addr=0x%x val=%08x\n", addr, ret);
             break;
     }
+    IFRATE(rate_mmio_read++);
 
     return ret;
 }
@@ -3473,6 +3731,12 @@ static void pci_rtl8139_uninit(PCIDevice *dev)
     }
     timer_del(s->timer);
     timer_free(s->timer);
+#ifdef PARAVIRT
+    timer_del(s->mit_timer);
+    timer_free(s->mit_timer);
+    qemu_bh_delete(s->tx_bh);
+#endif /* PARAVIRT */
+    IFRATE(timer_del(s->rate_timer); timer_free(s->rate_timer));
     qemu_del_nic(s->nic);
 }
 
@@ -3542,6 +3806,12 @@ static int pci_rtl8139_init(PCIDevice *dev)
     s->TimerExpire = 0;
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rtl8139_timer, s);
     rtl8139_set_next_tctr_time(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+#ifdef PARAVIRT
+    s->mit_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, rtl8139_mit_timer, s);
+    s->csb = NULL;
+    s->tx_bh = qemu_bh_new(rtl8139_tx_bh, s);
+#endif /* PARAVIRT */
+    IFRATE(s->rate_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, &rate_callback, s));
 
     add_boot_device_path(s->conf.bootindex, d, "/ethernet-phy@0");
 
@@ -3563,6 +3833,9 @@ static void rtl8139_class_init(ObjectClass *klass, void *data)
     k->romfile = "efi-rtl8139.rom";
     k->vendor_id = PCI_VENDOR_ID_REALTEK;
     k->device_id = PCI_DEVICE_ID_REALTEK_8139;
+#ifdef PARAVIRT
+    k->subsystem_id = RTL8139CP_PARAVIRT_SUBDEV;
+#endif /* PARAVIRT */
     k->revision = RTL8139_PCI_REVID; /* >=0x20 is for 8139C+ */
     k->class_id = PCI_CLASS_NETWORK_ETHERNET;
     dc->reset = rtl8139_reset;

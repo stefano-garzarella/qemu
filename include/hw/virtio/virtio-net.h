@@ -190,6 +190,7 @@ typedef struct VirtIONet {
     uint16_t max_queues;
     uint16_t curr_queues;
     size_t config_size;
+    IFRATE(QEMUTimer * rate_timer);
     char *netclient_name;
     char *netclient_type;
     uint64_t curr_guest_offloads;

@@ -83,13 +83,14 @@ void vhost_net_ack_features(struct vhost_net *net, unsigned features)
 
 static int vhost_net_get_fd(NetClientState *backend)
 {
-    switch (backend->info->type) {
-    case NET_CLIENT_OPTIONS_KIND_TAP:
-        return tap_get_fd(backend);
-    default:
-        fprintf(stderr, "vhost-net requires tap backend\n");
+    int ret = backend->info->get_fd(backend);
+
+    if (ret == -1) {
+        fprintf(stderr, "vhost-net requires tap or netmap backend\n");
         return -EBADFD;
     }
+
+    return ret;
 }
 
 struct vhost_net *vhost_net_init(NetClientState *backend, int devfd,
@@ -106,7 +107,7 @@ struct vhost_net *vhost_net_init(NetClientState *backend, int devfd,
         goto fail;
     }
     net->nc = backend;
-    net->dev.backend_features = tap_has_vnet_hdr(backend) ? 0 :
+    net->dev.backend_features = backend->info->has_vnet_hdr(backend) ? 0 :
         (1 << VHOST_NET_F_VIRTIO_NET_HDR);
     net->backend = r;
 
@@ -117,7 +118,7 @@ struct vhost_net *vhost_net_init(NetClientState *backend, int devfd,
     if (r < 0) {
         goto fail;
     }
-    if (!tap_has_vnet_hdr_len(backend,
+    if (!backend->info->has_vnet_hdr_len(backend,
                               sizeof(struct virtio_net_hdr_mrg_rxbuf))) {
         net->dev.features &= ~(1 << VIRTIO_NET_F_MRG_RXBUF);
     }
@@ -224,7 +225,7 @@ int vhost_net_start(VirtIODevice *dev, NetClientState *ncs,
     }
 
     for (i = 0; i < total_queues; i++) {
-        r = vhost_net_start_one(tap_get_vhost_net(ncs[i].peer), dev, i * 2);
+        r = vhost_net_start_one(ncs[i].peer->info->get_vhost_net(ncs[i].peer), dev, i * 2);
 
         if (r < 0) {
             goto err;
@@ -241,7 +242,7 @@ int vhost_net_start(VirtIODevice *dev, NetClientState *ncs,
 
 err:
     while (--i >= 0) {
-        vhost_net_stop_one(tap_get_vhost_net(ncs[i].peer), dev);
+        vhost_net_stop_one(ncs[i].peer->info->get_vhost_net(ncs[i].peer), dev);
     }
     return r;
 }
@@ -262,7 +263,7 @@ void vhost_net_stop(VirtIODevice *dev, NetClientState *ncs,
     assert(r >= 0);
 
     for (i = 0; i < total_queues; i++) {
-        vhost_net_stop_one(tap_get_vhost_net(ncs[i].peer), dev);
+        vhost_net_stop_one(ncs[i].peer->info->get_vhost_net(ncs[i].peer), dev);
     }
 }
 

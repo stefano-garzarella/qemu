@@ -170,6 +170,7 @@ curses=""
 docs=""
 fdt=""
 netmap="no"
+e1000_paravirt=""
 pixman=""
 sdl=""
 virtfs=""
@@ -805,6 +806,10 @@ for opt do
   ;;
   --enable-netmap) netmap="yes"
   ;;
+  --disable-e1000-paravirt) e1000_paravirt="no"
+  ;;
+  --enable-e1000-paravirt) e1000_paravirt="yes"
+  ;;
   --disable-xen) xen="no"
   ;;
   --enable-xen) xen="yes"
@@ -1214,6 +1219,8 @@ Advanced options (experts only):
   --enable-vde             enable support for vde network
   --disable-netmap         disable support for netmap network
   --enable-netmap          enable support for netmap network
+  --disable-e1000-paravirt disable support for e1000 paravirtualization
+  --enable-e1000-paravirt  enable support for e1000 paravirtualization (needs guest support)
   --disable-linux-aio      disable Linux AIO support
   --enable-linux-aio       enable Linux AIO support
   --disable-cap-ng         disable libcap-ng support
@@ -3827,6 +3834,7 @@ echo "GUEST_BASE        $guest_base"
 echo "PIE               $pie"
 echo "vde support       $vde"
 echo "netmap support    $netmap"
+echo "e1000 paravirt    $e1000_paravirt"
 echo "Linux AIO support $linux_aio"
 echo "ATTR/XATTR support $attr"
 echo "Install blobs     $blobs"
@@ -3971,6 +3979,9 @@ if test "$vde" = "yes" ; then
 fi
 if test "$netmap" = "yes" ; then
   echo "CONFIG_NETMAP=y" >> $config_host_mak
+fi
+if test "$e1000_paravirt" = "yes" ; then
+  echo "CONFIG_E1000_PARAVIRT=y" >> $config_host_mak
 fi
 if test "$cap_ng" = "yes" ; then
   echo "CONFIG_LIBCAP=y" >> $config_host_mak

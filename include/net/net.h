@@ -45,23 +45,50 @@ typedef struct NICConf {
 typedef void (NetPoll)(NetClientState *, bool enable);
 typedef int (NetCanReceive)(NetClientState *);
 typedef ssize_t (NetReceive)(NetClientState *, const uint8_t *, size_t);
+typedef ssize_t (NetReceiveFlags)(NetClientState *, const uint8_t *, size_t,
+								    unsigned);
 typedef ssize_t (NetReceiveIOV)(NetClientState *, const struct iovec *, int);
+typedef ssize_t (NetReceiveIOVFlags)(NetClientState *, const struct iovec *,
+							int, unsigned);
 typedef void (NetCleanup) (NetClientState *);
 typedef void (LinkStatusChanged)(NetClientState *);
 typedef void (NetClientDestructor)(NetClientState *);
+typedef void (PeerAsyncCallback)(void *);
+typedef void (RegisterPeerAsyncCallback)(NetClientState *, PeerAsyncCallback*, void *);
 typedef RxFilterInfo *(QueryRxFilter)(NetClientState *);
+typedef bool (HasUfo)(NetClientState *);
+typedef bool (HasVnetHdr)(NetClientState *);
+typedef bool (HasVnetHdrLen)(NetClientState *, int);
+typedef void (UsingVnetHdr)(NetClientState *, bool);
+typedef void (SetOffload)(NetClientState *, int, int, int, int, int);
+typedef void (SetVnetHdrLen)(NetClientState *, int);
+typedef int (GetFd)(NetClientState *);
+struct vhost_net;
+typedef struct vhost_net VHostNetState;
+typedef VHostNetState *(GetVhostNet)(NetClientState *);
 
 typedef struct NetClientInfo {
     NetClientOptionsKind type;
     size_t size;
     NetReceive *receive;
     NetReceive *receive_raw;
+    NetReceiveFlags *receive_flags;
     NetReceiveIOV *receive_iov;
+    NetReceiveIOVFlags *receive_iov_flags;
     NetCanReceive *can_receive;
     NetCleanup *cleanup;
     LinkStatusChanged *link_status_changed;
+    RegisterPeerAsyncCallback *register_peer_async_callback;
     QueryRxFilter *query_rx_filter;
     NetPoll *poll;
+    HasUfo *has_ufo;
+    HasVnetHdr *has_vnet_hdr;
+    HasVnetHdrLen *has_vnet_hdr_len;
+    UsingVnetHdr *using_vnet_hdr;
+    SetOffload *set_offload;
+    SetVnetHdrLen *set_vnet_hdr_len;
+    GetFd *get_fd;
+    GetVhostNet *get_vhost_net;
 } NetClientInfo;
 
 struct NetClientState {
@@ -113,13 +140,26 @@ ssize_t qemu_sendv_packet(NetClientState *nc, const struct iovec *iov,
                           int iovcnt);
 ssize_t qemu_sendv_packet_async(NetClientState *nc, const struct iovec *iov,
                                 int iovcnt, NetPacketSent *sent_cb);
+ssize_t qemu_sendv_packet_async_moreflags(NetClientState *nc, const struct iovec *iov,
+                                int iovcnt, NetPacketSent *sent_cb, unsigned more);
 void qemu_send_packet(NetClientState *nc, const uint8_t *buf, int size);
 ssize_t qemu_send_packet_raw(NetClientState *nc, const uint8_t *buf, int size);
 ssize_t qemu_send_packet_async(NetClientState *nc, const uint8_t *buf,
                                int size, NetPacketSent *sent_cb);
+ssize_t qemu_send_packet_async_moreflags(NetClientState *nc, const uint8_t *buf,
+                               int size, NetPacketSent *sent_cb, unsigned more);
 void qemu_purge_queued_packets(NetClientState *nc);
 void qemu_flush_queued_packets(NetClientState *nc);
 void qemu_format_nic_info_str(NetClientState *nc, uint8_t macaddr[6]);
+bool qemu_peer_has_ufo(NetClientState *nc);
+bool qemu_peer_has_vnet_hdr(NetClientState *nc);
+bool qemu_peer_has_vnet_hdr_len(NetClientState *nc, int len);
+void qemu_peer_using_vnet_hdr(NetClientState *nc, bool enable);
+void qemu_peer_set_offload(NetClientState *nc, int csum, int tso4, int tso6,
+                           int ecn, int ufo);
+void qemu_peer_set_vnet_hdr_len(NetClientState *nc, int len);
+int qemu_peer_get_fd(NetClientState *nc);
+VHostNetState *qemu_peer_get_vhost_net(NetClientState *nc);
 void qemu_macaddr_default_if_unset(MACAddr *macaddr);
 int qemu_show_nic_models(const char *arg, const char *const *models);
 void qemu_check_nic_model(NICInfo *nd, const char *model);
@@ -139,6 +179,8 @@ ssize_t qemu_deliver_packet_iov(NetClientState *sender,
 
 void print_net_client(Monitor *mon, NetClientState *nc);
 void do_info_network(Monitor *mon, const QDict *qdict);
+int qemu_register_peer_async_callback(NetClientState * nc,
+				PeerAsyncCallback* cb, void *opaque);
 
 /* NIC info */
 

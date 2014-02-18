@@ -951,6 +951,9 @@ void address_space_init(AddressSpace *as, MemoryRegion *root, const char *name);
  */
 void address_space_destroy(AddressSpace *as);
 
+
+int ram_block_get(int i, hwaddr *off, hwaddr *len, uint8_t **va);
+
 /**
  * address_space_rw: read from or write to an address space.
  *
