@@ -105,3 +105,4 @@ cscope.*
 tags
 TAGS
 *~
+qga/qapi-generated/
