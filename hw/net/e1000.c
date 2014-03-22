@@ -23,6 +23,7 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
+#define CONFIG_NETMAP_PASSTHROUGH
 
 
 #define WITH_D	/* include debugging macros from qemu-common.h */
@@ -50,6 +51,8 @@
 /* Address registers for the Communication Status Block. */
 #define E1000_CSBAL       0x02830
 #define E1000_CSBAH       0x02834
+#define E1000_PTFEAT      0x02838       /* passthrough features */
+
 #include "net/paravirt.h"
 #include "net/tap.h"
 #define E1000_MSIX_CTRL_VECTOR   0
@@ -59,6 +62,8 @@
 #include "v1000_user.h"
 #endif /* V1000 */
 static struct virtio_net_hdr null_tx_hdr;
+
+#include "net/netmap_pt.h"
 #endif /* CONFIG_E1000_PARAVIRT */
 
 //#define RATE	    /* Debug rate monitor enable. */
@@ -254,6 +259,7 @@ enum {
     defreg(ITR),
 #ifdef CONFIG_E1000_PARAVIRT
     defreg(CSBAL),      defreg(CSBAH),
+    defreg(PTFEAT),
 #endif /* CONFIG_E1000_PARAVIRT */
 };
 
@@ -671,6 +677,18 @@ static bool peer_has_vnet_hdr(E1000State *s)
     }
 
     return qemu_has_vnet_hdr(nc->peer);
+}
+
+static struct netmap_pt*
+peer_get_netmap_pt(E1000State *s)
+{
+    NetClientState *nc = s->nic->ncs;
+
+    if (!nc->peer) {
+        return NULL;
+    }
+
+    return qemu_peer_get_netmap_pt(nc);
 }
 
 #endif	/* CONFIG_E1000_PARAVIRT */
@@ -2053,6 +2071,29 @@ static int e1000_v1000_down(E1000State *s)
 #endif /* V1000 */
 
 static void
+set_ptfeat(E1000State *s, int index, uint32_t val)
+{
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    /* check that the peer is netmap and get the supported passthrough mode, if
+     * any; then write to ptfeat the intersection among asked-for and supported
+     * features
+     */
+    NetmapPTState *pt = peer_get_netmap_pt(s);
+    uint32_t features;
+
+    if (pt == NULL) {
+        D("passthrough not supported by backend");
+    } else {
+        features = netmap_pt_get_features(pt, val) & val;
+        netmap_pt_ack_features(pt, features);
+        s->mac_reg[index] = features;
+        D("passthrough features: %x", features);
+    }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
+    /* ignore writes to ptfeat if passthrough is not compiled-in */
+}
+
+static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
     PCIDevice *d = PCI_DEVICE(s);
@@ -2244,6 +2285,7 @@ static uint32_t (*macreg_readops[])(E1000State *, int) = {
     getreg(TADV),       getreg(ITR),
 #ifdef CONFIG_E1000_PARAVIRT
     getreg(CSBAL),      getreg(CSBAH),
+    getreg(PTFEAT),
 #endif /* CONFIG_E1000_PARAVIRT */
 
     [TOTH] = mac_read_clr8,	[TORH] = mac_read_clr8,	[GPRC] = mac_read_clr4,
@@ -2262,6 +2304,7 @@ static void (*macreg_writeops[])(E1000State *, int, uint32_t) = {
 #ifdef CONFIG_E1000_PARAVIRT
     [CSBAL] = set_32bit, [CSBAH] = set_32bit, [TDBAL] = set_dba,
     [TDBAH] = set_dba,   [RDBAL] = set_dba,   [RDBAH] = set_dba,
+    [PTFEAT] = set_ptfeat,
 #else
     putreg(TDBAL),	putreg(TDBAH),	putreg(RDBAL),	putreg(RDBAH),
 #endif /* CONFIG_E1000_PARAVIRT */

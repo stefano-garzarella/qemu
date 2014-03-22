@@ -39,10 +39,17 @@
 #include "qemu/error-report.h"
 #include "qemu/iov.h"
 #include "net/vhost_net.h"
+#include "net/netmap_pt.h"
 
 /* XXX Use at your own risk: a synchronization problem in the netmap module
    can freeze your (host) machine. */
 //#define USE_INDIRECT_BUFFERS
+
+struct netmap_pt {
+    unsigned long features;
+    unsigned long acked_features;
+    /* mmap area etc. */
+};
 
 typedef struct NetmapState {
     NetClientState      nc;
@@ -57,6 +64,7 @@ typedef struct NetmapState {
     void		*txsync_callback_arg;
     VHostNetState *vhost_net;
     int                 vnet_hdr_len;  /* Current virtio-net header length. */
+    NetmapPTState       netmap_pt;
 } NetmapState;
 
 #ifndef __FreeBSD__
@@ -453,6 +461,30 @@ static VHostNetState *netmap_get_vhost_net(NetClientState *nc)
     return s->vhost_net;
 }
 
+
+static NetmapPTState *
+netmap_get_netmap_pt(NetClientState *nc)
+{
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
+
+    return &s->netmap_pt;
+}
+
+/* return the subset of requested features that we support */
+uint32_t
+netmap_pt_get_features(NetmapPTState *nc, uint32_t features)
+{
+    return nc->features & features;
+}
+
+/* store the agreed upon features */
+void
+netmap_pt_ack_features(NetmapPTState *nc, uint32_t features)
+{
+    nc->acked_features |= features;
+}
+
+
 /* NetClientInfo methods */
 static NetClientInfo net_netmap_info = {
     .type = NET_CLIENT_OPTIONS_KIND_NETMAP,
@@ -474,6 +506,7 @@ static NetClientInfo net_netmap_info = {
     .set_vnet_hdr_len = netmap_set_vnet_hdr_len,
     .get_fd = netmap_get_fd,
     .get_vhost_net = netmap_get_vhost_net,
+    .get_netmap_pt = netmap_get_netmap_pt,
 };
 
 /* The exported init function
@@ -539,6 +572,9 @@ int net_init_netmap(const NetClientOptions *opts,
     netmap_read_poll(s, true); /* Initially only poll for reads. */
     pstrcpy(s->ifname, sizeof(s->ifname), netmap_opts->ifname);
     s->txsync_callback = s->txsync_callback_arg = NULL;
+
+    s->netmap_pt.features = 0; /* no passthrough support yet */
+    s->netmap_pt.acked_features = 0;
 
     if (netmap_opts->has_vhost && netmap_opts->vhost) {
         VhostNetOptions options;
