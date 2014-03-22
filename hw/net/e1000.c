@@ -701,9 +701,9 @@ static void e1000_reset(void *opaque)
 				    &e1000_peer_async_callback, d) == 0);
     d->sync_tdh = 0;
     if (d->peer_async)
-	D("the backend is asynchronous\n");
+	D("the backend is asynchronous");
     else
-	D("the backend is not asynchronous\n");
+	D("the backend is not asynchronous");
     memset(d->phy_reg, 0, sizeof d->phy_reg);
     memmove(d->phy_reg, phy_reg_init, sizeof phy_reg_init);
     d->phy_reg[PHY_ID2] = edc->phy_id2;
@@ -1177,7 +1177,7 @@ process_tx_desc(E1000State *s, struct e1000_tx_desc *dp)
 
 	buf = translate_guest_paddr(s, addr, split_size);
 	if (!buf) {
-	    D("SG mapping failed! (still not handled)\n");
+	    D("SG mapping failed! (still not handled)");
 	    exit(-1);
 	}
 	s->iov[s->iovcnt].iov_base = buf;
@@ -2069,7 +2069,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
 	    s->txcycles_lim = s->csb->host_txcycles_lim;
 	    s->txcycles = 0;
             s->msix = !!s->csb->guest_use_msix;
-            D("Using MSI-X = %d\n", s->msix);
+            D("Using MSI-X = %d", s->msix);
 
 	    if (peer_has_vnet_hdr(s)) {
 		qemu_set_vnet_hdr_len(s->nic->ncs->peer, sizeof(struct virtio_net_hdr));
@@ -2079,7 +2079,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
 	    } else {
                 s->v1000 = false;
 	    }
-	    D("Using VNET header = %d\n", s->guest_hdr_ofs);
+	    D("Using VNET header = %d", s->guest_hdr_ofs);
 
             /* Map the vnet-header ring. */
             vnet_hdr_phi = ((hwaddr)s->csb->vnet_ring_high << 32) | s->csb->vnet_ring_low;
@@ -2087,12 +2087,12 @@ set_32bit(E1000State *s, int index, uint32_t val)
             s->vnet_hdr = address_space_map(pci_get_address_space(d),
                     vnet_hdr_phi, &len, 1 /* is_write */);
             memset(s->vnet_hdr, 0, len);
-            D("vnet-header ring mapped, phi = %lu\n", vnet_hdr_phi);
+            D("vnet-header ring mapped, phi = %lx", vnet_hdr_phi);
 
             /* Create an eventfd to use as tx ioeventfd and
                bind it to the TDT register writes. */
             e1000_tx_ioeventfd_up(s);
-            D("using ioeventfd = %d\n", s->ioeventfd);
+            D("using ioeventfd = %d", s->ioeventfd);
 #ifdef V1000
             if (!s->msix)
                 /* We support v1000 only when MSI-X interrupts are used,
@@ -2103,7 +2103,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
                 printf("Error: Unable to use v1000 accelerator\n");
                 exit(EXIT_FAILURE);
             }
-            D("Using v1000 = %d\n", s->v1000);
+            D("Using v1000 = %d", s->v1000);
 #endif /* V1000 */
 	} else {
             /* Post-deallocation unconfiguration. */
@@ -2634,7 +2634,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     /* Initialize the BAR register 2 to reference a MSI-X table containing
        2 entries. */
     if ((i = msix_init_exclusive_bar(pci_dev, 2, 2))) {
-	D("msix_init_exclusive_bar(1) failed\n");
+	D("msix_init_exclusive_bar(1) failed");
 	return i;
     }
     d->num_mappings = 0;
