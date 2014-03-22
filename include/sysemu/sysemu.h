@@ -104,6 +104,7 @@ extern int autostart;
 
 typedef enum {
     VGA_NONE, VGA_STD, VGA_CIRRUS, VGA_VMWARE, VGA_XENFB, VGA_QXL,
+    VGA_TCX, VGA_CG3, VGA_DEVICE
 } VGAInterfaceType;
 
 extern int vga_interface_type;
@@ -185,7 +186,7 @@ void rtc_change_mon_event(struct tm *tm);
 
 void add_boot_device_path(int32_t bootindex, DeviceState *dev,
                           const char *suffix);
-char *get_boot_devices_list(size_t *size);
+char *get_boot_devices_list(size_t *size, bool ignore_suffixes);
 
 DeviceState *get_boot_device(uint32_t position);
 

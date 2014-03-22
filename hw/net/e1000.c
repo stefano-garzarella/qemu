@@ -682,7 +682,7 @@ static bool peer_has_vnet_hdr(E1000State *s)
 	return false;
     }
 
-    return qemu_peer_has_vnet_hdr(nc);
+    return qemu_has_vnet_hdr(nc->peer);
 }
 
 #endif	/* CONFIG_E1000_PARAVIRT */
@@ -2067,9 +2067,9 @@ set_32bit(E1000State *s, int index, uint32_t val)
             D("Using MSI-X = %d\n", s->msix);
 
 	    if (peer_has_vnet_hdr(s)) {
-		qemu_peer_set_vnet_hdr_len(s->nic->ncs, sizeof(struct virtio_net_hdr));
-		qemu_peer_using_vnet_hdr(s->nic->ncs, true);
-		qemu_peer_set_offload(s->nic->ncs, 1, 1, 1, 1, 1);
+		qemu_set_vnet_hdr_len(s->nic->ncs->peer, sizeof(struct virtio_net_hdr));
+		qemu_using_vnet_hdr(s->nic->ncs->peer, true);
+		qemu_set_offload(s->nic->ncs->peer, 1, 1, 1, 1, 1);
 		s->host_hdr_ofs = s->guest_hdr_ofs = s->iovcnt = 1;
 	    } else {
                 s->v1000 = false;
@@ -2109,7 +2109,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
             s->msix = false;
             s->guest_hdr_ofs = 0;
             if (s->host_hdr_ofs) {
-		qemu_peer_set_offload(s->nic->ncs, 0, 0, 0, 0, 0);
+		qemu_set_offload(s->nic->ncs->peer, 0, 0, 0, 0, 0);
                 /* In the past, the backend was asked to use the vnet header, and
                    s->host_hdr_ofs was set. However, we are currently in non-paravirtual mode
                    and so we must push a null header to the backend. Do this only once. */
