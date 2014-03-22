@@ -149,28 +149,6 @@ static void netmap_writable(void *opaque)
     qemu_flush_queued_packets(&s->nc);
 }
 
-/* Some simple abstractions on the netmap API to cope with
-   differences between new and old API. */
-#if (NETMAP_API >= 10)
-
-#define ring_space(r) nm_ring_space(r)
-#define ring_empty(r) nm_ring_empty(r)
-#define ring_update(r, pos, num) ring->cur = ring->head = pos
-#define ring_next(r, i) nm_ring_next(r, i)
-
-#else   /* old API */
-
-#define ring_space(r) r->avail
-#define ring_empty(r) (r->avail == 0)
-#define ring_update(r, pos, num) \
-                        do { \
-                            r->avail -= num; \
-                            r->cur = pos; \
-                        } while (0)
-#define ring_next(r, i) NETMAP_RING_NEXT(r, i)
-
-#endif  /* old API */
-
 static ssize_t netmap_receive_flags(NetClientState *nc,
       const uint8_t *buf, size_t size, unsigned flags)
 {
@@ -294,7 +272,7 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
     /* Now update ring->cur and ring->head. */
     ring->cur = ring->head = i;
 
-    if (ring_empty(ring) || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
+    if (nm_ring_empty(ring) || !(flags & QEMU_NET_PACKET_FLAG_MORE)) {
 txsync:
         ioctl(s->nmd->fd, NIOCTXSYNC, NULL);
         if (s->txsync_callback) {
@@ -362,7 +340,7 @@ static void netmap_send(void *opaque)
 
 	iovsize = qemu_sendv_packet_async_moreflags(&s->nc, s->iov, iovcnt,
 		    netmap_send_completed,
-                    ring_empty(ring) ? 0 : QEMU_NET_PACKET_FLAG_MORE);
+                    nm_ring_empty(ring) ? 0 : QEMU_NET_PACKET_FLAG_MORE);
 
         if (iovsize == 0) {
             /* The peer does not receive anymore. Packet is queued, stop
