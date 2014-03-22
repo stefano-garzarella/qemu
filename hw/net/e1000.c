@@ -209,8 +209,8 @@ typedef struct E1000State_st {
     int virq;
     bool ioeventfd;	    /* Are we using ioeventfd for guest --> host kicks? */
     bool msix;              /* Are we using MSI-X instead of IRQ interrupts? */
-#ifdef V1000
     bool v1000;             /* Did the user request to use the v1000 accelerator? */
+#ifdef V1000
     int v1000_fd;
     EventNotifier host_rx_notifier, guest_notifier;
     struct V1000Config cfg;
@@ -2103,8 +2103,10 @@ set_32bit(E1000State *s, int index, uint32_t val)
                 printf("Error: Unable to use v1000 accelerator\n");
                 exit(EXIT_FAILURE);
             }
+#else /* !V1000 */
+            s->v1000 = false;
+#endif /* !V1000 */
             D("Using v1000 = %d", s->v1000);
-#endif /* V1000 */
 	} else {
             /* Post-deallocation unconfiguration. */
 #ifdef V1000
