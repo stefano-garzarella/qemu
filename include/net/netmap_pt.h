@@ -11,4 +11,5 @@ typedef struct netmap_pt NetmapPTState;
 
 uint32_t netmap_pt_get_features(NetmapPTState *pt, uint32_t features);
 void netmap_pt_ack_features(NetmapPTState *pt, uint32_t features);
+int netmap_pt_get_memsize(NetmapPTState *pt, uint32_t *memsize);
 #endif

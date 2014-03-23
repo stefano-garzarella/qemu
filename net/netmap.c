@@ -46,6 +46,7 @@
 //#define USE_INDIRECT_BUFFERS
 
 struct netmap_pt {
+    struct NetmapState *netmap;
     unsigned long features;
     unsigned long acked_features;
     /* mmap area etc. */
@@ -66,6 +67,7 @@ typedef struct NetmapState {
     int                 vnet_hdr_len;  /* Current virtio-net header length. */
     NetmapPTState       netmap_pt;
 } NetmapState;
+
 
 #ifndef __FreeBSD__
 #define pkt_copy bcopy
@@ -484,6 +486,18 @@ netmap_pt_ack_features(NetmapPTState *nc, uint32_t features)
     nc->acked_features |= features;
 }
 
+int
+netmap_pt_get_memsize(NetmapPTState *nc, uint32_t *memsize)
+{
+    NetmapState *n = nc->netmap;
+
+    if (n->nmd == NULL)
+        return EINVAL;
+    *memsize = n->nmd->memsize;
+    D("memsize = %u", *memsize);
+    return 0;
+}
+
 
 /* NetClientInfo methods */
 static NetClientInfo net_netmap_info = {
@@ -573,7 +587,8 @@ int net_init_netmap(const NetClientOptions *opts,
     pstrcpy(s->ifname, sizeof(s->ifname), netmap_opts->ifname);
     s->txsync_callback = s->txsync_callback_arg = NULL;
 
-    s->netmap_pt.features = 0; /* no passthrough support yet */
+    s->netmap_pt.netmap = s;
+    s->netmap_pt.features = NETMAP_PT_BASE;
     s->netmap_pt.acked_features = 0;
 
     if (netmap_opts->has_vhost && netmap_opts->vhost) {

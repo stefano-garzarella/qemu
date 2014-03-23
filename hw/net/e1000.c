@@ -52,6 +52,8 @@
 #define E1000_CSBAL       0x02830
 #define E1000_CSBAH       0x02834
 #define E1000_PTFEAT      0x02838       /* passthrough features */
+#define E1000_PTCTL       0x0283C       /* passthrough control */
+#define E1000_PTSTS       0x02840       /* passthrough status */
 
 #include "net/paravirt.h"
 #include "net/tap.h"
@@ -259,7 +261,7 @@ enum {
     defreg(ITR),
 #ifdef CONFIG_E1000_PARAVIRT
     defreg(CSBAL),      defreg(CSBAH),
-    defreg(PTFEAT),
+    defreg(PTFEAT),     defreg(PTCTL),  defreg(PTSTS),
 #endif /* CONFIG_E1000_PARAVIRT */
 };
 
@@ -2094,6 +2096,32 @@ set_ptfeat(E1000State *s, int index, uint32_t val)
 }
 
 static void
+set_ptctl(E1000State *s, int index, uint32_t val)
+{
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    int ret = EINVAL;
+    NetmapPTState *pt = peer_get_netmap_pt(s);
+
+    if (pt == NULL) {
+        D("passthrough not supported by backend");
+        goto out;
+    }
+
+    D("[%d] = %u", index, val);
+    s->mac_reg[index] = val;
+    switch (val) {
+        case NET_PARAVIRT_PTCTL_CONFIG:
+            if (s->csb == NULL)
+                break;
+            ret = netmap_pt_get_memsize(pt, &s->csb->memsize);
+            break;
+    }
+out:
+    s->mac_reg[PTSTS] = ret;
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
+}
+
+static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
     PCIDevice *d = PCI_DEVICE(s);
@@ -2285,7 +2313,7 @@ static uint32_t (*macreg_readops[])(E1000State *, int) = {
     getreg(TADV),       getreg(ITR),
 #ifdef CONFIG_E1000_PARAVIRT
     getreg(CSBAL),      getreg(CSBAH),
-    getreg(PTFEAT),
+    getreg(PTFEAT),     getreg(PTCTL),  getreg(PTSTS),
 #endif /* CONFIG_E1000_PARAVIRT */
 
     [TOTH] = mac_read_clr8,	[TORH] = mac_read_clr8,	[GPRC] = mac_read_clr4,
@@ -2305,6 +2333,7 @@ static void (*macreg_writeops[])(E1000State *, int, uint32_t) = {
     [CSBAL] = set_32bit, [CSBAH] = set_32bit, [TDBAL] = set_dba,
     [TDBAH] = set_dba,   [RDBAL] = set_dba,   [RDBAH] = set_dba,
     [PTFEAT] = set_ptfeat,
+    [PTCTL] = set_ptctl, putreg(PTSTS),
 #else
     putreg(TDBAL),	putreg(TDBAH),	putreg(RDBAL),	putreg(RDBAH),
 #endif /* CONFIG_E1000_PARAVIRT */
