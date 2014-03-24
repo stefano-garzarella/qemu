@@ -45,13 +45,6 @@
    can freeze your (host) machine. */
 //#define USE_INDIRECT_BUFFERS
 
-struct netmap_pt {
-    struct NetmapState *netmap;
-    unsigned long features;
-    unsigned long acked_features;
-    /* mmap area etc. */
-};
-
 typedef struct NetmapState {
     NetClientState      nc;
     struct nm_desc      *nmd;
@@ -487,17 +480,17 @@ netmap_pt_ack_features(NetmapPTState *nc, uint32_t features)
 }
 
 int
-netmap_pt_get_memsize(NetmapPTState *nc, uint32_t *memsize)
+netmap_pt_get_mem(NetmapPTState *nc)
 {
     NetmapState *n = nc->netmap;
 
     if (n->nmd == NULL)
         return EINVAL;
-    *memsize = n->nmd->memsize;
-    D("memsize = %u", *memsize);
+    nc->memsize = n->nmd->memsize;
+    nc->mem = n->nmd->mem;
+    nc->offset = n->nmd->req.nr_offset;
     return 0;
 }
-
 
 /* NetClientInfo methods */
 static NetClientInfo net_netmap_info = {

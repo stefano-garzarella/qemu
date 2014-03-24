@@ -222,6 +222,11 @@ typedef struct E1000State_st {
     EventNotifier host_rx_notifier, guest_notifier;
     struct V1000Config cfg;
 #endif /* V1000 */
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    bool pt_enable;
+    NetmapPTState *pt;
+    MemoryRegion pt_mr;     /* netmap shared memory in passthrough mode */
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 #endif /* CONFIG_E1000_PARAVIRT */
     uint32_t rx_count;
     bool peer_async;        /* Is the backend able to do asynchronous processing? */
@@ -2076,21 +2081,15 @@ static void
 set_ptfeat(E1000State *s, int index, uint32_t val)
 {
 #ifdef CONFIG_NETMAP_PASSTHROUGH
-    /* check that the peer is netmap and get the supported passthrough mode, if
-     * any; then write to ptfeat the intersection among asked-for and supported
-     * features
+    /* we have already checked whether the peer is netmap or not
+     * during init. 
      */
-    NetmapPTState *pt = peer_get_netmap_pt(s);
-    uint32_t features;
+    NetmapPTState *pt = s->pt;
 
-    if (pt == NULL) {
-        D("passthrough not supported by backend");
-    } else {
-        features = netmap_pt_get_features(pt, val) & val;
-        netmap_pt_ack_features(pt, features);
-        s->mac_reg[index] = features;
-        D("passthrough features: %x", features);
-    }
+    if (pt == NULL)
+        return;
+    pt->acked_features &= val;
+    s->mac_reg[PTFEAT] = pt->acked_features;
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
     /* ignore writes to ptfeat if passthrough is not compiled-in */
 }
@@ -2100,23 +2099,38 @@ set_ptctl(E1000State *s, int index, uint32_t val)
 {
 #ifdef CONFIG_NETMAP_PASSTHROUGH
     int ret = EINVAL;
-    NetmapPTState *pt = peer_get_netmap_pt(s);
+    NetmapPTState *pt = s->pt;
+
+    s->mac_reg[index] = val;
+    D("[%d] = %u", index, val);
 
     if (pt == NULL) {
         D("passthrough not supported by backend");
         goto out;
     }
 
-    D("[%d] = %u", index, val);
-    s->mac_reg[index] = val;
+    if (s->csb == NULL) {
+        D("csb not initialized");
+        goto out;
+    }
+
     switch (val) {
-        case NET_PARAVIRT_PTCTL_CONFIG:
-            if (s->csb == NULL)
-                break;
-            ret = netmap_pt_get_memsize(pt, &s->csb->memsize);
+    case NET_PARAVIRT_PTCTL_CONFIG:
+    case NET_PARAVIRT_PTCTL_FINALIZE:
+        ret = netmap_pt_get_mem(pt);
+        if (ret)
             break;
+        if (pt->mem == NULL) {
+            ret = EINVAL;
+            break;
+        }
+        s->csb->memsize = pt->memsize;
+        s->csb->pci_bar = 2;
+        s->csb->nifp_offset = pt->offset;
+        break;
     }
 out:
+    D("ret %d", ret);
     s->mac_reg[PTSTS] = ret;
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 }
@@ -2655,6 +2669,20 @@ static NetClientInfo net_e1000_info = {
     .link_status_changed = e1000_set_link_status,
 };
 
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+static uint64_t upper_pow2(uint32_t v) {
+    /* from bit-twiddling hacks */
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v++;
+    return v;
+}
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
+
 static int pci_e1000_init(PCIDevice *pci_dev)
 {
     DeviceState *dev = DEVICE(pci_dev);
@@ -2718,6 +2746,44 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     }
 #endif
     d->tx_hdr = NULL;
+
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    if (d->pt_enable) {
+        uint32_t features;
+        uint64_t size;
+        int ret;
+
+        d->pt = peer_get_netmap_pt(d);
+
+        if (d->pt == NULL) {
+            D("passthrough not supported by backend");
+            goto pt_end;
+        }
+        features = netmap_pt_get_features(d->pt, NETMAP_PT_BASE | NETMAP_PT_FULL);
+        netmap_pt_ack_features(d->pt, features);
+        D("passthrough features: %x", features);
+        ret = netmap_pt_get_mem(d->pt);
+        if (ret || d->pt->mem == NULL) {
+            D("shared memory not mapped");
+            d->pt = NULL;
+            goto pt_end;
+        }
+        size = upper_pow2(d->pt->memsize);
+        D("BAR size %lx (%lu MiB)", size, size >> 20);
+        memory_region_init_ram_ptr(&d->pt_mr, OBJECT(d), "netmap",
+                size, d->pt->mem);
+        vmstate_register_ram(&d->pt_mr, DEVICE(d));
+        pci_register_bar(pci_dev, 2,
+                PCI_BASE_ADDRESS_SPACE_MEMORY |
+                PCI_BASE_ADDRESS_MEM_PREFETCH |
+                PCI_BASE_ADDRESS_MEM_TYPE_64, &d->pt_mr);
+    } else {
+        D("no passthrough requested");
+        d->pt = NULL;
+    }
+pt_end:
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
+
 #endif /* CONFIG_E1000_PARAVIRT */
     return 0;
 }
@@ -2739,6 +2805,9 @@ static Property e1000_properties[] = {
 #ifdef V1000
     DEFINE_PROP_BOOL("v1000", E1000State, v1000, false),
 #endif /* V1000 */
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    DEFINE_PROP_BOOL("passthrough", E1000State, pt_enable, false),
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 #endif /* CONFIG_E1000_PARAVIRT */
     DEFINE_PROP_END_OF_LIST(),
 };

@@ -3,7 +3,16 @@
 
 #include "net/net.h"
 
-struct netmap_pt;
+struct netmap_pt {
+    struct NetmapState *netmap;
+    unsigned long features;
+    unsigned long acked_features;
+    bool mapped;
+    size_t memsize;
+    void *mem;
+    uint32_t offset;
+};
+
 typedef struct netmap_pt NetmapPTState;
 
 #define NETMAP_PT_BASE  1
@@ -11,5 +20,5 @@ typedef struct netmap_pt NetmapPTState;
 
 uint32_t netmap_pt_get_features(NetmapPTState *pt, uint32_t features);
 void netmap_pt_ack_features(NetmapPTState *pt, uint32_t features);
-int netmap_pt_get_memsize(NetmapPTState *pt, uint32_t *memsize);
+int netmap_pt_get_mem(NetmapPTState *pt);
 #endif
