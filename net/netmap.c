@@ -489,7 +489,31 @@ netmap_pt_get_mem(NetmapPTState *nc)
     nc->memsize = n->nmd->memsize;
     nc->mem = n->nmd->mem;
     nc->offset = n->nmd->req.nr_offset;
+    nc->num_tx_rings = n->nmd->req.nr_tx_rings;
+    nc->num_rx_rings = n->nmd->req.nr_rx_rings;
+    nc->num_tx_slots = n->nmd->req.nr_tx_slots;
+    nc->num_rx_slots = n->nmd->req.nr_rx_slots;
     return 0;
+}
+
+int
+netmap_pt_txsync(NetmapPTState *nc)
+{
+    NetmapState *n = nc->netmap;
+
+    if (n->nmd == NULL)
+        return EINVAL;
+    return ioctl(n->nmd->fd, NIOCTXSYNC, NULL);
+}
+
+int
+netmap_pt_rxsync(NetmapPTState *nc)
+{
+    NetmapState *n = nc->netmap;
+
+    if (n->nmd == NULL)
+        return EINVAL;
+    return ioctl(n->nmd->fd, NIOCRXSYNC, NULL);
 }
 
 /* NetClientInfo methods */

@@ -2103,7 +2103,7 @@ set_ptctl(E1000State *s, int index, uint32_t val)
     NetmapPTState *pt = s->pt;
 
     s->mac_reg[index] = val;
-    D("[%d] = %u", index, val);
+    ND("[%d] = %u", index, val);
 
     if (pt == NULL) {
         D("passthrough not supported by backend");
@@ -2128,10 +2128,25 @@ set_ptctl(E1000State *s, int index, uint32_t val)
         s->csb->memsize = pt->memsize;
         s->csb->pci_bar = NETMAP_PT_BAR;
         s->csb->nifp_offset = pt->offset;
+        s->csb->num_tx_rings = pt->num_tx_rings;
+        s->csb->num_rx_rings = pt->num_rx_rings;
+        s->csb->num_tx_slots = pt->num_tx_slots;
+        s->csb->num_rx_slots = pt->num_rx_slots;
+        D("txr %u rxr %u txd %u rxd %u",
+                s->csb->num_tx_rings,
+                s->csb->num_rx_rings,
+                s->csb->num_tx_slots,
+                s->csb->num_rx_slots);
+        break;
+    case NET_PARAVIRT_PTCTL_TXSYNC:
+        ret = netmap_pt_txsync(pt);
+        break;
+    case NET_PARAVIRT_PTCTL_RXSYNC:
+        ret = netmap_pt_rxsync(pt);
         break;
     }
 out:
-    D("ret %d", ret);
+    ND("ret %d", ret);
     s->mac_reg[PTSTS] = ret;
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 }
@@ -2155,6 +2170,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
             s->msix = !!s->csb->guest_use_msix;
             D("Using MSI-X = %d", s->msix);
 
+#if 0
 	    if (peer_has_vnet_hdr(s)) {
 		qemu_set_vnet_hdr_len(s->nic->ncs->peer, sizeof(struct virtio_net_hdr));
 		qemu_using_vnet_hdr(s->nic->ncs->peer, true);
@@ -2172,6 +2188,7 @@ set_32bit(E1000State *s, int index, uint32_t val)
                     vnet_hdr_phi, &len, 1 /* is_write */);
             memset(s->vnet_hdr, 0, len);
             D("vnet-header ring mapped, phi = %lx", vnet_hdr_phi);
+#endif
 
             /* Create an eventfd to use as tx ioeventfd and
                bind it to the TDT register writes. */
