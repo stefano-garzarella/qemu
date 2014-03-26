@@ -139,7 +139,7 @@ struct paravirt_csb {
     uint32_t memsize;              /* size of the shared memory */
     uint32_t pci_bar;              /* pci bar of the shared memory in the device */
     uint32_t nifp_offset;          /* offset of the netmap_if in the shared memory */
-    uint64_t base_addr;
+    uint64_t base_addr;		   /* guest kernel-virtual base address */
 };
 
 #define NET_PARAVIRT_CSB_SIZE   4096
