@@ -224,8 +224,9 @@ typedef struct E1000State_st {
 #endif /* V1000 */
 #ifdef CONFIG_NETMAP_PASSTHROUGH
     bool pt_enable;
-    NetmapPTState *pt;
+    NetmapPTState *pt;      /* passthrough state (shared with backend) */
     MemoryRegion pt_mr;     /* netmap shared memory in passthrough mode */
+#define NETMAP_PT_BAR 3
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 #endif /* CONFIG_E1000_PARAVIRT */
     uint32_t rx_count;
@@ -2125,7 +2126,7 @@ set_ptctl(E1000State *s, int index, uint32_t val)
             break;
         }
         s->csb->memsize = pt->memsize;
-        s->csb->pci_bar = 2;
+        s->csb->pci_bar = NETMAP_PT_BAR;
         s->csb->nifp_offset = pt->offset;
         break;
     }
@@ -2772,11 +2773,12 @@ static int pci_e1000_init(PCIDevice *pci_dev)
         D("BAR size %lx (%lu MiB)", size, size >> 20);
         memory_region_init_ram_ptr(&d->pt_mr, OBJECT(d), "netmap",
                 size, d->pt->mem);
+        ND("mem %s", (const char*)/*d->pt->mem*/ptr);
         vmstate_register_ram(&d->pt_mr, DEVICE(d));
-        pci_register_bar(pci_dev, 2,
-                PCI_BASE_ADDRESS_SPACE_MEMORY |
-                PCI_BASE_ADDRESS_MEM_PREFETCH |
-                PCI_BASE_ADDRESS_MEM_TYPE_64, &d->pt_mr);
+        pci_register_bar(pci_dev, NETMAP_PT_BAR,
+                PCI_BASE_ADDRESS_SPACE_MEMORY  |
+                PCI_BASE_ADDRESS_MEM_PREFETCH /*  |
+                PCI_BASE_ADDRESS_MEM_TYPE_64 */, &d->pt_mr);
     } else {
         D("no passthrough requested");
         d->pt = NULL;
