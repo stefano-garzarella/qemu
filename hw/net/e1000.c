@@ -225,6 +225,7 @@ typedef struct E1000State_st {
 #ifdef CONFIG_NETMAP_PASSTHROUGH
     bool pt_enable;
     NetmapPTState *pt;      /* passthrough state (shared with backend) */
+    MemoryRegion pt_bar;     /* netmap shared memory in passthrough mode */
     MemoryRegion pt_mr;     /* netmap shared memory in passthrough mode */
 #define NETMAP_PT_BAR 3
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
@@ -2078,6 +2079,16 @@ static int e1000_v1000_down(E1000State *s)
 }
 #endif /* V1000 */
 
+static int
+e1000_notify_netmap_pt(NetClientState *nc, int dir)
+{
+    E1000State *s = qemu_get_nic_opaque(nc);
+
+    ND(3, "");
+    set_ics(s, 0, (dir == NETMAP_PT_RX ? E1000_ICS_RXT0 : E1000_ICS_TXQE));
+    return 0;
+}
+
 static void
 set_ptfeat(E1000State *s, int index, uint32_t val)
 {
@@ -2116,8 +2127,11 @@ set_ptctl(E1000State *s, int index, uint32_t val)
     }
 
     switch (val) {
-    case NET_PARAVIRT_PTCTL_CONFIG:
     case NET_PARAVIRT_PTCTL_FINALIZE:
+        ret = netmap_pt_start(pt);
+        if (ret)
+            break;
+    case NET_PARAVIRT_PTCTL_CONFIG:
         ret = netmap_pt_get_mem(pt);
         if (ret)
             break;
@@ -2685,6 +2699,7 @@ static NetClientInfo net_e1000_info = {
     .receive_iov_flags = e1000_receive_iov_flags,
     .cleanup = e1000_cleanup,
     .link_status_changed = e1000_set_link_status,
+    .notify_netmap_pt = e1000_notify_netmap_pt,
 };
 
 #ifdef CONFIG_NETMAP_PASSTHROUGH
@@ -2788,14 +2803,16 @@ static int pci_e1000_init(PCIDevice *pci_dev)
         }
         size = upper_pow2(d->pt->memsize);
         D("BAR size %lx (%lu MiB)", size, size >> 20);
+        memory_region_init(&d->pt_bar, OBJECT(d), "e1000-pt-bar", size);
         memory_region_init_ram_ptr(&d->pt_mr, OBJECT(d), "netmap",
-                size, d->pt->mem);
-        ND("mem %s", (const char*)/*d->pt->mem*/ptr);
+                d->pt->memsize, d->pt->mem);
+        memory_region_add_subregion(&d->pt_bar, 0, &d->pt_mr);
+        ND("mem %s", (const char*)d->pt->mem);
         vmstate_register_ram(&d->pt_mr, DEVICE(d));
         pci_register_bar(pci_dev, NETMAP_PT_BAR,
                 PCI_BASE_ADDRESS_SPACE_MEMORY  |
                 PCI_BASE_ADDRESS_MEM_PREFETCH /*  |
-                PCI_BASE_ADDRESS_MEM_TYPE_64 */, &d->pt_mr);
+                PCI_BASE_ADDRESS_MEM_TYPE_64 */, &d->pt_bar);
     } else {
         D("no passthrough requested");
         d->pt = NULL;

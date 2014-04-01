@@ -496,6 +496,47 @@ netmap_pt_get_mem(NetmapPTState *nc)
     return 0;
 }
 
+static int netmap_pt_can_send(void *opaque)
+{
+    return 1;
+}
+
+static void netmap_notify_tx(void *opaque)
+{
+}
+
+static void netmap_notify_rx(void *opaque)
+{
+    NetmapState *s = opaque;
+    NetmapPTState *pt = &s->netmap_pt;
+
+    if (!pt->started)
+        return;
+    if (s->nc.peer->info->notify_netmap_pt)
+        s->nc.peer->info->notify_netmap_pt(s->nc.peer, NETMAP_PT_RX);
+    qemu_set_fd_handler2(s->nmd->fd,
+                         netmap_pt_can_send,
+                         NULL,
+                         NULL,
+                         s);
+}
+
+int netmap_pt_start(NetmapPTState *pt)
+{
+    NetmapState *n = pt->netmap;
+
+    if (pt->started)
+        return 0;
+
+    qemu_set_fd_handler2(n->nmd->fd,
+                         netmap_pt_can_send,
+                         netmap_notify_rx,
+                         NULL,
+                         n);
+    pt->started = true;
+    return 0;
+}
+
 int
 netmap_pt_txsync(NetmapPTState *nc)
 {
@@ -513,7 +554,12 @@ netmap_pt_rxsync(NetmapPTState *nc)
 
     if (n->nmd == NULL)
         return EINVAL;
-    return ioctl(n->nmd->fd, NIOCRXSYNC, NULL);
+    qemu_set_fd_handler2(n->nmd->fd,
+                         netmap_pt_can_send,
+                         netmap_notify_rx,
+                         NULL,
+                         n);
+    return 0;
 }
 
 /* NetClientInfo methods */
