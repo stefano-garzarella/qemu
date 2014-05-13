@@ -1171,7 +1171,6 @@ static int32_t virtio_net_flush_tx(VirtIONetQueue *q)
         len += ret;
 
         virtqueue_push(q->tx_vq, &elem, 0);
-        virtio_notify(vdev, q->tx_vq);
         IFRATE(rate_ints += )virtio_notify(vdev, q->tx_vq);
 
         if (++num_packets >= n->tx_burst) {
