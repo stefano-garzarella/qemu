@@ -2723,6 +2723,7 @@ static const E1000Info e1000_devices[] = {
         .phy_id2   = E1000_PHY_ID2_8254xx_DEFAULT,
         .subsystem_id = 0,
     },
+#ifdef CONFIG_E1000_PARAVIRT
     {
         .name      = "e1000-paravirt",
         .device_id = E1000_DEV_ID_82540EM,
@@ -2730,6 +2731,7 @@ static const E1000Info e1000_devices[] = {
         .phy_id2   = E1000_PHY_ID2_8254xx_DEFAULT,
         .subsystem_id = E1000_PARA_SUBDEV,
     },
+#endif  /* CONFIG_E1000_PARAVIRT */
 };
 
 static const TypeInfo e1000_default_info = {
