@@ -312,6 +312,14 @@ static int cpu_post_load(void *opaque, int version_id)
         env->segs[R_SS].flags &= ~(env->segs[R_SS].flags & DESC_DPL_MASK);
     }
 
+    /* Older versions of QEMU incorrectly used CS.DPL as the CPL when
+     * running under KVM.  This is wrong for conforming code segments.
+     * Luckily, in our implementation the CPL field of hflags is redundant
+     * and we can get the right value from the SS descriptor privilege level.
+     */
+    env->hflags &= ~HF_CPL_MASK;
+    env->hflags |= (env->segs[R_SS].flags >> DESC_DPL_SHIFT) & HF_CPL_MASK;
+
     /* XXX: restore FPU round state */
     env->fpstt = (env->fpus_vmstate >> 11) & 7;
     env->fpus = env->fpus_vmstate & ~0x3800;
@@ -569,8 +577,8 @@ static const VMStateDescription vmstate_msr_hypercall_hypercall = {
     .minimum_version_id = 1,
     .minimum_version_id_old = 1,
     .fields      = (VMStateField []) {
-        VMSTATE_UINT64(env.msr_hv_hypercall, X86CPU),
         VMSTATE_UINT64(env.msr_hv_guest_os_id, X86CPU),
+        VMSTATE_UINT64(env.msr_hv_hypercall, X86CPU),
         VMSTATE_END_OF_LIST()
     }
 };

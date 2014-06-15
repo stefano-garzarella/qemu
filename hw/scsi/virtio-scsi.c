@@ -147,6 +147,15 @@ static void *virtio_scsi_load_request(QEMUFile *f, SCSIRequest *sreq)
     qemu_get_be32s(f, &n);
     assert(n < vs->conf.num_queues);
     qemu_get_buffer(f, (unsigned char *)&req->elem, sizeof(req->elem));
+    /* TODO: add a way for SCSIBusInfo's load_request to fail,
+     * and fail migration instead of asserting here.
+     * When we do, we might be able to re-enable NDEBUG below.
+     */
+#ifdef NDEBUG
+#error building with NDEBUG is not supported
+#endif
+    assert(req->elem.in_num <= ARRAY_SIZE(req->elem.in_sg));
+    assert(req->elem.out_num <= ARRAY_SIZE(req->elem.out_sg));
     virtio_scsi_parse_req(s, vs->cmd_vqs[n], req);
 
     scsi_req_ref(sreq);
@@ -416,16 +425,16 @@ static void virtio_scsi_get_config(VirtIODevice *vdev,
     VirtIOSCSIConfig *scsiconf = (VirtIOSCSIConfig *)config;
     VirtIOSCSICommon *s = VIRTIO_SCSI_COMMON(vdev);
 
-    stl_raw(&scsiconf->num_queues, s->conf.num_queues);
-    stl_raw(&scsiconf->seg_max, 128 - 2);
-    stl_raw(&scsiconf->max_sectors, s->conf.max_sectors);
-    stl_raw(&scsiconf->cmd_per_lun, s->conf.cmd_per_lun);
-    stl_raw(&scsiconf->event_info_size, sizeof(VirtIOSCSIEvent));
-    stl_raw(&scsiconf->sense_size, s->sense_size);
-    stl_raw(&scsiconf->cdb_size, s->cdb_size);
-    stw_raw(&scsiconf->max_channel, VIRTIO_SCSI_MAX_CHANNEL);
-    stw_raw(&scsiconf->max_target, VIRTIO_SCSI_MAX_TARGET);
-    stl_raw(&scsiconf->max_lun, VIRTIO_SCSI_MAX_LUN);
+    stl_p(&scsiconf->num_queues, s->conf.num_queues);
+    stl_p(&scsiconf->seg_max, 128 - 2);
+    stl_p(&scsiconf->max_sectors, s->conf.max_sectors);
+    stl_p(&scsiconf->cmd_per_lun, s->conf.cmd_per_lun);
+    stl_p(&scsiconf->event_info_size, sizeof(VirtIOSCSIEvent));
+    stl_p(&scsiconf->sense_size, s->sense_size);
+    stl_p(&scsiconf->cdb_size, s->cdb_size);
+    stw_p(&scsiconf->max_channel, VIRTIO_SCSI_MAX_CHANNEL);
+    stw_p(&scsiconf->max_target, VIRTIO_SCSI_MAX_TARGET);
+    stl_p(&scsiconf->max_lun, VIRTIO_SCSI_MAX_LUN);
 }
 
 static void virtio_scsi_set_config(VirtIODevice *vdev,
@@ -434,14 +443,14 @@ static void virtio_scsi_set_config(VirtIODevice *vdev,
     VirtIOSCSIConfig *scsiconf = (VirtIOSCSIConfig *)config;
     VirtIOSCSICommon *vs = VIRTIO_SCSI_COMMON(vdev);
 
-    if ((uint32_t) ldl_raw(&scsiconf->sense_size) >= 65536 ||
-        (uint32_t) ldl_raw(&scsiconf->cdb_size) >= 256) {
+    if ((uint32_t) ldl_p(&scsiconf->sense_size) >= 65536 ||
+        (uint32_t) ldl_p(&scsiconf->cdb_size) >= 256) {
         error_report("bad data written to virtio-scsi configuration space");
         exit(1);
     }
 
-    vs->sense_size = ldl_raw(&scsiconf->sense_size);
-    vs->cdb_size = ldl_raw(&scsiconf->cdb_size);
+    vs->sense_size = ldl_p(&scsiconf->sense_size);
+    vs->cdb_size = ldl_p(&scsiconf->cdb_size);
 }
 
 static uint32_t virtio_scsi_get_features(VirtIODevice *vdev,
@@ -489,7 +498,7 @@ static void virtio_scsi_push_event(VirtIOSCSI *s, SCSIDevice *dev,
                                    uint32_t event, uint32_t reason)
 {
     VirtIOSCSICommon *vs = VIRTIO_SCSI_COMMON(s);
-    VirtIOSCSIReq *req = virtio_scsi_pop_req(s, vs->event_vq);
+    VirtIOSCSIReq *req;
     VirtIOSCSIEvent *evt;
     VirtIODevice *vdev = VIRTIO_DEVICE(s);
     int in_size;
@@ -498,6 +507,7 @@ static void virtio_scsi_push_event(VirtIOSCSI *s, SCSIDevice *dev,
         return;
     }
 
+    req = virtio_scsi_pop_req(s, vs->event_vq);
     if (!req) {
         s->events_dropped = true;
         return;

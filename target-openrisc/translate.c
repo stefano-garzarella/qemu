@@ -26,10 +26,10 @@
 #include "qemu/log.h"
 #include "config.h"
 #include "qemu/bitops.h"
+#include "exec/cpu_ldst.h"
 
-#include "helper.h"
-#define GEN_HELPER 1
-#include "helper.h"
+#include "exec/helper-proto.h"
+#include "exec/helper-gen.h"
 
 #define OPENRISC_DISAS
 

@@ -338,13 +338,13 @@ PropertyInfo qdev_prop_vlan = {
 int qdev_prop_set_drive(DeviceState *dev, const char *name,
                         BlockDriverState *value)
 {
-    Error *errp = NULL;
+    Error *err = NULL;
     const char *bdrv_name = value ? bdrv_get_device_name(value) : "";
     object_property_set_str(OBJECT(dev), bdrv_name,
-                            name, &errp);
-    if (errp) {
-        qerror_report_err(errp);
-        error_free(errp);
+                            name, &err);
+    if (err) {
+        qerror_report_err(err);
+        error_free(err);
         return -1;
     }
     return 0;
@@ -439,11 +439,27 @@ PropertyInfo qdev_prop_iothread = {
 static int qdev_add_one_global(QemuOpts *opts, void *opaque)
 {
     GlobalProperty *g;
+    ObjectClass *oc;
 
     g = g_malloc0(sizeof(*g));
     g->driver   = qemu_opt_get(opts, "driver");
     g->property = qemu_opt_get(opts, "property");
     g->value    = qemu_opt_get(opts, "value");
+    oc = object_class_by_name(g->driver);
+    if (oc) {
+        DeviceClass *dc = DEVICE_CLASS(oc);
+
+        if (dc->hotpluggable) {
+            /* If hotpluggable then skip not_used checking. */
+            g->not_used = false;
+        } else {
+            /* Maybe a typo. */
+            g->not_used = true;
+        }
+    } else {
+        /* Maybe a typo. */
+        g->not_used = true;
+    }
     qdev_prop_register_global(g);
     return 0;
 }

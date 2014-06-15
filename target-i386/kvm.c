@@ -30,6 +30,8 @@
 #include "qemu/config-file.h"
 #include "hw/i386/pc.h"
 #include "hw/i386/apic.h"
+#include "hw/i386/apic_internal.h"
+#include "hw/i386/apic-msidef.h"
 #include "exec/ioport.h"
 #include <asm/hyperv.h>
 #include "hw/pci/pci.h"
@@ -122,7 +124,7 @@ static struct kvm_cpuid2 *get_supported_cpuid(KVMState *s)
     return cpuid;
 }
 
-struct kvm_para_features {
+static const struct kvm_para_features {
     int cap;
     int feature;
 } para_features[] = {
@@ -130,14 +132,13 @@ struct kvm_para_features {
     { KVM_CAP_NOP_IO_DELAY, KVM_FEATURE_NOP_IO_DELAY },
     { KVM_CAP_PV_MMU, KVM_FEATURE_MMU_OP },
     { KVM_CAP_ASYNC_PF, KVM_FEATURE_ASYNC_PF },
-    { -1, -1 }
 };
 
 static int get_para_features(KVMState *s)
 {
     int i, features = 0;
 
-    for (i = 0; i < ARRAY_SIZE(para_features) - 1; i++) {
+    for (i = 0; i < ARRAY_SIZE(para_features); i++) {
         if (kvm_check_extension(s, para_features[i].cap)) {
             features |= (1 << para_features[i].feature);
         }
@@ -527,23 +528,25 @@ int kvm_arch_init_vcpu(CPUState *cs)
         has_msr_hv_hypercall = true;
     }
 
-    memcpy(signature, "KVMKVMKVM\0\0\0", 12);
-    c = &cpuid_data.entries[cpuid_i++];
-    c->function = KVM_CPUID_SIGNATURE | kvm_base;
-    c->eax = 0;
-    c->ebx = signature[0];
-    c->ecx = signature[1];
-    c->edx = signature[2];
+    if (cpu->expose_kvm) {
+        memcpy(signature, "KVMKVMKVM\0\0\0", 12);
+        c = &cpuid_data.entries[cpuid_i++];
+        c->function = KVM_CPUID_SIGNATURE | kvm_base;
+        c->eax = KVM_CPUID_FEATURES | kvm_base;
+        c->ebx = signature[0];
+        c->ecx = signature[1];
+        c->edx = signature[2];
 
-    c = &cpuid_data.entries[cpuid_i++];
-    c->function = KVM_CPUID_FEATURES | kvm_base;
-    c->eax = env->features[FEAT_KVM];
+        c = &cpuid_data.entries[cpuid_i++];
+        c->function = KVM_CPUID_FEATURES | kvm_base;
+        c->eax = env->features[FEAT_KVM];
 
-    has_msr_async_pf_en = c->eax & (1 << KVM_FEATURE_ASYNC_PF);
+        has_msr_async_pf_en = c->eax & (1 << KVM_FEATURE_ASYNC_PF);
 
-    has_msr_pv_eoi_en = c->eax & (1 << KVM_FEATURE_PV_EOI);
+        has_msr_pv_eoi_en = c->eax & (1 << KVM_FEATURE_PV_EOI);
 
-    has_msr_kvm_steal_time = c->eax & (1 << KVM_FEATURE_STEAL_TIME);
+        has_msr_kvm_steal_time = c->eax & (1 << KVM_FEATURE_STEAL_TIME);
+    }
 
     cpu_x86_cpuid(env, 0, 0, &limit, &unused, &unused, &unused);
 
@@ -724,9 +727,8 @@ int kvm_arch_init_vcpu(CPUState *cs)
     return 0;
 }
 
-void kvm_arch_reset_vcpu(CPUState *cs)
+void kvm_arch_reset_vcpu(X86CPU *cpu)
 {
-    X86CPU *cpu = X86_CPU(cs);
     CPUX86State *env = &cpu->env;
 
     env->exception_injected = -1;
@@ -737,6 +739,16 @@ void kvm_arch_reset_vcpu(CPUState *cs)
                                           KVM_MP_STATE_UNINITIALIZED;
     } else {
         env->mp_state = KVM_MP_STATE_RUNNABLE;
+    }
+}
+
+void kvm_arch_do_init_vcpu(X86CPU *cpu)
+{
+    CPUX86State *env = &cpu->env;
+
+    /* APs get directly into wait-for-SIPI state.  */
+    if (env->mp_state == KVM_MP_STATE_UNINITIALIZED) {
+        env->mp_state = KVM_MP_STATE_INIT_RECEIVED;
     }
 }
 
@@ -1420,7 +1432,7 @@ static int kvm_get_sregs(X86CPU *cpu)
        HF_OSFXSR_MASK | HF_LMA_MASK | HF_CS32_MASK | \
        HF_SS32_MASK | HF_CS64_MASK | HF_ADDSEG_MASK)
 
-    hflags = (env->segs[R_CS].flags >> DESC_DPL_SHIFT) & HF_CPL_MASK;
+    hflags = (env->segs[R_SS].flags >> DESC_DPL_SHIFT) & HF_CPL_MASK;
     hflags |= (env->cr[0] & CR0_PE_MASK) << (HF_PE_SHIFT - CR0_PE_SHIFT);
     hflags |= (env->cr[0] << (HF_MP_SHIFT - CR0_MP_SHIFT)) &
                 (HF_MP_MASK | HF_EM_MASK | HF_TS_MASK);
@@ -2005,14 +2017,15 @@ void kvm_arch_pre_run(CPUState *cpu, struct kvm_run *run)
         }
     }
 
-    if (!kvm_irqchip_in_kernel()) {
-        /* Force the VCPU out of its inner loop to process any INIT requests
-         * or pending TPR access reports. */
-        if (cpu->interrupt_request &
-            (CPU_INTERRUPT_INIT | CPU_INTERRUPT_TPR)) {
-            cpu->exit_request = 1;
-        }
+    /* Force the VCPU out of its inner loop to process any INIT requests
+     * or (for userspace APIC, but it is cheap to combine the checks here)
+     * pending TPR access reports.
+     */
+    if (cpu->interrupt_request & (CPU_INTERRUPT_INIT | CPU_INTERRUPT_TPR)) {
+        cpu->exit_request = 1;
+    }
 
+    if (!kvm_irqchip_in_kernel()) {
         /* Try to inject an interrupt if the guest can accept it */
         if (run->ready_for_interrupt_injection &&
             (cpu->interrupt_request & CPU_INTERRUPT_HARD) &&
@@ -2092,6 +2105,11 @@ int kvm_arch_process_async_events(CPUState *cs)
         }
     }
 
+    if (cs->interrupt_request & CPU_INTERRUPT_INIT) {
+        kvm_cpu_synchronize_state(cs);
+        do_cpu_init(cpu);
+    }
+
     if (kvm_irqchip_in_kernel()) {
         return 0;
     }
@@ -2104,10 +2122,6 @@ int kvm_arch_process_async_events(CPUState *cs)
          (env->eflags & IF_MASK)) ||
         (cs->interrupt_request & CPU_INTERRUPT_NMI)) {
         cs->halted = 0;
-    }
-    if (cs->interrupt_request & CPU_INTERRUPT_INIT) {
-        kvm_cpu_synchronize_state(cs);
-        do_cpu_init(cpu);
     }
     if (cs->interrupt_request & CPU_INTERRUPT_SIPI) {
         kvm_cpu_synchronize_state(cs);

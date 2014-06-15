@@ -30,8 +30,6 @@
 # define AI_ADDRCONFIG 0
 #endif
 
-static const int on=1, off=0;
-
 /* used temporarily until all users are converted to QemuOpts */
 QemuOptsList socket_optslist = {
     .name = "socket",
@@ -159,6 +157,7 @@ int inet_listen_opts(QemuOpts *opts, int port_offset, Error **errp)
 #ifdef IPV6_V6ONLY
         if (e->ai_family == PF_INET6) {
             /* listen on both ipv4 and ipv6 */
+            const int off = 0;
             qemu_setsockopt(slisten, IPPROTO_IPV6, IPV6_V6ONLY, &off,
                             sizeof(off));
         }
@@ -354,6 +353,7 @@ static struct addrinfo *inet_parse_connect_opts(QemuOpts *opts, Error **errp)
 int inet_connect_opts(QemuOpts *opts, Error **errp,
                       NonBlockingConnectHandler *callback, void *opaque)
 {
+    Error *local_err = NULL;
     struct addrinfo *res, *e;
     int sock = -1;
     bool in_progress;
@@ -372,22 +372,25 @@ int inet_connect_opts(QemuOpts *opts, Error **errp,
     }
 
     for (e = res; e != NULL; e = e->ai_next) {
-        if (error_is_set(errp)) {
-            error_free(*errp);
-            *errp = NULL;
-        }
+        error_free(local_err);
+        local_err = NULL;
         if (connect_state != NULL) {
             connect_state->current_addr = e;
         }
-        sock = inet_connect_addr(e, &in_progress, connect_state, errp);
-        if (in_progress) {
-            return sock;
-        } else if (sock >= 0) {
-            /* non blocking socket immediate success, call callback */
-            if (callback != NULL) {
-                callback(sock, opaque);
-            }
+        sock = inet_connect_addr(e, &in_progress, connect_state, &local_err);
+        if (sock >= 0) {
             break;
+        }
+    }
+
+    if (sock < 0) {
+        error_propagate(errp, local_err);
+    } else if (in_progress) {
+        /* wait_for_connect() will do the rest */
+        return sock;
+    } else {
+        if (callback) {
+            callback(sock, opaque);
         }
     }
     g_free(connect_state);

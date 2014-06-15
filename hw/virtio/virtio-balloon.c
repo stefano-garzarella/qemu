@@ -108,25 +108,37 @@ static void balloon_stats_poll_cb(void *opaque)
 static void balloon_stats_get_all(Object *obj, struct Visitor *v,
                                   void *opaque, const char *name, Error **errp)
 {
+    Error *err = NULL;
     VirtIOBalloon *s = opaque;
     int i;
 
-    if (!s->stats_last_update) {
-        error_setg(errp, "guest hasn't updated any stats yet");
-        return;
+    visit_start_struct(v, NULL, "guest-stats", name, 0, &err);
+    if (err) {
+        goto out;
+    }
+    visit_type_int(v, &s->stats_last_update, "last-update", &err);
+    if (err) {
+        goto out_end;
     }
 
-    visit_start_struct(v, NULL, "guest-stats", name, 0, errp);
-    visit_type_int(v, &s->stats_last_update, "last-update", errp);
-
-    visit_start_struct(v, NULL, NULL, "stats", 0, errp);
-    for (i = 0; i < VIRTIO_BALLOON_S_NR; i++) {
+    visit_start_struct(v, NULL, NULL, "stats", 0, &err);
+    if (err) {
+        goto out_end;
+    }
+    for (i = 0; !err && i < VIRTIO_BALLOON_S_NR; i++) {
         visit_type_int64(v, (int64_t *) &s->stats[i], balloon_stat_names[i],
-                         errp);
+                         &err);
     }
-    visit_end_struct(v, errp);
+    error_propagate(errp, err);
+    err = NULL;
+    visit_end_struct(v, &err);
 
-    visit_end_struct(v, errp);
+out_end:
+    error_propagate(errp, err);
+    err = NULL;
+    visit_end_struct(v, &err);
+out:
+    error_propagate(errp, err);
 }
 
 static void balloon_stats_get_poll_interval(Object *obj, struct Visitor *v,
@@ -142,10 +154,12 @@ static void balloon_stats_set_poll_interval(Object *obj, struct Visitor *v,
                                             Error **errp)
 {
     VirtIOBalloon *s = opaque;
+    Error *local_err = NULL;
     int64_t value;
 
-    visit_type_int(v, &value, name, errp);
-    if (error_is_set(errp)) {
+    visit_type_int(v, &value, name, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         return;
     }
 
@@ -358,6 +372,8 @@ static void virtio_balloon_device_realize(DeviceState *dev, Error **errp)
     s->ivq = virtio_add_queue(vdev, 128, virtio_balloon_handle_output);
     s->dvq = virtio_add_queue(vdev, 128, virtio_balloon_handle_output);
     s->svq = virtio_add_queue(vdev, 128, virtio_balloon_receive_stats);
+
+    reset_stats(s);
 
     register_savevm(dev, "virtio-balloon", -1, 1,
                     virtio_balloon_save, virtio_balloon_load, s);
