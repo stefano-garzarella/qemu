@@ -557,6 +557,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
          * RADV and TADV, 256ns units for ITR). RDTR is only used to enable
          * RADV; relative timers based on TIDV and RDTR are not implemented.
          */
+#ifndef CONFIG_NETMAP_PASSTHROUGH
         if (s->mit_timer_on) {
             return;
         }
@@ -571,6 +572,7 @@ set_interrupt_cause(E1000State *s, int index, uint32_t val)
 		return;
 	}
 #endif /* CONFIG_E1000_PARAVIRT */
+#endif /* !CONFIG_NETMAP_PASSTHROUGH */
         if (s->compat_flags & E1000_FLAG_MIT) {
             /* Compute the next mitigation delay according to pending
              * interrupts and the current values of RADV (provided
@@ -677,6 +679,7 @@ rxbufsize(uint32_t v)
 static void e1000_peer_async_callback(void *opaque);
 
 #ifdef CONFIG_E1000_PARAVIRT
+#if 0
 static bool peer_has_vnet_hdr(E1000State *s)
 {
     NetClientState * nc = s->nic->ncs;
@@ -687,6 +690,7 @@ static bool peer_has_vnet_hdr(E1000State *s)
 
     return qemu_has_vnet_hdr(nc->peer);
 }
+#endif
 
 static struct netmap_pt*
 peer_get_netmap_pt(E1000State *s)
@@ -2085,7 +2089,7 @@ e1000_notify_netmap_pt(NetClientState *nc, int dir)
     E1000State *s = qemu_get_nic_opaque(nc);
 
     ND(3, "");
-    set_ics(s, 0, (dir == NETMAP_PT_RX ? E1000_ICS_RXT0 : E1000_ICS_TXQE));
+    set_ics(s, 0, (dir == NETMAP_PT_RX ? E1000_ICS_RXT0 : E1000_ICS_TXDW));
     return 0;
 }
 
@@ -2172,8 +2176,10 @@ set_32bit(E1000State *s, int index, uint32_t val)
 
     s->mac_reg[index] = val;
     if (index == CSBAL) {
+#if 0
 	hwaddr vnet_hdr_phi;
 	hwaddr len;
+#endif
 
 	paravirt_configure_csb(&s->csb, s->mac_reg[CSBAL], s->mac_reg[CSBAH],
 				s->tx_bh, pci_get_address_space(d));

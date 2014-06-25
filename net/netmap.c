@@ -501,11 +501,25 @@ static int netmap_pt_can_send(void *opaque)
     return 1;
 }
 
-static void netmap_notify_tx(void *opaque)
+static void netmap_pt_update_fd_handler(NetmapState *s);
+static void netmap_pt_notify_tx(void *opaque)
 {
+    NetmapState *s = opaque;
+    NetmapPTState *pt = &s->netmap_pt;
+
+    if (!pt->started)
+        return;
+    if (s->nc.peer->info->notify_netmap_pt)
+        s->nc.peer->info->notify_netmap_pt(s->nc.peer, NETMAP_PT_TX);
+    s->write_poll = false;
+    netmap_pt_update_fd_handler(s);
+    if (nm_ring_empty(s->txr)) {
+        s->write_poll = true;
+        netmap_pt_update_fd_handler(s);
+    }
 }
 
-static void netmap_notify_rx(void *opaque)
+static void netmap_pt_notify_rx(void *opaque)
 {
     NetmapState *s = opaque;
     NetmapPTState *pt = &s->netmap_pt;
@@ -514,11 +528,17 @@ static void netmap_notify_rx(void *opaque)
         return;
     if (s->nc.peer->info->notify_netmap_pt)
         s->nc.peer->info->notify_netmap_pt(s->nc.peer, NETMAP_PT_RX);
-    qemu_set_fd_handler2(s->nmd->fd,
-                         netmap_pt_can_send,
-                         NULL,
-                         NULL,
-                         s);
+    s->read_poll = false;
+    netmap_pt_update_fd_handler(s);
+}
+
+static void netmap_pt_update_fd_handler(NetmapState *s)
+{
+        qemu_set_fd_handler2(s->nmd->fd,
+                s->read_poll  ? netmap_pt_can_send  : NULL,
+                s->read_poll  ? netmap_pt_notify_rx : NULL,
+                s->write_poll ? netmap_pt_notify_tx : NULL,
+                s);
 }
 
 int netmap_pt_start(NetmapPTState *pt)
@@ -530,7 +550,7 @@ int netmap_pt_start(NetmapPTState *pt)
 
     qemu_set_fd_handler2(n->nmd->fd,
                          netmap_pt_can_send,
-                         netmap_notify_rx,
+                         netmap_pt_notify_rx,
                          NULL,
                          n);
     pt->started = true;
@@ -556,7 +576,7 @@ netmap_pt_rxsync(NetmapPTState *nc)
         return EINVAL;
     qemu_set_fd_handler2(n->nmd->fd,
                          netmap_pt_can_send,
-                         netmap_notify_rx,
+                         netmap_pt_notify_rx,
                          NULL,
                          n);
     return 0;
