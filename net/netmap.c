@@ -487,11 +487,48 @@ int net_init_netmap(const NetClientOptions *opts,
     NetClientState *nc;
     struct nm_desc *nmd;
     NetmapState *s;
+    uint64_t flags = NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL;
+    struct nm_desc cfg;
 
-    nmd = nm_open(netmap_opts->ifname, NULL, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL, NULL);
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.self = &cfg;
+
+    if (netmap_opts->rings) {
+        cfg.req.nr_tx_rings = netmap_opts->rings;
+        cfg.req.nr_rx_rings = netmap_opts->rings;
+	flags |= NM_OPEN_RING_CFG;
+    }
+    if (netmap_opts->slots) {
+        cfg.req.nr_tx_slots = netmap_opts->slots;
+        cfg.req.nr_rx_slots = netmap_opts->slots;
+	flags |= NM_OPEN_RING_CFG;
+    }
+    if (netmap_opts->txrings) {
+	cfg.req.nr_tx_rings = netmap_opts->txrings;
+	flags |= NM_OPEN_RING_CFG;
+    }
+    if (netmap_opts->rxrings) {
+	cfg.req.nr_rx_rings = netmap_opts->rxrings;
+	flags |= NM_OPEN_RING_CFG;
+    }
+    if (netmap_opts->txslots) {
+	cfg.req.nr_tx_slots = netmap_opts->txslots;
+	flags |= NM_OPEN_RING_CFG;
+    }
+    if (netmap_opts->rxslots) {
+	cfg.req.nr_rx_slots = netmap_opts->txslots;
+	flags |= NM_OPEN_RING_CFG;
+    }
+
+    nmd = nm_open(netmap_opts->ifname, &cfg.req, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL, &cfg);
     if (nmd == NULL) {
         return -1;
     }
+    D("cfg: tx %d*%d rx %d*%d",
+        nmd->req.nr_tx_slots,
+        nmd->req.nr_tx_rings,
+        nmd->req.nr_rx_slots,
+        nmd->req.nr_rx_rings);
     /* Create the object. */
     nc = qemu_new_net_client(&net_netmap_info, peer, "netmap", name);
     s = DO_UPCAST(NetmapState, nc, nc);

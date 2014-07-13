@@ -1435,7 +1435,7 @@ DEF("net", HAS_ARG, QEMU_OPTION_net,
     "                ownership and permissions for communication port.\n"
 #endif
 #ifdef CONFIG_NETMAP
-    "-net netmap,ifname=name[,devname=nmname]\n"
+    "-net netmap,ifname=name[,devname=nmname][,rings=int][,slots=int][,txrings=int][,rxrings][,txslots=int][,rxslots=int]\n"
     "                attach to the existing netmap-enabled network interface 'name', or to a\n"
     "                VALE port (created on the fly) called 'name' ('nmname' is name of the \n"
     "                netmap device, defaults to '/dev/netmap')\n"

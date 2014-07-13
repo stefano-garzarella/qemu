@@ -2063,13 +2063,31 @@
 #
 # @vhost: #optional vhost accelerator
 #
+# @rings: #optional number of ring pairs
+#
+# @slots: #optional number of slots per ring
+#
+# @txrings: #optional number of tx rings
+#
+# @txslots: #optional number of slots per tx ring
+#
+# @rxrings: #optional number of rx rings
+#
+# @rxslots: #optional number of slots per rx ring
+#
 # Since 2.0
 ##
 { 'type': 'NetdevNetmapOptions',
   'data': {
     'ifname':       'str',
     '*devname':     'str',
-    '*vhost' :      'bool' } }
+    '*vhost' :      'bool',
+    '*rings' :      'int',
+    '*slots' :      'int',
+    '*txrings' :    'int',
+    '*txslots' :    'int',
+    '*rxrings' :    'int',
+    '*rxslots' :    'int' }}
 
 ##
 # @NetClientOptions
