@@ -239,7 +239,7 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
         while (iov_frag_size) {
             nm_frag_size = MIN(iov_frag_size, ring->nr_buf_size);
 
-            if (unlikely(nm_ring_empty(ring))) {
+            if (unlikely(i == ring->tail)) {
                 /* We run out of netmap slots while splitting the
                    iovec fragments. */
                 netmap_write_poll(s, true);
