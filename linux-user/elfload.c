@@ -736,6 +736,14 @@ enum {
 
     QEMU_PPC_FEATURE_TRUE_LE = 0x00000002,
     QEMU_PPC_FEATURE_PPC_LE = 0x00000001,
+
+    /* Feature definitions in AT_HWCAP2.  */
+    QEMU_PPC_FEATURE2_ARCH_2_07 = 0x80000000, /* ISA 2.07 */
+    QEMU_PPC_FEATURE2_HAS_HTM = 0x40000000, /* Hardware Transactional Memory */
+    QEMU_PPC_FEATURE2_HAS_DSCR = 0x20000000, /* Data Stream Control Register */
+    QEMU_PPC_FEATURE2_HAS_EBB = 0x10000000, /* Event Base Branching */
+    QEMU_PPC_FEATURE2_HAS_ISEL = 0x08000000, /* Integer Select */
+    QEMU_PPC_FEATURE2_HAS_TAR = 0x04000000, /* Target Address Register */
 };
 
 #define ELF_HWCAP get_elf_hwcap()
@@ -749,6 +757,8 @@ static uint32_t get_elf_hwcap(void)
        Altivec/FP/SPE support.  Anything else is just a bonus.  */
 #define GET_FEATURE(flag, feature)                                      \
     do { if (cpu->env.insns_flags & flag) { features |= feature; } } while (0)
+#define GET_FEATURE2(flag, feature)                                      \
+    do { if (cpu->env.insns_flags2 & flag) { features |= feature; } } while (0)
     GET_FEATURE(PPC_64B, QEMU_PPC_FEATURE_64);
     GET_FEATURE(PPC_FLOAT, QEMU_PPC_FEATURE_HAS_FPU);
     GET_FEATURE(PPC_ALTIVEC, QEMU_PPC_FEATURE_HAS_ALTIVEC);
@@ -757,7 +767,36 @@ static uint32_t get_elf_hwcap(void)
     GET_FEATURE(PPC_SPE_DOUBLE, QEMU_PPC_FEATURE_HAS_EFP_DOUBLE);
     GET_FEATURE(PPC_BOOKE, QEMU_PPC_FEATURE_BOOKE);
     GET_FEATURE(PPC_405_MAC, QEMU_PPC_FEATURE_HAS_4xxMAC);
+    GET_FEATURE2(PPC2_DFP, QEMU_PPC_FEATURE_HAS_DFP);
+    GET_FEATURE2(PPC2_VSX, QEMU_PPC_FEATURE_HAS_VSX);
+    GET_FEATURE2((PPC2_PERM_ISA206 | PPC2_DIVE_ISA206 | PPC2_ATOMIC_ISA206 |
+                  PPC2_FP_CVT_ISA206 | PPC2_FP_TST_ISA206),
+                  QEMU_PPC_FEATURE_ARCH_2_06);
 #undef GET_FEATURE
+#undef GET_FEATURE2
+
+    return features;
+}
+
+#define ELF_HWCAP2 get_elf_hwcap2()
+
+static uint32_t get_elf_hwcap2(void)
+{
+    PowerPCCPU *cpu = POWERPC_CPU(thread_cpu);
+    uint32_t features = 0;
+
+#define GET_FEATURE(flag, feature)                                      \
+    do { if (cpu->env.insns_flags & flag) { features |= feature; } } while (0)
+#define GET_FEATURE2(flag, feature)                                      \
+    do { if (cpu->env.insns_flags2 & flag) { features |= feature; } } while (0)
+
+    GET_FEATURE(PPC_ISEL, QEMU_PPC_FEATURE2_HAS_ISEL);
+    GET_FEATURE2(PPC2_BCTAR_ISA207, QEMU_PPC_FEATURE2_HAS_TAR);
+    GET_FEATURE2((PPC2_BCTAR_ISA207 | PPC2_LSQ_ISA207 | PPC2_ALTIVEC_207 |
+                  PPC2_ISA207S), QEMU_PPC_FEATURE2_ARCH_2_07);
+
+#undef GET_FEATURE
+#undef GET_FEATURE2
 
     return features;
 }
@@ -774,8 +813,9 @@ static uint32_t get_elf_hwcap(void)
 #define DLINFO_ARCH_ITEMS       5
 #define ARCH_DLINFO                                     \
     do {                                                \
-        NEW_AUX_ENT(AT_DCACHEBSIZE, 0x20);              \
-        NEW_AUX_ENT(AT_ICACHEBSIZE, 0x20);              \
+        PowerPCCPU *cpu = POWERPC_CPU(thread_cpu);              \
+        NEW_AUX_ENT(AT_DCACHEBSIZE, cpu->env.dcache_line_size); \
+        NEW_AUX_ENT(AT_ICACHEBSIZE, cpu->env.icache_line_size); \
         NEW_AUX_ENT(AT_UCACHEBSIZE, 0);                 \
         /*                                              \
          * Now handle glibc compatibility.              \
@@ -784,12 +824,18 @@ static uint32_t get_elf_hwcap(void)
         NEW_AUX_ENT(AT_IGNOREPPC, AT_IGNOREPPC);        \
     } while (0)
 
+static inline uint32_t get_ppc64_abi(struct image_info *infop);
+
 static inline void init_thread(struct target_pt_regs *_regs, struct image_info *infop)
 {
     _regs->gpr[1] = infop->start_stack;
 #if defined(TARGET_PPC64) && !defined(TARGET_ABI32)
-    _regs->gpr[2] = ldq_raw(infop->entry + 8) + infop->load_bias;
-    infop->entry = ldq_raw(infop->entry) + infop->load_bias;
+    if (get_ppc64_abi(infop) < 2) {
+        _regs->gpr[2] = ldq_raw(infop->entry + 8) + infop->load_bias;
+        infop->entry = ldq_raw(infop->entry) + infop->load_bias;
+    } else {
+        _regs->gpr[12] = infop->entry;  /* r12 set to global entry address */
+    }
 #endif
     _regs->nip = infop->entry;
 }
@@ -1159,6 +1205,13 @@ static inline void init_thread(struct target_pt_regs *regs, struct image_info *i
 
 #include "elf.h"
 
+#ifdef TARGET_PPC
+static inline uint32_t get_ppc64_abi(struct image_info *infop)
+{
+  return infop->elf_flags & EF_PPC64_ABI;
+}
+#endif
+
 struct exec
 {
     unsigned int a_info;   /* Use macros N_MAGIC, etc for access */
@@ -1279,7 +1332,6 @@ static bool elf_check_ehdr(struct elfhdr *ehdr)
     return (elf_check_arch(ehdr->e_machine)
             && ehdr->e_ehsize == sizeof(struct elfhdr)
             && ehdr->e_phentsize == sizeof(struct elf_phdr)
-            && ehdr->e_shentsize == sizeof(struct elf_shdr)
             && (ehdr->e_type == ET_EXEC || ehdr->e_type == ET_DYN));
 }
 
@@ -1412,10 +1464,11 @@ static void zero_bss(abi_ulong elf_bss, abi_ulong last_bss, int prot)
             perror("cannot mmap brk");
             exit(-1);
         }
+    }
 
-        /* Since we didn't use target_mmap, make sure to record
-           the validity of the pages with qemu.  */
-        page_set_flags(elf_bss & TARGET_PAGE_MASK, last_bss, prot|PAGE_VALID);
+    /* Ensure that the bss page(s) are valid */
+    if ((page_get_flags(last_bss-1) & prot) != prot) {
+        page_set_flags(elf_bss & TARGET_PAGE_MASK, last_bss, prot | PAGE_VALID);
     }
 
     if (host_start < host_map_start) {
@@ -1538,7 +1591,7 @@ static abi_ulong create_elf_tables(abi_ulong p, int argc, int envc,
     NEW_AUX_ENT(AT_PHDR, (abi_ulong)(info->load_addr + exec->e_phoff));
     NEW_AUX_ENT(AT_PHENT, (abi_ulong)(sizeof (struct elf_phdr)));
     NEW_AUX_ENT(AT_PHNUM, (abi_ulong)(exec->e_phnum));
-    NEW_AUX_ENT(AT_PAGESZ, (abi_ulong)(TARGET_PAGE_SIZE));
+    NEW_AUX_ENT(AT_PAGESZ, (abi_ulong)(MAX(TARGET_PAGE_SIZE, getpagesize())));
     NEW_AUX_ENT(AT_BASE, (abi_ulong)(interp_info ? interp_info->load_addr : 0));
     NEW_AUX_ENT(AT_FLAGS, (abi_ulong)0);
     NEW_AUX_ENT(AT_ENTRY, info->entry);

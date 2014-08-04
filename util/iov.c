@@ -295,15 +295,15 @@ void qemu_iovec_add(QEMUIOVector *qiov, void *base, size_t len)
  * of src".
  * Only vector pointers are processed, not the actual data buffers.
  */
-void qemu_iovec_concat_iov(QEMUIOVector *dst,
-                           struct iovec *src_iov, unsigned int src_cnt,
-                           size_t soffset, size_t sbytes)
+size_t qemu_iovec_concat_iov(QEMUIOVector *dst,
+                             struct iovec *src_iov, unsigned int src_cnt,
+                             size_t soffset, size_t sbytes)
 {
     int i;
     size_t done;
 
     if (!sbytes) {
-        return;
+        return 0;
     }
     assert(dst->nalloc != -1);
     for (i = 0, done = 0; done < sbytes && i < src_cnt; i++) {
@@ -317,6 +317,8 @@ void qemu_iovec_concat_iov(QEMUIOVector *dst,
         }
     }
     assert(soffset == 0); /* offset beyond end of src */
+
+    return done;
 }
 
 /*
@@ -547,4 +549,17 @@ size_t iov_discard_back(struct iovec *iov, unsigned int *iov_cnt,
     }
 
     return total;
+}
+
+void qemu_iovec_discard_back(QEMUIOVector *qiov, size_t bytes)
+{
+    size_t total;
+    unsigned int niov = qiov->niov;
+
+    assert(qiov->size >= bytes);
+    total = iov_discard_back(qiov->iov, &niov, bytes);
+    assert(total == bytes);
+
+    qiov->niov = niov;
+    qiov->size -= bytes;
 }

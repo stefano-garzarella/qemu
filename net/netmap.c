@@ -541,7 +541,23 @@ int net_init_netmap(const NetClientOptions *opts,
     s->txsync_callback = s->txsync_callback_arg = NULL;
 
     if (netmap_opts->has_vhost && netmap_opts->vhost) {
-        s->vhost_net = vhost_net_init(&s->nc, -1, 0);
+        VhostNetOptions options;
+        int vhostfd;
+
+        vhostfd = open("/dev/vhost-net", O_RDWR);
+        if (vhostfd < 0) {
+            error_report("netmap: open vhost char device failed: %s",
+                         strerror(errno));
+            return -1;
+        }
+
+        memset(&options, 0, sizeof(options));
+        options.backend_type = VHOST_BACKEND_TYPE_KERNEL;
+        options.net_backend = &s->nc;
+        options.force = 0;
+        options.opaque = (void *)(uintptr_t)vhostfd;
+
+        s->vhost_net = vhost_net_init(&options);
         if (!s->vhost_net) {
             error_report("vhost-net requested but could not be initialized");
             return -1;

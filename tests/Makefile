@@ -27,6 +27,8 @@ check-unit-y += tests/test-string-input-visitor$(EXESUF)
 gcov-files-test-string-input-visitor-y = qapi/string-input-visitor.c
 check-unit-y += tests/test-string-output-visitor$(EXESUF)
 gcov-files-test-string-output-visitor-y = qapi/string-output-visitor.c
+check-unit-y += tests/test-qmp-event$(EXESUF)
+gcov-files-test-qmp-event-y += qapi/qmp-event.c
 check-unit-y += tests/test-opts-visitor$(EXESUF)
 gcov-files-test-opts-visitor-y = qapi/opts-visitor.c
 check-unit-y += tests/test-coroutine$(EXESUF)
@@ -139,6 +141,8 @@ check-qtest-i386-y += tests/i440fx-test$(EXESUF)
 check-qtest-i386-y += tests/fw_cfg-test$(EXESUF)
 check-qtest-i386-y += tests/blockdev-test$(EXESUF)
 check-qtest-i386-y += tests/qdev-monitor-test$(EXESUF)
+check-qtest-i386-y += tests/wdt_ib700-test$(EXESUF)
+gcov-files-i386-y += hw/watchdog/watchdog.c hw/watchdog/wdt_ib700.c
 check-qtest-i386-y += $(check-qtest-pci-y)
 gcov-files-i386-y += $(gcov-files-pci-y)
 check-qtest-i386-y += tests/vmxnet3-test$(EXESUF)
@@ -156,6 +160,7 @@ gcov-files-i386-y += hw/usb/hcd-ehci.c
 gcov-files-i386-y += hw/usb/hcd-uhci.c
 gcov-files-i386-y += hw/usb/dev-hid.c
 gcov-files-i386-y += hw/usb/dev-storage.c
+check-qtest-i386-$(CONFIG_LINUX) += tests/vhost-user-test$(EXESUF)
 check-qtest-x86_64-y = $(check-qtest-i386-y)
 gcov-files-i386-y += i386-softmmu/hw/timer/mc146818rtc.c
 gcov-files-x86_64-y = $(subst i386-softmmu/,x86_64-softmmu/,$(gcov-files-i386-y))
@@ -198,9 +203,10 @@ check-qapi-schema-y := $(addprefix tests/qapi-schema/, \
         include-simple.json include-relpath.json include-format-err.json \
         include-non-file.json include-no-file.json include-before-err.json \
         include-nested-err.json include-self-cycle.json include-cycle.json \
-        include-repetition.json)
+        include-repetition.json event-nest-struct.json)
 
-GENERATED_HEADERS += tests/test-qapi-types.h tests/test-qapi-visit.h tests/test-qmp-commands.h
+GENERATED_HEADERS += tests/test-qapi-types.h tests/test-qapi-visit.h \
+                     tests/test-qmp-commands.h tests/test-qapi-event.h
 
 test-obj-y = tests/check-qint.o tests/check-qstring.o tests/check-qdict.o \
 	tests/check-qlist.o tests/check-qfloat.o tests/check-qjson.o \
@@ -209,9 +215,10 @@ test-obj-y = tests/check-qint.o tests/check-qstring.o tests/check-qdict.o \
 	tests/test-qmp-input-visitor.o tests/test-qmp-input-strict.o \
 	tests/test-qmp-commands.o tests/test-visitor-serialization.o \
 	tests/test-x86-cpuid.o tests/test-mul64.o tests/test-int128.o \
-	tests/test-opts-visitor.o
+	tests/test-opts-visitor.o tests/test-qmp-event.o
 
-test-qapi-obj-y = tests/test-qapi-visit.o tests/test-qapi-types.o
+test-qapi-obj-y = tests/test-qapi-visit.o tests/test-qapi-types.o \
+                  tests/test-qapi-event.o
 
 $(test-obj-y): QEMU_INCLUDES += -Itests
 QEMU_CFLAGS += -I$(SRC_PATH)/tests
@@ -263,9 +270,15 @@ $(SRC_PATH)/tests/qapi-schema/qapi-schema-test.json $(SRC_PATH)/scripts/qapi-com
 	$(call quiet-command,$(PYTHON) $(SRC_PATH)/scripts/qapi-commands.py \
 		$(gen-out-type) -o tests -p "test-" -i $<, \
 		"  GEN   $@")
+tests/test-qapi-event.c tests/test-qapi-event.h :\
+$(SRC_PATH)/tests/qapi-schema/qapi-schema-test.json $(SRC_PATH)/scripts/qapi-event.py
+	$(call quiet-command,$(PYTHON) $(SRC_PATH)/scripts/qapi-event.py \
+		$(gen-out-type) -o tests -p "test-" -i $<, \
+		"  GEN   $@")
 
 tests/test-string-output-visitor$(EXESUF): tests/test-string-output-visitor.o $(test-qapi-obj-y) libqemuutil.a libqemustub.a
 tests/test-string-input-visitor$(EXESUF): tests/test-string-input-visitor.o $(test-qapi-obj-y) libqemuutil.a libqemustub.a
+tests/test-qmp-event$(EXESUF): tests/test-qmp-event.o $(test-qapi-obj-y) libqemuutil.a libqemustub.a
 tests/test-qmp-output-visitor$(EXESUF): tests/test-qmp-output-visitor.o $(test-qapi-obj-y) libqemuutil.a libqemustub.a
 tests/test-qmp-input-visitor$(EXESUF): tests/test-qmp-input-visitor.o $(test-qapi-obj-y) libqemuutil.a libqemustub.a
 tests/test-qmp-input-strict$(EXESUF): tests/test-qmp-input-strict.o $(test-qapi-obj-y) libqemuutil.a libqemustub.a
@@ -300,6 +313,7 @@ tests/pcnet-test$(EXESUF): tests/pcnet-test.o
 tests/eepro100-test$(EXESUF): tests/eepro100-test.o
 tests/vmxnet3-test$(EXESUF): tests/vmxnet3-test.o
 tests/ne2000-test$(EXESUF): tests/ne2000-test.o
+tests/wdt_ib700-test$(EXESUF): tests/wdt_ib700-test.o
 tests/virtio-balloon-test$(EXESUF): tests/virtio-balloon-test.o
 tests/virtio-blk-test$(EXESUF): tests/virtio-blk-test.o
 tests/virtio-net-test$(EXESUF): tests/virtio-net-test.o
@@ -322,8 +336,13 @@ tests/es1370-test$(EXESUF): tests/es1370-test.o
 tests/intel-hda-test$(EXESUF): tests/intel-hda-test.o
 tests/ioh3420-test$(EXESUF): tests/ioh3420-test.o
 tests/usb-hcd-ehci-test$(EXESUF): tests/usb-hcd-ehci-test.o $(libqos-pc-obj-y)
+tests/vhost-user-test$(EXESUF): tests/vhost-user-test.o qemu-char.o qemu-timer.o $(qtest-obj-y)
 tests/qemu-iotests/socket_scm_helper$(EXESUF): tests/qemu-iotests/socket_scm_helper.o
 tests/test-qemu-opts$(EXESUF): tests/test-qemu-opts.o libqemuutil.a libqemustub.a
+
+ifeq ($(CONFIG_POSIX),y)
+LIBS += -lutil
+endif
 
 # QTest rules
 

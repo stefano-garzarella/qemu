@@ -55,6 +55,9 @@
 #include <linux/cdrom.h>
 #include <linux/fd.h>
 #include <linux/fs.h>
+#ifndef FS_NOCOW_FL
+#define FS_NOCOW_FL                     0x00800000 /* Do not cow file */
+#endif
 #endif
 #ifdef CONFIG_FIEMAP
 #include <linux/fiemap.h>
@@ -218,7 +221,7 @@ static int raw_normalize_devicepath(const char **filename)
 }
 #endif
 
-static void raw_probe_alignment(BlockDriverState *bs)
+static void raw_probe_alignment(BlockDriverState *bs, int fd, Error **errp)
 {
     BDRVRawState *s = bs->opaque;
     char *buf;
@@ -237,24 +240,24 @@ static void raw_probe_alignment(BlockDriverState *bs)
     s->buf_align = 0;
 
 #ifdef BLKSSZGET
-    if (ioctl(s->fd, BLKSSZGET, &sector_size) >= 0) {
+    if (ioctl(fd, BLKSSZGET, &sector_size) >= 0) {
         bs->request_alignment = sector_size;
     }
 #endif
 #ifdef DKIOCGETBLOCKSIZE
-    if (ioctl(s->fd, DKIOCGETBLOCKSIZE, &sector_size) >= 0) {
+    if (ioctl(fd, DKIOCGETBLOCKSIZE, &sector_size) >= 0) {
         bs->request_alignment = sector_size;
     }
 #endif
 #ifdef DIOCGSECTORSIZE
-    if (ioctl(s->fd, DIOCGSECTORSIZE, &sector_size) >= 0) {
+    if (ioctl(fd, DIOCGSECTORSIZE, &sector_size) >= 0) {
         bs->request_alignment = sector_size;
     }
 #endif
 #ifdef CONFIG_XFS
     if (s->is_xfs) {
         struct dioattr da;
-        if (xfsctl(NULL, s->fd, XFS_IOC_DIOINFO, &da) >= 0) {
+        if (xfsctl(NULL, fd, XFS_IOC_DIOINFO, &da) >= 0) {
             bs->request_alignment = da.d_miniosz;
             /* The kernel returns wrong information for d_mem */
             /* s->buf_align = da.d_mem; */
@@ -267,7 +270,7 @@ static void raw_probe_alignment(BlockDriverState *bs)
         size_t align;
         buf = qemu_memalign(MAX_BLOCKSIZE, 2 * MAX_BLOCKSIZE);
         for (align = 512; align <= MAX_BLOCKSIZE; align <<= 1) {
-            if (pread(s->fd, buf + align, MAX_BLOCKSIZE, 0) >= 0) {
+            if (pread(fd, buf + align, MAX_BLOCKSIZE, 0) >= 0) {
                 s->buf_align = align;
                 break;
             }
@@ -279,12 +282,17 @@ static void raw_probe_alignment(BlockDriverState *bs)
         size_t align;
         buf = qemu_memalign(s->buf_align, MAX_BLOCKSIZE);
         for (align = 512; align <= MAX_BLOCKSIZE; align <<= 1) {
-            if (pread(s->fd, buf, align, 0) >= 0) {
+            if (pread(fd, buf, align, 0) >= 0) {
                 bs->request_alignment = align;
                 break;
             }
         }
         qemu_vfree(buf);
+    }
+
+    if (!s->buf_align || !bs->request_alignment) {
+        error_setg(errp, "Could not find working O_DIRECT alignment. "
+                         "Try cache.direct=off.");
     }
 }
 
@@ -502,6 +510,7 @@ static int raw_reopen_prepare(BDRVReopenState *state,
     BDRVRawState *s;
     BDRVRawReopenState *raw_s;
     int ret = 0;
+    Error *local_err = NULL;
 
     assert(state != NULL);
     assert(state->bs != NULL);
@@ -574,6 +583,19 @@ static int raw_reopen_prepare(BDRVReopenState *state,
             ret = -1;
         }
     }
+
+    /* Fail already reopen_prepare() if we can't get a working O_DIRECT
+     * alignment with the new fd. */
+    if (raw_s->fd != -1) {
+        raw_probe_alignment(state->bs, raw_s->fd, &local_err);
+        if (local_err) {
+            qemu_close(raw_s->fd);
+            raw_s->fd = -1;
+            error_propagate(errp, local_err);
+            ret = -EINVAL;
+        }
+    }
+
     return ret;
 }
 
@@ -612,14 +634,12 @@ static void raw_reopen_abort(BDRVReopenState *state)
     state->opaque = NULL;
 }
 
-static int raw_refresh_limits(BlockDriverState *bs)
+static void raw_refresh_limits(BlockDriverState *bs, Error **errp)
 {
     BDRVRawState *s = bs->opaque;
 
-    raw_probe_alignment(bs);
+    raw_probe_alignment(bs, s->fd, errp);
     bs->bl.opt_mem_alignment = s->buf_align;
-
-    return 0;
 }
 
 static ssize_t handle_aiocb_ioctl(RawPosixAIOData *aiocb)
@@ -787,6 +807,7 @@ static ssize_t handle_aiocb_rw(RawPosixAIOData *aiocb)
             memcpy(p, aiocb->aio_iov[i].iov_base, aiocb->aio_iov[i].iov_len);
             p += aiocb->aio_iov[i].iov_len;
         }
+        assert(p - buf == aiocb->aio_nbytes);
     }
 
     nbytes = handle_aiocb_rw_linear(aiocb, buf);
@@ -801,9 +822,11 @@ static ssize_t handle_aiocb_rw(RawPosixAIOData *aiocb)
                 copy = aiocb->aio_iov[i].iov_len;
             }
             memcpy(aiocb->aio_iov[i].iov_base, p, copy);
+            assert(count >= copy);
             p     += copy;
             count -= copy;
         }
+        assert(count == 0);
     }
     qemu_vfree(buf);
 
@@ -990,12 +1013,14 @@ static int paio_submit_co(BlockDriverState *bs, int fd,
     acb->aio_type = type;
     acb->aio_fildes = fd;
 
+    acb->aio_nbytes = nb_sectors * BDRV_SECTOR_SIZE;
+    acb->aio_offset = sector_num * BDRV_SECTOR_SIZE;
+
     if (qiov) {
         acb->aio_iov = qiov->iov;
         acb->aio_niov = qiov->niov;
+        assert(qiov->size == acb->aio_nbytes);
     }
-    acb->aio_nbytes = nb_sectors * 512;
-    acb->aio_offset = sector_num * 512;
 
     trace_paio_submit_co(sector_num, nb_sectors, type);
     pool = aio_get_thread_pool(bdrv_get_aio_context(bs));
@@ -1013,12 +1038,14 @@ static BlockDriverAIOCB *paio_submit(BlockDriverState *bs, int fd,
     acb->aio_type = type;
     acb->aio_fildes = fd;
 
+    acb->aio_nbytes = nb_sectors * BDRV_SECTOR_SIZE;
+    acb->aio_offset = sector_num * BDRV_SECTOR_SIZE;
+
     if (qiov) {
         acb->aio_iov = qiov->iov;
         acb->aio_niov = qiov->niov;
+        assert(qiov->size == acb->aio_nbytes);
     }
-    acb->aio_nbytes = nb_sectors * 512;
-    acb->aio_offset = sector_num * 512;
 
     trace_paio_submit(acb, opaque, sector_num, nb_sectors, type);
     pool = aio_get_thread_pool(bdrv_get_aio_context(bs));
@@ -1052,6 +1079,36 @@ static BlockDriverAIOCB *raw_aio_submit(BlockDriverState *bs,
 
     return paio_submit(bs, s->fd, sector_num, qiov, nb_sectors,
                        cb, opaque, type);
+}
+
+static void raw_aio_plug(BlockDriverState *bs)
+{
+#ifdef CONFIG_LINUX_AIO
+    BDRVRawState *s = bs->opaque;
+    if (s->use_aio) {
+        laio_io_plug(bs, s->aio_ctx);
+    }
+#endif
+}
+
+static void raw_aio_unplug(BlockDriverState *bs)
+{
+#ifdef CONFIG_LINUX_AIO
+    BDRVRawState *s = bs->opaque;
+    if (s->use_aio) {
+        laio_io_unplug(bs, s->aio_ctx, true);
+    }
+#endif
+}
+
+static void raw_aio_flush_io_queue(BlockDriverState *bs)
+{
+#ifdef CONFIG_LINUX_AIO
+    BDRVRawState *s = bs->opaque;
+    if (s->use_aio) {
+        laio_io_unplug(bs, s->aio_ctx, false);
+    }
+#endif
 }
 
 static BlockDriverAIOCB *raw_aio_readv(BlockDriverState *bs,
@@ -1130,12 +1187,12 @@ static int64_t raw_getlength(BlockDriverState *bs)
     struct stat st;
 
     if (fstat(fd, &st))
-        return -1;
+        return -errno;
     if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) {
         struct disklabel dl;
 
         if (ioctl(fd, DIOCGDINFO, &dl))
-            return -1;
+            return -errno;
         return (uint64_t)dl.d_secsize *
             dl.d_partitions[DISKPART(st.st_rdev)].p_size;
     } else
@@ -1149,7 +1206,7 @@ static int64_t raw_getlength(BlockDriverState *bs)
     struct stat st;
 
     if (fstat(fd, &st))
-        return -1;
+        return -errno;
     if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) {
         struct dkwedge_info dkw;
 
@@ -1159,7 +1216,7 @@ static int64_t raw_getlength(BlockDriverState *bs)
             struct disklabel dl;
 
             if (ioctl(fd, DIOCGDINFO, &dl))
-                return -1;
+                return -errno;
             return (uint64_t)dl.d_secsize *
                 dl.d_partitions[DISKPART(st.st_rdev)].p_size;
         }
@@ -1172,6 +1229,7 @@ static int64_t raw_getlength(BlockDriverState *bs)
     BDRVRawState *s = bs->opaque;
     struct dk_minfo minfo;
     int ret;
+    int64_t size;
 
     ret = fd_open(bs);
     if (ret < 0) {
@@ -1190,7 +1248,11 @@ static int64_t raw_getlength(BlockDriverState *bs)
      * There are reports that lseek on some devices fails, but
      * irc discussion said that contingency on contingency was overkill.
      */
-    return lseek(s->fd, 0, SEEK_END);
+    size = lseek(s->fd, 0, SEEK_END);
+    if (size < 0) {
+        return -errno;
+    }
+    return size;
 }
 #elif defined(CONFIG_BSD)
 static int64_t raw_getlength(BlockDriverState *bs)
@@ -1228,6 +1290,9 @@ again:
         size = LLONG_MAX;
 #else
         size = lseek(fd, 0LL, SEEK_END);
+        if (size < 0) {
+            return -errno;
+        }
 #endif
 #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
         switch(s->type) {
@@ -1244,6 +1309,9 @@ again:
 #endif
     } else {
         size = lseek(fd, 0, SEEK_END);
+        if (size < 0) {
+            return -errno;
+        }
     }
     return size;
 }
@@ -1252,13 +1320,18 @@ static int64_t raw_getlength(BlockDriverState *bs)
 {
     BDRVRawState *s = bs->opaque;
     int ret;
+    int64_t size;
 
     ret = fd_open(bs);
     if (ret < 0) {
         return ret;
     }
 
-    return lseek(s->fd, 0, SEEK_END);
+    size = lseek(s->fd, 0, SEEK_END);
+    if (size < 0) {
+        return -errno;
+    }
+    return size;
 }
 #endif
 
@@ -1273,22 +1346,19 @@ static int64_t raw_get_allocated_file_size(BlockDriverState *bs)
     return (int64_t)st.st_blocks * 512;
 }
 
-static int raw_create(const char *filename, QEMUOptionParameter *options,
-                      Error **errp)
+static int raw_create(const char *filename, QemuOpts *opts, Error **errp)
 {
     int fd;
     int result = 0;
     int64_t total_size = 0;
+    bool nocow = false;
 
     strstart(filename, "file:", &filename);
 
     /* Read out options */
-    while (options && options->name) {
-        if (!strcmp(options->name, BLOCK_OPT_SIZE)) {
-            total_size = options->value.n / BDRV_SECTOR_SIZE;
-        }
-        options++;
-    }
+    total_size =
+        qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0) / BDRV_SECTOR_SIZE;
+    nocow = qemu_opt_get_bool(opts, BLOCK_OPT_NOCOW, false);
 
     fd = qemu_open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY,
                    0644);
@@ -1296,6 +1366,21 @@ static int raw_create(const char *filename, QEMUOptionParameter *options,
         result = -errno;
         error_setg_errno(errp, -result, "Could not create file");
     } else {
+        if (nocow) {
+#ifdef __linux__
+            /* Set NOCOW flag to solve performance issue on fs like btrfs.
+             * This is an optimisation. The FS_IOC_SETFLAGS ioctl return value
+             * will be ignored since any failure of this operation should not
+             * block the left work.
+             */
+            int attr;
+            if (ioctl(fd, FS_IOC_GETFLAGS, &attr) == 0) {
+                attr |= FS_NOCOW_FL;
+                ioctl(fd, FS_IOC_SETFLAGS, &attr);
+            }
+#endif
+        }
+
         if (ftruncate(fd, total_size * BDRV_SECTOR_SIZE) != 0) {
             result = -errno;
             error_setg_errno(errp, -result, "Could not resize file");
@@ -1473,13 +1558,22 @@ static int raw_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
     return 0;
 }
 
-static QEMUOptionParameter raw_create_options[] = {
-    {
-        .name = BLOCK_OPT_SIZE,
-        .type = OPT_SIZE,
-        .help = "Virtual disk size"
-    },
-    { NULL }
+static QemuOptsList raw_create_opts = {
+    .name = "raw-create-opts",
+    .head = QTAILQ_HEAD_INITIALIZER(raw_create_opts.head),
+    .desc = {
+        {
+            .name = BLOCK_OPT_SIZE,
+            .type = QEMU_OPT_SIZE,
+            .help = "Virtual disk size"
+        },
+        {
+            .name = BLOCK_OPT_NOCOW,
+            .type = QEMU_OPT_BOOL,
+            .help = "Turn off copy-on-write (valid only on btrfs)"
+        },
+        { /* end of list */ }
+    }
 };
 
 static BlockDriver bdrv_file = {
@@ -1504,6 +1598,9 @@ static BlockDriver bdrv_file = {
     .bdrv_aio_flush = raw_aio_flush,
     .bdrv_aio_discard = raw_aio_discard,
     .bdrv_refresh_limits = raw_refresh_limits,
+    .bdrv_io_plug = raw_aio_plug,
+    .bdrv_io_unplug = raw_aio_unplug,
+    .bdrv_flush_io_queue = raw_aio_flush_io_queue,
 
     .bdrv_truncate = raw_truncate,
     .bdrv_getlength = raw_getlength,
@@ -1514,7 +1611,7 @@ static BlockDriver bdrv_file = {
     .bdrv_detach_aio_context = raw_detach_aio_context,
     .bdrv_attach_aio_context = raw_attach_aio_context,
 
-    .create_options = raw_create_options,
+    .create_opts = &raw_create_opts,
 };
 
 /***********************************************/
@@ -1835,7 +1932,7 @@ static coroutine_fn int hdev_co_write_zeroes(BlockDriverState *bs,
     return -ENOTSUP;
 }
 
-static int hdev_create(const char *filename, QEMUOptionParameter *options,
+static int hdev_create(const char *filename, QemuOpts *opts,
                        Error **errp)
 {
     int fd;
@@ -1856,12 +1953,8 @@ static int hdev_create(const char *filename, QEMUOptionParameter *options,
     (void)has_prefix;
 
     /* Read out options */
-    while (options && options->name) {
-        if (!strcmp(options->name, "size")) {
-            total_size = options->value.n / BDRV_SECTOR_SIZE;
-        }
-        options++;
-    }
+    total_size =
+        qemu_opt_get_size_del(opts, BLOCK_OPT_SIZE, 0) / BDRV_SECTOR_SIZE;
 
     fd = qemu_open(filename, O_WRONLY | O_BINARY);
     if (fd < 0) {
@@ -1898,8 +1991,8 @@ static BlockDriver bdrv_host_device = {
     .bdrv_reopen_prepare = raw_reopen_prepare,
     .bdrv_reopen_commit  = raw_reopen_commit,
     .bdrv_reopen_abort   = raw_reopen_abort,
-    .bdrv_create        = hdev_create,
-    .create_options     = raw_create_options,
+    .bdrv_create         = hdev_create,
+    .create_opts         = &raw_create_opts,
     .bdrv_co_write_zeroes = hdev_co_write_zeroes,
 
     .bdrv_aio_readv	= raw_aio_readv,
@@ -1907,6 +2000,9 @@ static BlockDriver bdrv_host_device = {
     .bdrv_aio_flush	= raw_aio_flush,
     .bdrv_aio_discard   = hdev_aio_discard,
     .bdrv_refresh_limits = raw_refresh_limits,
+    .bdrv_io_plug = raw_aio_plug,
+    .bdrv_io_unplug = raw_aio_unplug,
+    .bdrv_flush_io_queue = raw_aio_flush_io_queue,
 
     .bdrv_truncate      = raw_truncate,
     .bdrv_getlength	= raw_getlength,
@@ -2045,13 +2141,16 @@ static BlockDriver bdrv_host_floppy = {
     .bdrv_reopen_prepare = raw_reopen_prepare,
     .bdrv_reopen_commit  = raw_reopen_commit,
     .bdrv_reopen_abort   = raw_reopen_abort,
-    .bdrv_create        = hdev_create,
-    .create_options     = raw_create_options,
+    .bdrv_create         = hdev_create,
+    .create_opts         = &raw_create_opts,
 
     .bdrv_aio_readv     = raw_aio_readv,
     .bdrv_aio_writev    = raw_aio_writev,
     .bdrv_aio_flush	= raw_aio_flush,
     .bdrv_refresh_limits = raw_refresh_limits,
+    .bdrv_io_plug = raw_aio_plug,
+    .bdrv_io_unplug = raw_aio_unplug,
+    .bdrv_flush_io_queue = raw_aio_flush_io_queue,
 
     .bdrv_truncate      = raw_truncate,
     .bdrv_getlength      = raw_getlength,
@@ -2173,13 +2272,16 @@ static BlockDriver bdrv_host_cdrom = {
     .bdrv_reopen_prepare = raw_reopen_prepare,
     .bdrv_reopen_commit  = raw_reopen_commit,
     .bdrv_reopen_abort   = raw_reopen_abort,
-    .bdrv_create        = hdev_create,
-    .create_options     = raw_create_options,
+    .bdrv_create         = hdev_create,
+    .create_opts         = &raw_create_opts,
 
     .bdrv_aio_readv     = raw_aio_readv,
     .bdrv_aio_writev    = raw_aio_writev,
     .bdrv_aio_flush	= raw_aio_flush,
     .bdrv_refresh_limits = raw_refresh_limits,
+    .bdrv_io_plug = raw_aio_plug,
+    .bdrv_io_unplug = raw_aio_unplug,
+    .bdrv_flush_io_queue = raw_aio_flush_io_queue,
 
     .bdrv_truncate      = raw_truncate,
     .bdrv_getlength      = raw_getlength,
@@ -2308,12 +2410,15 @@ static BlockDriver bdrv_host_cdrom = {
     .bdrv_reopen_commit  = raw_reopen_commit,
     .bdrv_reopen_abort   = raw_reopen_abort,
     .bdrv_create        = hdev_create,
-    .create_options     = raw_create_options,
+    .create_opts        = &raw_create_opts,
 
     .bdrv_aio_readv     = raw_aio_readv,
     .bdrv_aio_writev    = raw_aio_writev,
     .bdrv_aio_flush	= raw_aio_flush,
     .bdrv_refresh_limits = raw_refresh_limits,
+    .bdrv_io_plug = raw_aio_plug,
+    .bdrv_io_unplug = raw_aio_unplug,
+    .bdrv_flush_io_queue = raw_aio_flush_io_queue,
 
     .bdrv_truncate      = raw_truncate,
     .bdrv_getlength      = raw_getlength,

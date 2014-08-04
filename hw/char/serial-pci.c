@@ -148,18 +148,19 @@ static void multi_serial_pci_exit(PCIDevice *dev)
     for (i = 0; i < pci->ports; i++) {
         s = pci->state + i;
         serial_exit_core(s);
+        memory_region_del_subregion(&pci->iobar, &s->io);
         memory_region_destroy(&s->io);
         g_free(pci->name[i]);
     }
     memory_region_destroy(&pci->iobar);
-    qemu_free_irqs(pci->irqs);
+    qemu_free_irqs(pci->irqs, pci->ports);
 }
 
 static const VMStateDescription vmstate_pci_serial = {
     .name = "pci-serial",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(dev, PCISerialState),
         VMSTATE_STRUCT(state, PCISerialState, 0, vmstate_serial, SerialState),
         VMSTATE_END_OF_LIST()
@@ -170,7 +171,7 @@ static const VMStateDescription vmstate_pci_multi_serial = {
     .name = "pci-serial-multi",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields      = (VMStateField[]) {
+    .fields = (VMStateField[]) {
         VMSTATE_PCI_DEVICE(dev, PCIMultiSerialState),
         VMSTATE_STRUCT_ARRAY(state, PCIMultiSerialState, PCI_SERIAL_MAX_PORTS,
                              0, vmstate_serial, SerialState),

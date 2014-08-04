@@ -24,13 +24,13 @@ struct MACAddr {
 
 typedef struct NICPeers {
     NetClientState *ncs[MAX_QUEUE_NUM];
+    int32_t queues;
 } NICPeers;
 
 typedef struct NICConf {
     MACAddr macaddr;
     NICPeers peers;
     int32_t bootindex;
-    int32_t queues;
 } NICConf;
 
 #define DEFINE_NIC_PROPERTIES(_state, _conf)                            \
@@ -152,7 +152,6 @@ void qemu_purge_queued_packets(NetClientState *nc);
 void qemu_flush_queued_packets(NetClientState *nc);
 void qemu_format_nic_info_str(NetClientState *nc, uint8_t macaddr[6]);
 int qemu_peer_get_fd(NetClientState *nc);
-VHostNetState *qemu_peer_get_vhost_net(NetClientState *nc);
 bool qemu_has_ufo(NetClientState *nc);
 bool qemu_has_vnet_hdr(NetClientState *nc);
 bool qemu_has_vnet_hdr_len(NetClientState *nc, int len);
@@ -200,6 +199,7 @@ struct NICInfo {
 extern int nb_nics;
 extern NICInfo nd_table[MAX_NICS];
 extern int default_net;
+extern const char *host_net_devices[];
 
 /* from net.c */
 extern const char *legacy_tftp_prefix;

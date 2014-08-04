@@ -106,7 +106,7 @@ void blockdev_auto_del(BlockDriverState *bs)
     DriveInfo *dinfo = drive_get_by_blockdev(bs);
 
     if (dinfo && dinfo->auto_del) {
-        drive_put_ref(dinfo);
+        drive_del(dinfo);
     }
 }
 
@@ -213,7 +213,7 @@ static void bdrv_format_print(void *opaque, const char *name)
     error_printf(" %s", name);
 }
 
-static void drive_uninit(DriveInfo *dinfo)
+void drive_del(DriveInfo *dinfo)
 {
     if (dinfo->opts) {
         qemu_opts_del(dinfo->opts);
@@ -224,19 +224,6 @@ static void drive_uninit(DriveInfo *dinfo)
     QTAILQ_REMOVE(&drives, dinfo, next);
     g_free(dinfo->serial);
     g_free(dinfo);
-}
-
-void drive_put_ref(DriveInfo *dinfo)
-{
-    assert(dinfo->refcount);
-    if (--dinfo->refcount == 0) {
-        drive_uninit(dinfo);
-    }
-}
-
-void drive_get_ref(DriveInfo *dinfo)
-{
-    dinfo->refcount++;
 }
 
 typedef struct {
@@ -329,7 +316,6 @@ static DriveInfo *blockdev_init(const char *file, QDict *bs_opts,
                                 Error **errp)
 {
     const char *buf;
-    const char *serial;
     int ro = 0;
     int bdrv_flags = 0;
     int on_read_error, on_write_error;
@@ -370,8 +356,6 @@ static DriveInfo *blockdev_init(const char *file, QDict *bs_opts,
     snapshot = qemu_opt_get_bool(opts, "snapshot", 0);
     ro = qemu_opt_get_bool(opts, "read-only", 0);
     copy_on_read = qemu_opt_get_bool(opts, "copy-on-read", false);
-
-    serial = qemu_opt_get(opts, "serial");
 
     if ((buf = qemu_opt_get(opts, "discard")) != NULL) {
         if (bdrv_parse_discard_flags(buf, &bdrv_flags) != 0) {
@@ -500,10 +484,6 @@ static DriveInfo *blockdev_init(const char *file, QDict *bs_opts,
     dinfo->bdrv->open_flags = snapshot ? BDRV_O_SNAPSHOT : 0;
     dinfo->bdrv->read_only = ro;
     dinfo->bdrv->detect_zeroes = detect_zeroes;
-    dinfo->refcount = 1;
-    if (serial != NULL) {
-        dinfo->serial = g_strdup(serial);
-    }
     QTAILQ_INSERT_TAIL(&drives, dinfo, next);
 
     bdrv_set_on_error(dinfo->bdrv, on_read_error, on_write_error);
@@ -630,6 +610,10 @@ QemuOptsList qemu_legacy_drive_opts = {
             .type = QEMU_OPT_STRING,
             .help = "pci address (virtio only)",
         },{
+            .name = "serial",
+            .type = QEMU_OPT_STRING,
+            .help = "disk serial number",
+        },{
             .name = "file",
             .type = QEMU_OPT_STRING,
             .help = "file name",
@@ -658,7 +642,7 @@ QemuOptsList qemu_legacy_drive_opts = {
     },
 };
 
-DriveInfo *drive_init(QemuOpts *all_opts, BlockInterfaceType block_default_type)
+DriveInfo *drive_new(QemuOpts *all_opts, BlockInterfaceType block_default_type)
 {
     const char *value;
     DriveInfo *dinfo = NULL;
@@ -672,6 +656,7 @@ DriveInfo *drive_init(QemuOpts *all_opts, BlockInterfaceType block_default_type)
     const char *werror, *rerror;
     bool read_only = false;
     bool copy_on_read;
+    const char *serial;
     const char *filename;
     Error *local_err = NULL;
 
@@ -875,6 +860,9 @@ DriveInfo *drive_init(QemuOpts *all_opts, BlockInterfaceType block_default_type)
         goto fail;
     }
 
+    /* Serial number */
+    serial = qemu_opt_get(legacy_opts, "serial");
+
     /* no id supplied -> create one */
     if (qemu_opts_id(all_opts) == NULL) {
         char *new_id;
@@ -964,6 +952,8 @@ DriveInfo *drive_init(QemuOpts *all_opts, BlockInterfaceType block_default_type)
     dinfo->bus = bus_id;
     dinfo->unit = unit_id;
     dinfo->devaddr = devaddr;
+
+    dinfo->serial = g_strdup(serial);
 
     switch(type) {
     case IF_IDE:
@@ -1797,7 +1787,7 @@ int do_drive_del(Monitor *mon, const QDict *qdict, QObject **ret_data)
         bdrv_set_on_error(bs, BLOCKDEV_ON_ERROR_REPORT,
                           BLOCKDEV_ON_ERROR_REPORT);
     } else {
-        drive_uninit(drive_get_by_blockdev(bs));
+        drive_del(drive_get_by_blockdev(bs));
     }
 
     return 0;
@@ -1829,6 +1819,11 @@ void qmp_block_resize(bool has_device, const char *device,
         return;
     }
 
+    if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_RESIZE, NULL)) {
+        error_set(errp, QERR_DEVICE_IN_USE, device);
+        return;
+    }
+
     /* complete all in-flight operations before resizing the device */
     bdrv_drain_all();
 
@@ -1857,35 +1852,36 @@ void qmp_block_resize(bool has_device, const char *device,
 static void block_job_cb(void *opaque, int ret)
 {
     BlockDriverState *bs = opaque;
-    QObject *obj;
+    const char *msg = NULL;
 
     trace_block_job_cb(bs, bs->job, ret);
 
     assert(bs->job);
-    obj = qobject_from_block_job(bs->job);
+
     if (ret < 0) {
-        QDict *dict = qobject_to_qdict(obj);
-        qdict_put(dict, "error", qstring_from_str(strerror(-ret)));
+        msg = strerror(-ret);
     }
 
     if (block_job_is_cancelled(bs->job)) {
-        monitor_protocol_event(QEVENT_BLOCK_JOB_CANCELLED, obj);
+        block_job_event_cancelled(bs->job);
     } else {
-        monitor_protocol_event(QEVENT_BLOCK_JOB_COMPLETED, obj);
+        block_job_event_completed(bs->job, msg);
     }
-    qobject_decref(obj);
 
     bdrv_put_ref_bh_schedule(bs);
 }
 
-void qmp_block_stream(const char *device, bool has_base,
-                      const char *base, bool has_speed, int64_t speed,
+void qmp_block_stream(const char *device,
+                      bool has_base, const char *base,
+                      bool has_backing_file, const char *backing_file,
+                      bool has_speed, int64_t speed,
                       bool has_on_error, BlockdevOnError on_error,
                       Error **errp)
 {
     BlockDriverState *bs;
     BlockDriverState *base_bs = NULL;
     Error *local_err = NULL;
+    const char *base_name = NULL;
 
     if (!has_on_error) {
         on_error = BLOCKDEV_ON_ERROR_REPORT;
@@ -1901,15 +1897,27 @@ void qmp_block_stream(const char *device, bool has_base,
         return;
     }
 
-    if (base) {
+    if (has_base) {
         base_bs = bdrv_find_backing_image(bs, base);
         if (base_bs == NULL) {
             error_set(errp, QERR_BASE_NOT_FOUND, base);
             return;
         }
+        base_name = base;
     }
 
-    stream_start(bs, base_bs, base, has_speed ? speed : 0,
+    /* if we are streaming the entire chain, the result will have no backing
+     * file, and specifying one is therefore an error */
+    if (base_bs == NULL && has_backing_file) {
+        error_setg(errp, "backing file specified, but streaming the "
+                         "entire chain");
+        return;
+    }
+
+    /* backing_file string overrides base bs filename */
+    base_name = has_backing_file ? backing_file : base_name;
+
+    stream_start(bs, base_bs, base_name, has_speed ? speed : 0,
                  on_error, block_job_cb, bs, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
@@ -1920,7 +1928,9 @@ void qmp_block_stream(const char *device, bool has_base,
 }
 
 void qmp_block_commit(const char *device,
-                      bool has_base, const char *base, const char *top,
+                      bool has_base, const char *base,
+                      bool has_top, const char *top,
+                      bool has_backing_file, const char *backing_file,
                       bool has_speed, int64_t speed,
                       Error **errp)
 {
@@ -1939,6 +1949,11 @@ void qmp_block_commit(const char *device,
     /* drain all i/o before commits */
     bdrv_drain_all();
 
+    /* Important Note:
+     *  libvirt relies on the DeviceNotFound error class in order to probe for
+     *  live commit feature versions; for this to work, we must make sure to
+     *  perform the device lookup before any generic errors that may occur in a
+     *  scenario in which all optional arguments are omitted. */
     bs = bdrv_find(device);
     if (!bs) {
         error_set(errp, QERR_DEVICE_NOT_FOUND, device);
@@ -1952,7 +1967,7 @@ void qmp_block_commit(const char *device,
     /* default top_bs is the active layer */
     top_bs = bs;
 
-    if (top) {
+    if (has_top && top) {
         if (strcmp(bs->filename, top) != 0) {
             top_bs = bdrv_find_backing_image(bs, top);
         }
@@ -1974,12 +1989,23 @@ void qmp_block_commit(const char *device,
         return;
     }
 
+    /* Do not allow attempts to commit an image into itself */
+    if (top_bs == base_bs) {
+        error_setg(errp, "cannot commit an image into itself");
+        return;
+    }
+
     if (top_bs == bs) {
+        if (has_backing_file) {
+            error_setg(errp, "'backing-file' specified,"
+                             " but 'top' is the active layer");
+            return;
+        }
         commit_active_start(bs, base_bs, speed, on_error, block_job_cb,
                             bs, &local_err);
     } else {
         commit_start(bs, base_bs, top_bs, speed, on_error, block_job_cb, bs,
-                    &local_err);
+                     has_backing_file ? backing_file : NULL, &local_err);
     }
     if (local_err != NULL) {
         error_propagate(errp, local_err);
@@ -2106,6 +2132,8 @@ BlockDeviceInfoList *qmp_query_named_block_nodes(Error **errp)
 
 void qmp_drive_mirror(const char *device, const char *target,
                       bool has_format, const char *format,
+                      bool has_node_name, const char *node_name,
+                      bool has_replaces, const char *replaces,
                       enum MirrorSyncMode sync,
                       bool has_mode, enum NewImageMode mode,
                       bool has_speed, int64_t speed,
@@ -2119,6 +2147,7 @@ void qmp_drive_mirror(const char *device, const char *target,
     BlockDriverState *source, *target_bs;
     BlockDriver *drv = NULL;
     Error *local_err = NULL;
+    QDict *options = NULL;
     int flags;
     int64_t size;
     int ret;
@@ -2192,6 +2221,29 @@ void qmp_drive_mirror(const char *device, const char *target,
         return;
     }
 
+    if (has_replaces) {
+        BlockDriverState *to_replace_bs;
+
+        if (!has_node_name) {
+            error_setg(errp, "a node-name must be provided when replacing a"
+                             " named node of the graph");
+            return;
+        }
+
+        to_replace_bs = check_to_replace_node(replaces, &local_err);
+
+        if (!to_replace_bs) {
+            error_propagate(errp, local_err);
+            return;
+        }
+
+        if (size != bdrv_getlength(to_replace_bs)) {
+            error_setg(errp, "cannot replace image with a mirror image of "
+                             "different size");
+            return;
+        }
+    }
+
     if ((sync == MIRROR_SYNC_MODE_FULL || !source)
         && mode != NEW_IMAGE_MODE_EXISTING)
     {
@@ -2220,18 +2272,28 @@ void qmp_drive_mirror(const char *device, const char *target,
         return;
     }
 
+    if (has_node_name) {
+        options = qdict_new();
+        qdict_put(options, "node-name", qstring_from_str(node_name));
+    }
+
     /* Mirroring takes care of copy-on-write using the source's backing
      * file.
      */
     target_bs = NULL;
-    ret = bdrv_open(&target_bs, target, NULL, NULL, flags | BDRV_O_NO_BACKING,
-                    drv, &local_err);
+    ret = bdrv_open(&target_bs, target, NULL, options,
+                    flags | BDRV_O_NO_BACKING, drv, &local_err);
     if (ret < 0) {
         error_propagate(errp, local_err);
         return;
     }
 
-    mirror_start(bs, target_bs, speed, granularity, buf_size, sync,
+    /* pass the node name to replace to mirror start since it's loose coupling
+     * and will allow to check whether the node still exist at mirror completion
+     */
+    mirror_start(bs, target_bs,
+                 has_replaces ? replaces : NULL,
+                 speed, granularity, buf_size, sync,
                  on_source_error, on_target_error,
                  block_job_cb, bs, &local_err);
     if (local_err != NULL) {
@@ -2326,6 +2388,85 @@ void qmp_block_job_complete(const char *device, Error **errp)
     block_job_complete(job, errp);
 }
 
+void qmp_change_backing_file(const char *device,
+                             const char *image_node_name,
+                             const char *backing_file,
+                             Error **errp)
+{
+    BlockDriverState *bs = NULL;
+    BlockDriverState *image_bs = NULL;
+    Error *local_err = NULL;
+    bool ro;
+    int open_flags;
+    int ret;
+
+    /* find the top layer BDS of the chain */
+    bs = bdrv_find(device);
+    if (!bs) {
+        error_set(errp, QERR_DEVICE_NOT_FOUND, device);
+        return;
+    }
+
+    image_bs = bdrv_lookup_bs(NULL, image_node_name, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return;
+    }
+
+    if (!image_bs) {
+        error_setg(errp, "image file not found");
+        return;
+    }
+
+    if (bdrv_find_base(image_bs) == image_bs) {
+        error_setg(errp, "not allowing backing file change on an image "
+                         "without a backing file");
+        return;
+    }
+
+    /* even though we are not necessarily operating on bs, we need it to
+     * determine if block ops are currently prohibited on the chain */
+    if (bdrv_op_is_blocked(bs, BLOCK_OP_TYPE_CHANGE, errp)) {
+        return;
+    }
+
+    /* final sanity check */
+    if (!bdrv_chain_contains(bs, image_bs)) {
+        error_setg(errp, "'%s' and image file are not in the same chain",
+                   device);
+        return;
+    }
+
+    /* if not r/w, reopen to make r/w */
+    open_flags = image_bs->open_flags;
+    ro = bdrv_is_read_only(image_bs);
+
+    if (ro) {
+        bdrv_reopen(image_bs, open_flags | BDRV_O_RDWR, &local_err);
+        if (local_err) {
+            error_propagate(errp, local_err);
+            return;
+        }
+    }
+
+    ret = bdrv_change_backing_file(image_bs, backing_file,
+                               image_bs->drv ? image_bs->drv->format_name : "");
+
+    if (ret < 0) {
+        error_setg_errno(errp, -ret, "Could not change backing file to '%s'",
+                         backing_file);
+        /* don't exit here, so we can try to restore open flags if
+         * appropriate */
+    }
+
+    if (ro) {
+        bdrv_reopen(image_bs, open_flags, &local_err);
+        if (local_err) {
+            error_propagate(errp, local_err); /* will preserve prior errp */
+        }
+    }
+}
+
 void qmp_blockdev_add(BlockdevOptions *options, Error **errp)
 {
     QmpOutputVisitor *ov = qmp_output_visitor_new();
@@ -2340,9 +2481,9 @@ void qmp_blockdev_add(BlockdevOptions *options, Error **errp)
         goto fail;
     }
 
-    /* TODO Sort it out in raw-posix and drive_init: Reject aio=native with
+    /* TODO Sort it out in raw-posix and drive_new(): Reject aio=native with
      * cache.direct=false instead of silently switching to aio=threads, except
-     * if called from drive_init.
+     * when called from drive_new().
      *
      * For now, simply forbidding the combination for all drivers will do. */
     if (options->has_aio && options->aio == BLOCKDEV_AIO_OPTIONS_NATIVE) {
@@ -2374,7 +2515,7 @@ void qmp_blockdev_add(BlockdevOptions *options, Error **errp)
     }
 
     if (bdrv_key_required(dinfo->bdrv)) {
-        drive_uninit(dinfo);
+        drive_del(dinfo);
         error_setg(errp, "blockdev-add doesn't support encrypted devices");
         goto fail;
     }
@@ -2437,10 +2578,6 @@ QemuOptsList qemu_common_drive_opts = {
             .name = "format",
             .type = QEMU_OPT_STRING,
             .help = "disk format (raw, qcow2, ...)",
-        },{
-            .name = "serial",
-            .type = QEMU_OPT_STRING,
-            .help = "disk serial number",
         },{
             .name = "rerror",
             .type = QEMU_OPT_STRING,

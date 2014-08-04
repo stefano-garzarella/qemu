@@ -177,7 +177,8 @@ static int scsi_qdev_init(DeviceState *qdev)
         d = scsi_device_find(bus, dev->channel, dev->id, dev->lun);
         assert(d);
         if (d->lun == dev->lun && dev != d) {
-            object_unparent(OBJECT(d));
+            error_report("lun already used by '%s'", d->qdev.id);
+            goto err;
         }
     }
 
@@ -1429,7 +1430,7 @@ int scsi_build_sense(uint8_t *in_buf, int in_len,
     }
 }
 
-static const char *scsi_command_name(uint8_t cmd)
+const char *scsi_command_name(uint8_t cmd)
 {
     static const char *names[] = {
         [ TEST_UNIT_READY          ] = "TEST_UNIT_READY",
@@ -1545,6 +1546,8 @@ static const char *scsi_command_name(uint8_t cmd)
         [ SET_READ_AHEAD           ] = "SET_READ_AHEAD",
         [ ALLOW_OVERWRITE          ] = "ALLOW_OVERWRITE",
         [ MECHANISM_STATUS         ] = "MECHANISM_STATUS",
+        [ GET_EVENT_STATUS_NOTIFICATION ] = "GET_EVENT_STATUS_NOTIFICATION",
+        [ READ_DISC_INFORMATION    ] = "READ_DISC_INFORMATION",
     };
 
     if (cmd >= ARRAY_SIZE(names) || names[cmd] == NULL)
@@ -1917,8 +1920,7 @@ static const VMStateDescription vmstate_scsi_sense_state = {
     .name = "SCSIDevice/sense",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields      = (VMStateField []) {
+    .fields = (VMStateField[]) {
         VMSTATE_UINT8_SUB_ARRAY(sense, SCSIDevice,
                                 SCSI_SENSE_BUF_SIZE_OLD,
                                 SCSI_SENSE_BUF_SIZE - SCSI_SENSE_BUF_SIZE_OLD),
@@ -1930,7 +1932,6 @@ const VMStateDescription vmstate_scsi_device = {
     .name = "SCSIDevice",
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_UINT8(unit_attention.key, SCSIDevice),
         VMSTATE_UINT8(unit_attention.asc, SCSIDevice),
