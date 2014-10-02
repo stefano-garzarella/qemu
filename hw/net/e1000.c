@@ -2133,8 +2133,7 @@ set_ptctl(E1000State *s, int index, uint32_t val)
     switch (val) {
     case NET_PARAVIRT_PTCTL_FINALIZE:
         ret = netmap_pt_start(pt);
-        if (ret)
-            break;
+        break;
     case NET_PARAVIRT_PTCTL_CONFIG:
         ret = netmap_pt_get_mem(pt);
         if (ret)
