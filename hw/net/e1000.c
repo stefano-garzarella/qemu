@@ -2145,6 +2145,7 @@ set_ptctl(E1000State *s, int index, uint32_t val)
         s->csb->memsize = pt->memsize;
         s->csb->pci_bar = NETMAP_PT_BAR;
         s->csb->nifp_offset = pt->offset;
+        s->csb->nbuffers = 10000;
         s->csb->num_tx_rings = pt->num_tx_rings;
         s->csb->num_rx_rings = pt->num_rx_rings;
         s->csb->num_tx_slots = pt->num_tx_slots;
