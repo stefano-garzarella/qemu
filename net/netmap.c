@@ -519,6 +519,14 @@ static void netmap_pt_notify_tx(void *opaque)
     }
 }
 
+static void netmap_pt_write_poll(NetmapState *s, bool enable)
+{
+    if (s->write_poll != enable) {
+        s->write_poll = enable;
+        netmap_pt_update_fd_handler(s);
+    }
+}
+
 static void netmap_pt_notify_rx(void *opaque)
 {
     NetmapState *s = opaque;
@@ -561,10 +569,19 @@ int
 netmap_pt_txsync(NetmapPTState *nc)
 {
     NetmapState *n = nc->netmap;
+    int err;
 
     if (n->nmd == NULL)
         return EINVAL;
-    return ioctl(n->nmd->fd, NIOCTXSYNC, NULL);
+    err = ioctl(n->nmd->fd, NIOCTXSYNC, NULL);
+
+    if (nm_ring_empty(n->txr)) {
+        /* After TXSYNC, no available slots in the netmap TX ring.
+         * Can happen with pipes.
+         */
+        netmap_pt_write_poll(n, true);
+    }
+    return err;
 }
 
 int
