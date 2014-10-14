@@ -571,6 +571,9 @@ netmap_pt_txsync(NetmapPTState *nc)
     NetmapState *n = nc->netmap;
     int err;
 
+    /* Remove write poll to avoid concurrent ioctl */
+    netmap_pt_write_poll(n, false);
+
     if (n->nmd == NULL)
         return EINVAL;
     err = ioctl(n->nmd->fd, NIOCTXSYNC, NULL);
