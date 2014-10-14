@@ -502,6 +502,14 @@ static int netmap_pt_can_send(void *opaque)
 }
 
 static void netmap_pt_update_fd_handler(NetmapState *s);
+static void netmap_pt_write_poll(NetmapState *s, bool enable)
+{
+    if (s->write_poll != enable) {
+        s->write_poll = enable;
+        netmap_pt_update_fd_handler(s);
+    }
+}
+
 static void netmap_pt_notify_tx(void *opaque)
 {
     NetmapState *s = opaque;
@@ -511,20 +519,7 @@ static void netmap_pt_notify_tx(void *opaque)
         return;
     if (s->nc.peer->info->notify_netmap_pt)
         s->nc.peer->info->notify_netmap_pt(s->nc.peer, NETMAP_PT_TX);
-    s->write_poll = false;
-    netmap_pt_update_fd_handler(s);
-    if (nm_ring_empty(s->txr)) {
-        s->write_poll = true;
-        netmap_pt_update_fd_handler(s);
-    }
-}
-
-static void netmap_pt_write_poll(NetmapState *s, bool enable)
-{
-    if (s->write_poll != enable) {
-        s->write_poll = enable;
-        netmap_pt_update_fd_handler(s);
-    }
+    netmap_pt_write_poll(s, nm_ring_empty(s->txr));
 }
 
 static void netmap_pt_notify_rx(void *opaque)
@@ -569,20 +564,20 @@ int
 netmap_pt_txsync(NetmapPTState *nc)
 {
     NetmapState *n = nc->netmap;
-    int err;
-
-    /* Remove write poll to avoid concurrent ioctl */
-    netmap_pt_write_poll(n, false);
+    int err = 0;
 
     if (n->nmd == NULL)
         return EINVAL;
-    err = ioctl(n->nmd->fd, NIOCTXSYNC, NULL);
 
-    if (nm_ring_empty(n->txr)) {
+    if (n->write_poll) {
+        /* Already in the iothred */
+        qemu_notify_event();
+    } else {
+        err = ioctl(n->nmd->fd, NIOCTXSYNC, NULL);
         /* After TXSYNC, no available slots in the netmap TX ring.
          * Can happen with pipes.
          */
-        netmap_pt_write_poll(n, true);
+        netmap_pt_write_poll(n, nm_ring_empty(n->txr));
     }
     return err;
 }
