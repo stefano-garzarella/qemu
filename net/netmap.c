@@ -632,40 +632,32 @@ int net_init_netmap(const NetClientOptions *opts,
     NetClientState *nc;
     struct nm_desc *nmd;
     NetmapState *s;
-    uint64_t flags = NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL;
-    struct nm_desc cfg;
+    struct nmreq req;
 
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.self = &cfg;
+    memset(&req, 0, sizeof(req));
 
     if (netmap_opts->rings) {
-        cfg.req.nr_tx_rings = netmap_opts->rings;
-        cfg.req.nr_rx_rings = netmap_opts->rings;
-	flags |= NM_OPEN_RING_CFG;
+        req.nr_tx_rings = netmap_opts->rings;
+        req.nr_rx_rings = netmap_opts->rings;
     }
     if (netmap_opts->slots) {
-        cfg.req.nr_tx_slots = netmap_opts->slots;
-        cfg.req.nr_rx_slots = netmap_opts->slots;
-	flags |= NM_OPEN_RING_CFG;
+        req.nr_tx_slots = netmap_opts->slots;
+        req.nr_rx_slots = netmap_opts->slots;
     }
     if (netmap_opts->txrings) {
-	cfg.req.nr_tx_rings = netmap_opts->txrings;
-	flags |= NM_OPEN_RING_CFG;
+	req.nr_tx_rings = netmap_opts->txrings;
     }
     if (netmap_opts->rxrings) {
-	cfg.req.nr_rx_rings = netmap_opts->rxrings;
-	flags |= NM_OPEN_RING_CFG;
+	req.nr_rx_rings = netmap_opts->rxrings;
     }
     if (netmap_opts->txslots) {
-	cfg.req.nr_tx_slots = netmap_opts->txslots;
-	flags |= NM_OPEN_RING_CFG;
+	req.nr_tx_slots = netmap_opts->txslots;
     }
     if (netmap_opts->rxslots) {
-	cfg.req.nr_rx_slots = netmap_opts->txslots;
-	flags |= NM_OPEN_RING_CFG;
+	req.nr_rx_slots = netmap_opts->txslots;
     }
 
-    nmd = nm_open(netmap_opts->ifname, &cfg.req, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL, &cfg);
+    nmd = nm_open(netmap_opts->ifname, &req, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL, NULL);
     if (nmd == NULL) {
         return -1;
     }
