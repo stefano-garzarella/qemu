@@ -222,7 +222,9 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
     int j;
     uint32_t i;
 
-        return size;
+    if (unlikely(!ring)) {
+	/* Drop the packet. */
+	return size;
     }
 
     last = i = ring->cur;
