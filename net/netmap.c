@@ -103,6 +103,7 @@ static void netmap_writable(void *opaque);
 /* Set the event-loop handlers for the netmap backend. */
 static void netmap_update_fd_handler(NetmapState *s)
 {
+    D("read_poll: %d, write_poll: %d", s->read_poll, s->write_poll);
     qemu_set_fd_handler2(s->nmd->fd,
                          s->read_poll  ? netmap_can_send : NULL,
                          s->read_poll  ? netmap_send     : NULL,
@@ -113,6 +114,7 @@ static void netmap_update_fd_handler(NetmapState *s)
 /* Update the read handler. */
 static void netmap_read_poll(NetmapState *s, bool enable)
 {
+    D("enable:%d", enable);
     if (s->read_poll != enable) { /* Do nothing if not changed. */
         s->read_poll = enable;
         netmap_update_fd_handler(s);
@@ -122,6 +124,7 @@ static void netmap_read_poll(NetmapState *s, bool enable)
 /* Update the write handler. */
 static void netmap_write_poll(NetmapState *s, bool enable)
 {
+    D("enable:%d", enable);
     if (s->write_poll != enable) {
         s->write_poll = enable;
         netmap_update_fd_handler(s);
@@ -132,6 +135,7 @@ static void netmap_poll(NetClientState *nc, bool enable)
 {
     NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
 
+    D("enable:%d", enable);
     if (s->read_poll != enable || s->write_poll != enable) {
         s->write_poll = enable;
         s->read_poll  = enable;
@@ -218,8 +222,6 @@ static ssize_t netmap_receive_iov_flags(NetClientState * nc,
     int j;
     uint32_t i;
 
-    if (unlikely(!ring)) {
-        /* Drop the packet. */
         return size;
     }
 
@@ -379,6 +381,10 @@ static void netmap_cleanup(NetClientState *nc)
 
     qemu_purge_queued_packets(nc);
 
+    if (s->netmap_pt.full_configured) {
+        netmap_pt_full_delete(&s->netmap_pt);
+    }
+
     netmap_poll(nc, false);
     nm_close(s->nmd);
     s->nmd = NULL;
@@ -504,6 +510,7 @@ static int netmap_pt_can_send(void *opaque)
 static void netmap_pt_update_fd_handler(NetmapState *s);
 static void netmap_pt_write_poll(NetmapState *s, bool enable)
 {
+    D("enable: %d", enable);
     if (s->write_poll != enable) {
         s->write_poll = enable;
         netmap_pt_update_fd_handler(s);
@@ -537,11 +544,12 @@ static void netmap_pt_notify_rx(void *opaque)
 
 static void netmap_pt_update_fd_handler(NetmapState *s)
 {
-        qemu_set_fd_handler2(s->nmd->fd,
-                s->read_poll  ? netmap_pt_can_send  : NULL,
-                s->read_poll  ? netmap_pt_notify_rx : NULL,
-                s->write_poll ? netmap_pt_notify_tx : NULL,
-                s);
+    D("read_poll: %d, write_poll: %d", s->read_poll, s->write_poll);
+    qemu_set_fd_handler2(s->nmd->fd,
+	    s->read_poll  ? netmap_pt_can_send  : NULL,
+	    s->read_poll  ? netmap_pt_notify_rx : NULL,
+	    s->write_poll ? netmap_pt_notify_tx : NULL,
+	    s);
 }
 
 int netmap_pt_start(NetmapPTState *pt)
@@ -551,12 +559,31 @@ int netmap_pt_start(NetmapPTState *pt)
     if (pt->started)
         return 0;
 
-    qemu_set_fd_handler2(n->nmd->fd,
+    if (pt->acked_features & NETMAP_PT_BASE) {
+        D("BASE");
+        qemu_set_fd_handler2(n->nmd->fd,
                          netmap_pt_can_send,
                          netmap_pt_notify_rx,
                          NULL,
                          n);
+    }
+
     pt->started = true;
+    return 0;
+}
+
+int netmap_pt_stop(NetmapPTState *pt)
+{
+    NetmapState *n = pt->netmap;
+
+    if (!pt->started)
+        return 0;
+
+    if (pt->acked_features & NETMAP_PT_BASE) {
+        netmap_update_fd_handler(n);
+    }
+
+    pt->started = false;
     return 0;
 }
 
@@ -595,6 +622,51 @@ netmap_pt_rxsync(NetmapPTState *nc)
                          NULL,
                          n);
     return 0;
+}
+
+int
+netmap_pt_full_create(NetmapPTState *nc, struct vPT_Config *conf)
+{
+    NetmapState *n = nc->netmap;
+    int err;
+    struct nmreq req;
+
+    memset(&req, 0, sizeof(req));
+    pstrcpy(req.nr_name, sizeof(req.nr_name), n->ifname);
+    req.nr_version = NETMAP_API;
+    req.nr_cmd = NETMAP_PT_CREATE;
+    nmr_write_buf(&req, conf, sizeof(*conf));
+    err = ioctl(n->nmd->fd, NIOCREGIF, &req);
+    if (err) {
+        error_report("Unable to execute NETMAP_PT_CREATE on %s: %s",
+                     n->ifname, strerror(errno));
+    } else
+        nc->full_configured = true;
+
+    return err;
+}
+
+int
+netmap_pt_full_delete(NetmapPTState *nc)
+{
+    NetmapState *n = nc->netmap;
+    int err;
+    struct nmreq req;
+
+    D("");
+
+    memset(&req, 0, sizeof(req));
+    pstrcpy(req.nr_name, sizeof(req.nr_name), n->ifname);
+    req.nr_version = NETMAP_API;
+    req.nr_cmd = NETMAP_PT_DELETE;
+    err = ioctl(n->nmd->fd, NIOCREGIF, &req);
+    if (err) {
+        error_report("Unable to execute NETMAP_PT_DELETE on %s: %s",
+                     n->ifname, strerror(errno));
+    } else
+        nc->full_configured = false;
+
+    return err;
 }
 
 /* NetClientInfo methods */
@@ -656,6 +728,10 @@ int net_init_netmap(const NetClientOptions *opts,
     if (netmap_opts->rxslots) {
 	req.nr_rx_slots = netmap_opts->txslots;
     }
+    if (netmap_opts->pt_full) {
+        req.nr_flags |= NR_PASSTHROUGH_FULL;
+        D("PT_FULL required");
+    }
 
     nmd = nm_open(netmap_opts->ifname, &req, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL, NULL);
     if (nmd == NULL) {
@@ -673,13 +749,15 @@ int net_init_netmap(const NetClientOptions *opts,
     s->txr = NETMAP_TXRING(nmd->nifp, 0);
     s->rxr = NETMAP_RXRING(nmd->nifp, 0);
     s->vnet_hdr_len = 0;
-    netmap_read_poll(s, true); /* Initially only poll for reads. */
+    //netmap_read_poll(s, true); /* Initially only poll for reads. */
+    netmap_read_poll(s, false); /* Initially only poll for reads. */
     pstrcpy(s->ifname, sizeof(s->ifname), netmap_opts->ifname);
     s->txsync_callback = s->txsync_callback_arg = NULL;
 
     s->netmap_pt.netmap = s;
-    s->netmap_pt.features = NETMAP_PT_BASE;
+    s->netmap_pt.features = NETMAP_PT_FULL;
     s->netmap_pt.acked_features = 0;
+    s->netmap_pt.full_configured = false;
 
     if (netmap_opts->has_vhost && netmap_opts->vhost) {
         VhostNetOptions options;

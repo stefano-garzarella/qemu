@@ -223,10 +223,15 @@ typedef struct E1000State_st {
     struct V1000Config cfg;
 #endif /* V1000 */
 #ifdef CONFIG_NETMAP_PASSTHROUGH
-    bool pt_enable;
+    uint32_t pt_type;
+    char *pt_string;
     NetmapPTState *pt;      /* passthrough state (shared with backend) */
     MemoryRegion pt_bar;     /* netmap shared memory in passthrough mode */
     MemoryRegion pt_mr;     /* netmap shared memory in passthrough mode */
+    EventNotifier g2h_tx_notifier, g2h_rx_notifier;
+    //EventNotifier h2g_tx_notifier, h2g_rx_notifier;
+    EventNotifier h2g_notifier;
+    struct vPT_Config vpt_cfg;
 #define NETMAP_PT_BAR 3
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 #endif /* CONFIG_E1000_PARAVIRT */
@@ -2110,6 +2115,11 @@ set_ptfeat(E1000State *s, int index, uint32_t val)
     /* ignore writes to ptfeat if passthrough is not compiled-in */
 }
 
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+static int e1000_vPT_up(E1000State *s);
+static int e1000_vPT_down(E1000State *s);
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
+
 static void
 set_ptctl(E1000State *s, int index, uint32_t val)
 {
@@ -2133,6 +2143,9 @@ set_ptctl(E1000State *s, int index, uint32_t val)
     switch (val) {
     case NET_PARAVIRT_PTCTL_FINALIZE:
         ret = netmap_pt_start(pt);
+        break;
+    case NET_PARAVIRT_PTCTL_DEREF:
+        ret = netmap_pt_stop(pt);
         break;
     case NET_PARAVIRT_PTCTL_CONFIG:
         ret = netmap_pt_get_mem(pt);
@@ -2162,6 +2175,16 @@ set_ptctl(E1000State *s, int index, uint32_t val)
     case NET_PARAVIRT_PTCTL_RXSYNC:
         ret = netmap_pt_rxsync(pt);
         break;
+    case NET_PARAVIRT_PTCTL_RINGSCREATE:
+        ret = e1000_vPT_up(s);
+        if(ret) {
+            printf("Error: Unable to use passthrough\n");
+            exit(EXIT_FAILURE);
+        }
+        break;
+    case NET_PARAVIRT_PTCTL_RINGSDELETE:
+        ret = e1000_vPT_down(s);
+        break;
     }
 out:
     ND("ret %d", ret);
@@ -2169,6 +2192,115 @@ out:
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 }
 
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+static int
+e1000_vPT_up(E1000State *s)
+{
+    PCIDevice *d = PCI_DEVICE(s);
+    //AddressSpace *as = pci_get_address_space(d);
+    NetmapPTState *pt = s->pt;
+    MSIMessage msg;
+
+    if (!pt || s->pt_type != NETMAP_PT_FULL) {
+        return 0;
+    }
+
+    if (!s->csb) {
+        printf("Unable to use passthrough full: CSB undefined\n");
+        goto err;
+    }
+
+    if (!s->msix) {
+        printf("Unable to use passthrough full: MSI-X required\n");
+        goto err;
+    }
+
+    /* set up guest to host (TX and RX) eventfd */
+    if (event_notifier_init(&s->g2h_tx_notifier, 0)) {
+        printf("event_notifier_init() error\n");
+        goto err;
+    }
+
+    if (event_notifier_init(&s->g2h_rx_notifier, 0)) {
+        printf("event_notifier_init() error\n");
+        goto err;
+    }
+
+    memory_region_add_eventfd(&s->mmio, TDT << 2, 4, false, 0,
+            &s->g2h_tx_notifier);
+    memory_region_add_eventfd(&s->mmio, RDT << 2, 4, false, 0,
+            &s->g2h_rx_notifier);
+
+    /* set up host to guest irqfd */
+    if (event_notifier_init(&s->h2g_notifier, 0)) {
+        printf("event_notifier_init() error\n");
+        goto err;
+    }
+
+    msg = msix_get_message(d, E1000_MSIX_DATA_VECTOR);
+    if ((s->virq = kvm_irqchip_add_msi_route(kvm_state, msg)) < 0) {
+        printf("Error: kvm_irqchip_add_msi_route(): %d\n", -s->virq);
+        //return -s->virq;
+        goto err;
+    }
+    if (kvm_irqchip_add_irqfd_notifier(kvm_state, &s->h2g_notifier,
+                NULL, s->virq)) {
+        printf("Error: kvm_irqchip_add_irqfd()\n");
+        goto err;
+    }
+
+    /* Configure the RX ring */
+    s->vpt_cfg.rx_ring.ioeventfd = event_notifier_get_fd(&s->g2h_rx_notifier);
+    s->vpt_cfg.rx_ring.irqfd = event_notifier_get_fd(&s->h2g_notifier);
+    s->vpt_cfg.rx_ring.resamplefd = ~0U;
+
+    /* Configure the RX ring */
+    s->vpt_cfg.tx_ring.ioeventfd = event_notifier_get_fd(&s->g2h_tx_notifier);
+    s->vpt_cfg.tx_ring.irqfd = event_notifier_get_fd(&s->h2g_notifier);
+    s->vpt_cfg.tx_ring.resamplefd = ~0U;
+
+    /* Configure the net backend */
+    s->nic->ncs->peer->info->poll(s->nic->ncs->peer, false); //XXX
+    s->vpt_cfg.netmap_fd = qemu_peer_get_fd(s->nic->ncs);
+    s->vpt_cfg.csb = s->csb;
+
+    return netmap_pt_full_create(pt, &s->vpt_cfg);
+
+    //return 0;
+err:
+    s->pt_type = 0;
+    return -1;
+}
+
+static int
+e1000_vPT_down(E1000State *s)
+{
+    if(!s->pt || s->pt_type != NETMAP_PT_FULL) {
+        return 0;
+    }
+    /* clean up guest to host (TX and RX) eventfd */
+    memory_region_del_eventfd(&s->mmio, RDT << 2, 4, false, 0,
+            &s->g2h_rx_notifier);
+    event_notifier_cleanup(&s->g2h_rx_notifier);
+    memory_region_del_eventfd(&s->mmio, TDT << 2, 4, false, 0,
+            &s->g2h_tx_notifier);
+    event_notifier_cleanup(&s->g2h_tx_notifier);
+
+    /* set up host to guest irqfd */
+    if (kvm_irqchip_remove_irqfd_notifier(kvm_state, &s->h2g_notifier,
+                s->virq)) {
+        printf("Error: kvm_irqchip_remove_irqfd_notifier()\n");
+        //s->pt_type = 0;
+        return -1;
+    }
+    event_notifier_cleanup(&s->h2g_notifier);
+
+    //s->nic->ncs->peer->info->poll(s->nic->ncs->peer, true); //XXX
+
+    return netmap_pt_full_delete(s->pt);
+}
+
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 static void
 set_32bit(E1000State *s, int index, uint32_t val)
 {
@@ -2787,7 +2919,19 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     d->tx_hdr = NULL;
 
 #ifdef CONFIG_NETMAP_PASSTHROUGH
-    if (d->pt_enable) {
+    if (d->pt_string) {
+        if (strncmp(d->pt_string, "base", 4) == 0) {
+            d->pt_type = NETMAP_PT_BASE;
+        } else if (strncmp(d->pt_string, "full", 4) == 0) {
+            d->pt_type = NETMAP_PT_FULL;
+        } else {
+            fprintf(stderr, "e1000: 'passthrough' must be 'base' or 'full'\n");
+            exit(1);
+        }
+    } else
+        d->pt_type = 0;
+
+    if (d->pt_type) {
         uint32_t features;
         uint64_t size;
         int ret;
@@ -2796,15 +2940,18 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 
         if (d->pt == NULL) {
             D("passthrough not supported by backend");
+            d->pt_type = 0;
             goto pt_end;
         }
-        features = netmap_pt_get_features(d->pt, NETMAP_PT_BASE | NETMAP_PT_FULL);
+        //features = netmap_pt_get_features(d->pt, NETMAP_PT_BASE | NETMAP_PT_FULL);
+        features = netmap_pt_get_features(d->pt, d->pt_type);
         netmap_pt_ack_features(d->pt, features);
         D("passthrough features: %x", features);
         ret = netmap_pt_get_mem(d->pt);
         if (ret || d->pt->mem == NULL) {
             D("shared memory not mapped");
             d->pt = NULL;
+            d->pt_type = 0;
             goto pt_end;
         }
         size = upper_pow2(d->pt->memsize);
@@ -2822,6 +2969,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     } else {
         D("no passthrough requested");
         d->pt = NULL;
+        d->pt_type = 0;
     }
 pt_end:
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
@@ -2848,7 +2996,7 @@ static Property e1000_properties[] = {
     DEFINE_PROP_BOOL("v1000", E1000State, v1000, false),
 #endif /* V1000 */
 #ifdef CONFIG_NETMAP_PASSTHROUGH
-    DEFINE_PROP_BOOL("passthrough", E1000State, pt_enable, false),
+    DEFINE_PROP_STRING("passthrough", E1000State, pt_string),
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 #endif /* CONFIG_E1000_PARAVIRT */
     DEFINE_PROP_END_OF_LIST(),

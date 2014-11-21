@@ -2,9 +2,11 @@
 #define NETMAP_PT_H
 
 #include "net/net.h"
+#include "vhost_netmap_pt_user.h"
 
 struct netmap_pt {
     bool started;
+    bool full_configured;
     struct NetmapState *netmap;
     unsigned long features;
     unsigned long acked_features;
@@ -33,4 +35,7 @@ int netmap_pt_get_mem(NetmapPTState *pt);
 int netmap_pt_txsync(NetmapPTState *pt);
 int netmap_pt_rxsync(NetmapPTState *pt);
 int netmap_pt_start(NetmapPTState *pt);
+int netmap_pt_stop(NetmapPTState *pt);
+int netmap_pt_full_create(NetmapPTState *nc, struct vPT_Config *conf);
+int netmap_pt_full_delete(NetmapPTState *nc);
 #endif
