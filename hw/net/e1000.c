@@ -2264,6 +2264,12 @@ e1000_vPT_up(E1000State *s)
     s->vpt_cfg.netmap_fd = qemu_peer_get_fd(s->nic->ncs);
     s->vpt_cfg.csb = s->csb;
 
+    /* TODO-ste: Initialize CSB */
+    s->csb->host_need_txkick = 1;
+    s->csb->guest_need_txkick = 0;
+    s->csb->guest_need_rxkick = 1;
+    s->csb->host_need_rxkick = 1;
+
     return netmap_pt_full_create(pt, &s->vpt_cfg);
 
     //return 0;
