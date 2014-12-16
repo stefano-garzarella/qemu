@@ -2175,14 +2175,14 @@ set_ptctl(E1000State *s, int index, uint32_t val)
     case NET_PARAVIRT_PTCTL_RXSYNC:
         ret = netmap_pt_rxsync(pt);
         break;
-    case NET_PARAVIRT_PTCTL_RINGSCREATE:
+    case NET_PARAVIRT_PTCTL_REGIF:
         ret = e1000_vPT_up(s);
         if(ret) {
             printf("Error: Unable to use passthrough\n");
             exit(EXIT_FAILURE);
         }
         break;
-    case NET_PARAVIRT_PTCTL_RINGSDELETE:
+    case NET_PARAVIRT_PTCTL_UNREGIF:
         ret = e1000_vPT_down(s);
         break;
     }
