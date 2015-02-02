@@ -59,8 +59,11 @@ typedef struct NetmapState {
     VHostNetState *vhost_net;
     int                 vnet_hdr_len;  /* Current virtio-net header length. */
     NetmapPTState       netmap_pt;
+    QTAILQ_ENTRY(NetmapState) next;
 } NetmapState;
 
+static QTAILQ_HEAD(, NetmapState) netmap_clients;
+static bool netmap_clients_init = false;
 
 #ifndef __FreeBSD__
 #define pkt_copy bcopy
@@ -390,6 +393,8 @@ static void netmap_cleanup(NetClientState *nc)
     netmap_poll(nc, false);
     nm_close(s->nmd);
     s->nmd = NULL;
+
+    QTAILQ_REMOVE(&netmap_clients, s, next);
 }
 
 /* Offloading manipulation support callbacks. */
@@ -708,6 +713,12 @@ int net_init_netmap(const NetClientOptions *opts,
     NetmapState *s;
     struct nmreq req;
 
+    /* Init netmap_clients queue */
+    if (!netmap_clients_init) {
+        QTAILQ_INIT(&netmap_clients);
+        netmap_clients_init = true;
+    }
+
     memset(&req, 0, sizeof(req));
 
     if (netmap_opts->rings) {
@@ -785,6 +796,8 @@ int net_init_netmap(const NetClientOptions *opts,
         }
         D("vhost init\n");
     }
+
+    QTAILQ_INSERT_TAIL(&netmap_clients, s, next);
 
     return 0;
 }
