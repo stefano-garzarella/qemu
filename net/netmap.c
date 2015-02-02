@@ -700,6 +700,23 @@ static NetClientInfo net_netmap_info = {
     .get_netmap_pt = netmap_get_netmap_pt,
 };
 
+/*
+ * find nm_desc parent with same allocator
+ */
+static struct nm_desc *netmap_find_parent(struct nm_desc *nmd)
+{
+    NetmapState *s;
+
+    QTAILQ_FOREACH(s, &netmap_clients, next) {
+        if (nmd->req.nr_arg2 == s->nmd->req.nr_arg2) {
+            D("found parent - ifname: %s mem_id: %d", s->ifname, s->nmd->req.nr_arg2);
+            return s->nmd;
+        }
+    }
+
+    return NULL;
+}
+
 /* The exported init function
  *
  * ... -net netmap,ifname="..."
@@ -710,6 +727,7 @@ int net_init_netmap(const NetClientOptions *opts,
     const NetdevNetmapOptions *netmap_opts = opts->netmap;
     NetClientState *nc;
     struct nm_desc *nmd;
+    struct nm_desc *parent_nmd;
     NetmapState *s;
     struct nmreq req;
 
@@ -746,10 +764,18 @@ int net_init_netmap(const NetClientOptions *opts,
         D("PT_FULL required");
     }
 
-    nmd = nm_open(netmap_opts->ifname, &req, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL, NULL);
+    nmd = nm_open(netmap_opts->ifname, &req, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL | NM_OPEN_NO_MMAP, NULL);
     if (nmd == NULL) {
         return -1;
     }
+    /* check parent (nm_desc with the same allocator already mapped) */
+    parent_nmd = netmap_find_parent(nmd);
+    /* mmap or inherit from parent */
+    if (nm_mmap(nmd, parent_nmd)) {
+        nm_close(nmd);
+        return -1;
+    }
+
     D("cfg: tx %d*%d rx %d*%d",
         nmd->req.nr_tx_slots,
         nmd->req.nr_tx_rings,
