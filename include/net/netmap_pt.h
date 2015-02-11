@@ -2,6 +2,7 @@
 #define NETMAP_PT_H
 
 #include "net/net.h"
+#include "exec/memory.h"
 #include "vhost_netmap_pt_user.h"
 
 struct netmap_pt {
@@ -18,6 +19,9 @@ struct netmap_pt {
     uint16_t num_rx_rings;
     uint16_t num_tx_slots;
     uint16_t num_rx_slots;
+    MemoryRegion mr;
+    bool mr_init;
+    bool mr_alias;
 };
 
 typedef struct netmap_pt NetmapPTState;
@@ -33,6 +37,7 @@ uint32_t netmap_pt_get_features(NetmapPTState *pt, uint32_t features);
 void netmap_pt_ack_features(NetmapPTState *pt, uint32_t features);
 int netmap_pt_get_mem(NetmapPTState *pt);
 int netmap_pt_get_hostmemid(NetmapPTState *pt);
+struct MemoryRegion *netmap_pt_init_ram_ptr(NetmapPTState *pt);
 int netmap_pt_txsync(NetmapPTState *pt);
 int netmap_pt_rxsync(NetmapPTState *pt);
 int netmap_pt_start(NetmapPTState *pt);

@@ -224,10 +224,10 @@ typedef struct E1000State_st {
 #endif /* V1000 */
 #ifdef CONFIG_NETMAP_PASSTHROUGH
     uint32_t pt_type;
+    bool pt_up;;
     char *pt_string;
     NetmapPTState *pt;      /* passthrough state (shared with backend) */
     MemoryRegion pt_bar;     /* netmap shared memory in passthrough mode */
-    MemoryRegion pt_mr;     /* netmap shared memory in passthrough mode */
     EventNotifier g2h_tx_notifier, g2h_rx_notifier;
     //EventNotifier h2g_tx_notifier, h2g_rx_notifier;
     EventNotifier h2g_notifier;
@@ -2135,10 +2135,6 @@ set_ptctl(E1000State *s, int index, uint32_t val)
         goto out;
     }
 
-    if (s->csb == NULL) {
-        D("csb not initialized");
-        goto out;
-    }
 
     switch (val) {
     case NET_PARAVIRT_PTCTL_FINALIZE:
@@ -2154,6 +2150,10 @@ set_ptctl(E1000State *s, int index, uint32_t val)
         if (pt->mem == NULL) {
             ret = EINVAL;
             break;
+        }
+        if (s->csb == NULL) {
+            D("csb not initialized");
+            goto out;
         }
         s->csb->memsize = pt->memsize;
         s->csb->pci_bar = NETMAP_PT_BAR;
@@ -2176,10 +2176,11 @@ set_ptctl(E1000State *s, int index, uint32_t val)
         ret = netmap_pt_rxsync(pt);
         break;
     case NET_PARAVIRT_PTCTL_REGIF:
+    	D("REGIF - e1000_vPT_UP");
         ret = e1000_vPT_up(s);
         if(ret) {
             printf("Error: Unable to use passthrough\n");
-            exit(EXIT_FAILURE);
+            //exit(EXIT_FAILURE);
         }
         break;
     case NET_PARAVIRT_PTCTL_UNREGIF:
@@ -2203,9 +2204,15 @@ e1000_vPT_up(E1000State *s)
     //AddressSpace *as = pci_get_address_space(d);
     NetmapPTState *pt = s->pt;
     MSIMessage msg;
+    int error = 0;
 
     if (!pt || s->pt_type != NETMAP_PT_FULL) {
         return 0;
+    }
+
+    if (s->pt_up) {
+        printf("Unable to use passthrough full: vPT already UP\n");
+        goto err;
     }
 
     if (!s->csb) {
@@ -2273,10 +2280,14 @@ e1000_vPT_up(E1000State *s)
     s->csb->guest_need_rxkick = 1;
     s->csb->host_need_rxkick = 1;
 
-    return netmap_pt_full_create(pt, &s->vpt_cfg);
+    error = netmap_pt_full_create(pt, &s->vpt_cfg);
+    if (error)
+        return error;
 
-    //return 0;
+    s->pt_up = true;
+    return 0;
 err:
+    s->pt_up = false;
     s->pt_type = 0;
     return -1;
 }
@@ -2284,9 +2295,12 @@ err:
 static int
 e1000_vPT_down(E1000State *s)
 {
-    if(!s->pt || s->pt_type != NETMAP_PT_FULL) {
+    if(!s->pt || s->pt_type != NETMAP_PT_FULL || !s->pt_up) {
         return 0;
     }
+
+    s->pt_up = false;
+
     /* clean up guest to host (TX and RX) eventfd */
     memory_region_del_eventfd(&s->mmio, RDT << 2, 4, false, 0,
             &s->g2h_rx_notifier);
@@ -2928,6 +2942,8 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     d->tx_hdr = NULL;
 
 #ifdef CONFIG_NETMAP_PASSTHROUGH
+    d->pt_up = false;
+
     if (d->pt_string) {
         if (strncmp(d->pt_string, "base", 4) == 0) {
             d->pt_type = NETMAP_PT_BASE;
@@ -2941,6 +2957,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
         d->pt_type = 0;
 
     if (d->pt_type) {
+        MemoryRegion *pt_mr;
         uint32_t features;
         uint64_t size;
         int ret;
@@ -2966,11 +2983,9 @@ static int pci_e1000_init(PCIDevice *pci_dev)
         size = upper_pow2(d->pt->memsize);
         D("BAR size %lx (%lu MiB)", size, size >> 20);
         memory_region_init(&d->pt_bar, OBJECT(d), "e1000-pt-bar", size);
-        memory_region_init_ram_ptr(&d->pt_mr, OBJECT(d), "netmap",
-                d->pt->memsize, d->pt->mem);
-        memory_region_add_subregion(&d->pt_bar, 0, &d->pt_mr);
-        ND("mem %s", (const char*)d->pt->mem);
-        vmstate_register_ram(&d->pt_mr, DEVICE(d));
+        pt_mr = netmap_pt_init_ram_ptr(d->pt);
+        D("pt_mr: %p", pt_mr);
+        memory_region_add_subregion(&d->pt_bar, 0, pt_mr);
         pci_register_bar(pci_dev, NETMAP_PT_BAR,
                 PCI_BASE_ADDRESS_SPACE_MEMORY  |
                 PCI_BASE_ADDRESS_MEM_PREFETCH /*  |

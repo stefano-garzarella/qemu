@@ -492,6 +492,7 @@ netmap_pt_ack_features(NetmapPTState *nc, uint32_t features)
     nc->acked_features |= features;
 }
 
+/* XXX: set mem info in net_init_netmap()?? */
 int
 netmap_pt_get_mem(NetmapPTState *nc)
 {
@@ -519,6 +520,54 @@ netmap_pt_get_hostmemid(NetmapPTState *nc)
 
     return n->nmd->req.nr_arg2;
 }
+
+/* find parent MemoryRegion */
+static MemoryRegion*
+netmap_pt_find_parent_mr(NetmapPTState *pt)
+{
+    NetmapState *s;
+
+    QTAILQ_FOREACH(s, &netmap_clients, next) {
+        netmap_pt_get_mem(&s->netmap_pt);
+        if ((s->netmap_pt.mem == pt->mem) && (s->netmap_pt.memsize == pt->memsize)
+                && s->netmap_pt.mr_init && !s->netmap_pt.mr_alias) {
+            return &s->netmap_pt.mr;
+        }
+    }
+
+    return NULL;
+}
+
+/* init ram ptr to netmap allocator */
+struct MemoryRegion *
+netmap_pt_init_ram_ptr(NetmapPTState *pt)
+{
+    MemoryRegion *parent_mr;
+    char mem_name[256]; //XXX
+
+    if (pt->mr_init) {
+        goto already_init;
+    }
+
+    netmap_pt_get_mem(pt);
+
+    parent_mr = netmap_pt_find_parent_mr(pt);
+    if (parent_mr) { /* create an alias of parent MemoryRegion */
+        D("mapped with alias");
+        snprintf(mem_name, 256, "netmap-%s-alias", pt->netmap->ifname);
+        memory_region_init_alias(&pt->mr, NULL, mem_name, parent_mr, 0, pt->memsize);
+        pt->mr_alias = true;
+    } else { /* init a new MemoryRegion */
+        /* maybe is better if the OWNER is the NIC. Now the owner is the vm */
+        snprintf(mem_name, 256, "netmap-%s", pt->netmap->ifname);
+        memory_region_init_ram_ptr(&pt->mr, NULL, mem_name, pt->memsize, pt->mem);
+        vmstate_register_ram_global(&pt->mr);
+    }
+    pt->mr_init = true;
+already_init:
+    return &pt->mr;
+}
+
 static int netmap_pt_can_send(void *opaque)
 {
     return 1;
@@ -713,7 +762,8 @@ static NetClientInfo net_netmap_info = {
 /*
  * find nm_desc parent with same allocator
  */
-static struct nm_desc *netmap_find_parent(struct nm_desc *nmd)
+static struct nm_desc*
+netmap_find_parent(struct nm_desc *nmd)
 {
     NetmapState *s;
 
