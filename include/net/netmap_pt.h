@@ -32,6 +32,7 @@ typedef struct netmap_pt NetmapPTState;
 uint32_t netmap_pt_get_features(NetmapPTState *pt, uint32_t features);
 void netmap_pt_ack_features(NetmapPTState *pt, uint32_t features);
 int netmap_pt_get_mem(NetmapPTState *pt);
+int netmap_pt_get_hostmemid(NetmapPTState *pt);
 int netmap_pt_txsync(NetmapPTState *pt);
 int netmap_pt_rxsync(NetmapPTState *pt);
 int netmap_pt_start(NetmapPTState *pt);

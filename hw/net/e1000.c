@@ -2185,6 +2185,9 @@ set_ptctl(E1000State *s, int index, uint32_t val)
     case NET_PARAVIRT_PTCTL_UNREGIF:
         ret = e1000_vPT_down(s);
         break;
+    case NET_PARAVIRT_PTCTL_HOSTMEMID:
+    	ret = netmap_pt_get_hostmemid(pt);
+    	break;
     }
 out:
     ND("ret %d", ret);

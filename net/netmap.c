@@ -509,6 +509,16 @@ netmap_pt_get_mem(NetmapPTState *nc)
     return 0;
 }
 
+int
+netmap_pt_get_hostmemid(NetmapPTState *nc)
+{
+    NetmapState *n = nc->netmap;
+
+    if (n->nmd == NULL)
+        return EINVAL;
+
+    return n->nmd->req.nr_arg2;
+}
 static int netmap_pt_can_send(void *opaque)
 {
     return 1;
