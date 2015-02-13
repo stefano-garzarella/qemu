@@ -826,12 +826,14 @@ int net_init_netmap(const NetClientOptions *opts,
 
     nmd = nm_open(netmap_opts->ifname, &req, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL | NM_OPEN_NO_MMAP, NULL);
     if (nmd == NULL) {
+        error_report("Failed to open %ss: %s", netmap_opts->ifname, strerror(errno));
         return -1;
     }
     /* check parent (nm_desc with the same allocator already mapped) */
     parent_nmd = netmap_find_parent(nmd);
     /* mmap or inherit from parent */
     if (nm_mmap(nmd, parent_nmd)) {
+        error_report("failed to mmap %s: %s", netmap_opts->ifname, strerror(errno));
         nm_close(nmd);
         return -1;
     }
