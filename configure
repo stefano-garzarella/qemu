@@ -234,6 +234,7 @@ docs=""
 fdt=""
 netmap="no"
 e1000_paravirt=""
+ptnetmap=""
 pixman=""
 sdl=""
 sdlabi="1.2"
@@ -898,11 +899,15 @@ for opt do
   ;;
   --enable-vde) vde="yes"
   ;;
-  --disable-netmap) netmap="no"
+  --disable-netmap) netmap="no"; ptnetmap="no";
   ;;
   --enable-netmap) netmap="yes"
   ;;
-  --disable-e1000-paravirt) e1000_paravirt="no"
+  --disable-ptnetmap) ptnetmap="no";
+  ;;
+  --enable-ptnetmap) netmap="yes"; ptnetmap="yes"; e1000_paravirt="yes"
+  ;;
+  --disable-e1000-paravirt) e1000_paravirt="no"; ptnetmap="no";
   ;;
   --enable-e1000-paravirt) e1000_paravirt="yes"
   ;;
@@ -1345,6 +1350,8 @@ Advanced options (experts only):
   --enable-vde             enable support for vde network
   --disable-netmap         disable support for netmap network
   --enable-netmap          enable support for netmap network
+  --disable-ptnetmap       disable support for netmap passthrough
+  --enable-ptnetmap        enable support for netmap passthrough
   --disable-e1000-paravirt disable support for e1000 paravirtualization
   --enable-e1000-paravirt  enable support for e1000 paravirtualization (needs guest support)
   --disable-linux-aio      disable Linux AIO support
@@ -4218,6 +4225,7 @@ echo "GUEST_BASE        $guest_base"
 echo "PIE               $pie"
 echo "vde support       $vde"
 echo "netmap support    $netmap"
+echo "ptnetmap support  $ptnetmap"
 echo "e1000 paravirt    $e1000_paravirt"
 echo "Linux AIO support $linux_aio"
 echo "ATTR/XATTR support $attr"
@@ -4370,6 +4378,9 @@ if test "$vde" = "yes" ; then
 fi
 if test "$netmap" = "yes" ; then
   echo "CONFIG_NETMAP=y" >> $config_host_mak
+fi
+if test "$ptnetmap" = "yes" ; then
+  echo "CONFIG_NETMAP_PASSTHROUGH=y" >> $config_host_mak
 fi
 if test "$e1000_paravirt" = "yes" ; then
   echo "CONFIG_E1000_PARAVIRT=y" >> $config_host_mak

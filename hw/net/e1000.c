@@ -23,8 +23,6 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
-#define CONFIG_NETMAP_PASSTHROUGH
-
 
 #define WITH_D	/* include debugging macros from qemu-common.h */
 #include "hw/hw.h"
