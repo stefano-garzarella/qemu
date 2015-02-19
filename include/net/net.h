@@ -67,9 +67,9 @@ struct vhost_net;
 typedef struct vhost_net VHostNetState;
 typedef VHostNetState *(GetVhostNet)(NetClientState *);
 struct netmap_pt;
-typedef struct netmap_pt NetmapPTState;
-typedef NetmapPTState *(GetNetmapPT)(NetClientState *);
-typedef int (NotifyNetmapPT)(NetClientState *, int);
+typedef struct ptnetmap_state PTNetmapState;
+typedef PTNetmapState *(GetPTNetmap)(NetClientState *);
+typedef int (NotifyPTNetmap)(NetClientState *, int);
 
 typedef struct NetClientInfo {
     NetClientOptionsKind type;
@@ -93,8 +93,8 @@ typedef struct NetClientInfo {
     SetVnetHdrLen *set_vnet_hdr_len;
     GetFd *get_fd;
     GetVhostNet *get_vhost_net;
-    GetNetmapPT *get_netmap_pt;
-    NotifyNetmapPT *notify_netmap_pt;
+    GetPTNetmap *get_ptnetmap;
+    NotifyPTNetmap *notify_ptnetmap;
 } NetClientInfo;
 
 struct NetClientState {
@@ -165,7 +165,7 @@ void qemu_using_vnet_hdr(NetClientState *nc, bool enable);
 void qemu_set_offload(NetClientState *nc, int csum, int tso4, int tso6,
                       int ecn, int ufo);
 void qemu_set_vnet_hdr_len(NetClientState *nc, int len);
-NetmapPTState *qemu_peer_get_netmap_pt(NetClientState *nc);
+PTNetmapState *qemu_peer_get_ptnetmap(NetClientState *nc);
 void qemu_macaddr_default_if_unset(MACAddr *macaddr);
 int qemu_show_nic_models(const char *arg, const char *const *models);
 void qemu_check_nic_model(NICInfo *nd, const char *model);
