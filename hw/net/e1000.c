@@ -229,7 +229,7 @@ typedef struct E1000State_st {
     EventNotifier g2h_tx_notifier, g2h_rx_notifier;
     //EventNotifier h2g_tx_notifier, h2g_rx_notifier;
     EventNotifier h2g_notifier;
-    struct vPT_Config vpt_cfg;
+    struct ptn_cfg ptn_cfg;
 #define NETMAP_PT_BAR 3
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 #endif /* CONFIG_E1000_PARAVIRT */
@@ -2258,19 +2258,14 @@ e1000_vPT_up(E1000State *s)
     }
 
     /* Configure the RX ring */
-    s->vpt_cfg.rx_ring.ioeventfd = event_notifier_get_fd(&s->g2h_rx_notifier);
-    s->vpt_cfg.rx_ring.irqfd = event_notifier_get_fd(&s->h2g_notifier);
-    s->vpt_cfg.rx_ring.resamplefd = ~0U;
+    s->ptn_cfg.rx_ring.ioeventfd = event_notifier_get_fd(&s->g2h_rx_notifier);
+    s->ptn_cfg.rx_ring.irqfd = event_notifier_get_fd(&s->h2g_notifier);
 
     /* Configure the RX ring */
-    s->vpt_cfg.tx_ring.ioeventfd = event_notifier_get_fd(&s->g2h_tx_notifier);
-    s->vpt_cfg.tx_ring.irqfd = event_notifier_get_fd(&s->h2g_notifier);
-    s->vpt_cfg.tx_ring.resamplefd = ~0U;
+    s->ptn_cfg.tx_ring.ioeventfd = event_notifier_get_fd(&s->g2h_tx_notifier);
+    s->ptn_cfg.tx_ring.irqfd = event_notifier_get_fd(&s->h2g_notifier);
 
-    /* Configure the net backend */
-    s->nic->ncs->peer->info->poll(s->nic->ncs->peer, false); //XXX
-    s->vpt_cfg.netmap_fd = qemu_peer_get_fd(s->nic->ncs);
-    s->vpt_cfg.csb = s->csb;
+    s->ptn_cfg.csb = s->csb;
 
     /* TODO-ste: Initialize CSB */
     s->csb->host_need_txkick = 1;
@@ -2278,7 +2273,7 @@ e1000_vPT_up(E1000State *s)
     s->csb->guest_need_rxkick = 1;
     s->csb->host_need_rxkick = 1;
 
-    error = netmap_pt_full_create(pt, &s->vpt_cfg);
+    error = netmap_pt_full_create(pt, &s->ptn_cfg);
     if (error)
         return error;
 

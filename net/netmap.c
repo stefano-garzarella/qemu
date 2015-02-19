@@ -691,7 +691,7 @@ netmap_pt_rxsync(NetmapPTState *nc)
 }
 
 int
-netmap_pt_full_create(NetmapPTState *nc, struct vPT_Config *conf)
+netmap_pt_full_create(NetmapPTState *nc, struct ptn_cfg *conf)
 {
     NetmapState *n = nc->netmap;
     int err;

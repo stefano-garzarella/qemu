@@ -3,7 +3,8 @@
 
 #include "net/net.h"
 #include "exec/memory.h"
-#include "vhost_netmap_pt_user.h"
+#include <net/if.h>
+#include <net/netmap.h>
 
 struct netmap_pt {
     bool started;
@@ -42,6 +43,6 @@ int netmap_pt_txsync(NetmapPTState *pt);
 int netmap_pt_rxsync(NetmapPTState *pt);
 int netmap_pt_start(NetmapPTState *pt);
 int netmap_pt_stop(NetmapPTState *pt);
-int netmap_pt_full_create(NetmapPTState *nc, struct vPT_Config *conf);
+int netmap_pt_full_create(NetmapPTState *nc, struct ptn_cfg *conf);
 int netmap_pt_full_delete(NetmapPTState *nc);
 #endif
