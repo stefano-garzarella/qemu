@@ -40,6 +40,7 @@
 #include "qemu/iov.h"
 #include "net/vhost_net.h"
 #include "net/ptnetmap.h"
+#include "net/paravirt.h"
 
 /* XXX Use at your own risk: a synchronization problem in the netmap module
    can freeze your (host) machine. */
@@ -625,7 +626,7 @@ int ptnetmap_start(PTNetmapState *ptn)
     if (ptn->started)
         return 0;
 
-    if (ptn->acked_features & NETMAP_PT_BASE) {
+    if (ptn->acked_features & NET_PTN_FEATURES_BASE) {
         D("BASE");
         qemu_set_fd_handler2(s->nmd->fd,
                          ptnetmap_can_send,
@@ -645,7 +646,7 @@ int ptnetmap_stop(PTNetmapState *ptn)
     if (!ptn->started)
         return 0;
 
-    if (ptn->acked_features & NETMAP_PT_BASE) {
+    if (ptn->acked_features & NET_PTN_FEATURES_BASE) {
         netmap_update_fd_handler(s);
     }
 
@@ -856,7 +857,7 @@ int net_init_netmap(const NetClientOptions *opts,
     s->txsync_callback = s->txsync_callback_arg = NULL;
 
     s->ptnetmap.netmap = s;
-    s->ptnetmap.features = NETMAP_PT_FULL;
+    s->ptnetmap.features = NET_PTN_FEATURES_FULL;
     s->ptnetmap.acked_features = 0;
     s->ptnetmap.full_configured = false;
 

@@ -27,9 +27,6 @@ struct ptnetmap_state {
 
 //typedef struct ptnetmap_state PTNetmapState;
 
-#define NETMAP_PT_BASE  1
-#define NETMAP_PT_FULL  2       /* full passthrough, requires host kernel support */
-
 /* notifications */
 #define NETMAP_PT_RX    1
 #define NETMAP_PT_TX    2

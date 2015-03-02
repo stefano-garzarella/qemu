@@ -2204,7 +2204,7 @@ e1000_ptnetmap_up(E1000State *s)
     MSIMessage msg;
     int error = 0;
 
-    if (!ptn || s->ptn_type != NETMAP_PT_FULL) {
+    if (!ptn || s->ptn_type != NET_PTN_FEATURES_FULL) {
         return 0;
     }
 
@@ -2288,7 +2288,7 @@ err:
 static int
 e1000_ptnetmap_down(E1000State *s)
 {
-    if(!s->ptn || s->ptn_type != NETMAP_PT_FULL || !s->ptn_up) {
+    if(!s->ptn || s->ptn_type != NET_PTN_FEATURES_FULL || !s->ptn_up) {
         return 0;
     }
 
@@ -2939,9 +2939,9 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 
     if (d->ptn_string) {
         if (strncmp(d->ptn_string, "base", 4) == 0) {
-            d->ptn_type = NETMAP_PT_BASE;
+            d->ptn_type = NET_PTN_FEATURES_BASE;
         } else if (strncmp(d->ptn_string, "full", 4) == 0) {
-            d->ptn_type = NETMAP_PT_FULL;
+            d->ptn_type = NET_PTN_FEATURES_FULL;
         } else {
             fprintf(stderr, "e1000: 'passthrough' must be 'base' or 'full'\n");
             exit(1);
@@ -2962,7 +2962,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
             d->ptn_type = 0;
             goto pt_end;
         }
-        //features = ptnetmap_get_features(d->pt, NETMAP_PT_BASE | NETMAP_PT_FULL);
+        //features = ptnetmap_get_features(d->pt, NET_PTN_FEATURES_BASE | NET_PTN_FEATURES_FULL);
         features = ptnetmap_get_features(d->ptn, d->ptn_type);
         ptnetmap_ack_features(d->ptn, features);
         D("passthrough features: %x", features);
