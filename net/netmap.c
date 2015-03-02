@@ -700,7 +700,7 @@ ptnetmap_full_create(PTNetmapState *ptn, struct ptn_cfg *conf)
     memset(&req, 0, sizeof(req));
     pstrcpy(req.nr_name, sizeof(req.nr_name), s->ifname);
     req.nr_version = NETMAP_API;
-    req.nr_cmd = NETMAP_PT_CREATE;
+    req.nr_cmd = NETMAP_PT_HOST_CREATE;
     nmr_write_buf(&req, conf, sizeof(*conf));
     err = ioctl(s->nmd->fd, NIOCREGIF, &req);
     if (err) {
@@ -724,7 +724,7 @@ ptnetmap_full_delete(PTNetmapState *ptn)
     memset(&req, 0, sizeof(req));
     pstrcpy(req.nr_name, sizeof(req.nr_name), s->ifname);
     req.nr_version = NETMAP_API;
-    req.nr_cmd = NETMAP_PT_DELETE;
+    req.nr_cmd = NETMAP_PT_HOST_DELETE;
     err = ioctl(s->nmd->fd, NIOCREGIF, &req);
     if (err) {
         error_report("Unable to execute NETMAP_PT_DELETE on %s: %s",
@@ -820,7 +820,7 @@ int net_init_netmap(const NetClientOptions *opts,
 	req.nr_rx_slots = netmap_opts->txslots;
     }
     if (netmap_opts->pt_full) {
-        req.nr_flags |= NR_PASSTHROUGH_FULL;
+        req.nr_flags |= NR_PASSTHROUGH_HOST;
         D("PT_FULL required");
     }
 
