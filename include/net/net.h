@@ -69,7 +69,6 @@ typedef VHostNetState *(GetVhostNet)(NetClientState *);
 struct netmap_pt;
 typedef struct ptnetmap_state PTNetmapState;
 typedef PTNetmapState *(GetPTNetmap)(NetClientState *);
-typedef int (NotifyPTNetmap)(NetClientState *, int);
 
 typedef struct NetClientInfo {
     NetClientOptionsKind type;
@@ -94,7 +93,6 @@ typedef struct NetClientInfo {
     GetFd *get_fd;
     GetVhostNet *get_vhost_net;
     GetPTNetmap *get_ptnetmap;
-    NotifyPTNetmap *notify_ptnetmap;
 } NetClientInfo;
 
 struct NetClientState {

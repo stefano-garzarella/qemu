@@ -39,8 +39,9 @@
 #include "qemu/error-report.h"
 #include "qemu/iov.h"
 #include "net/vhost_net.h"
+#ifdef CONFIG_NETMAP_PASSTHROUGH
 #include "net/ptnetmap.h"
-#include "net/paravirt.h"
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 
 /* XXX Use at your own risk: a synchronization problem in the netmap module
    can freeze your (host) machine. */
@@ -59,7 +60,9 @@ typedef struct NetmapState {
     void		*txsync_callback_arg;
     VHostNetState *vhost_net;
     int                 vnet_hdr_len;  /* Current virtio-net header length. */
+#ifdef CONFIG_NETMAP_PASSTHROUGH
     PTNetmapState       ptnetmap;
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
     QTAILQ_ENTRY(NetmapState) next;
 } NetmapState;
 
@@ -387,9 +390,11 @@ static void netmap_cleanup(NetClientState *nc)
 
     qemu_purge_queued_packets(nc);
 
-    if (s->ptnetmap.full_configured) {
-        ptnetmap_full_delete(&s->ptnetmap);
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    if (s->ptnetmap.created) {
+        ptnetmap_delete(&s->ptnetmap);
     }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 
     netmap_poll(nc, false);
     nm_close(s->nmd);
@@ -470,7 +475,10 @@ static VHostNetState *netmap_get_vhost_net(NetClientState *nc)
     return s->vhost_net;
 }
 
-
+/*
+ * ptnetmap routines
+ */
+#ifdef CONFIG_NETMAP_PASSTHROUGH
 static PTNetmapState *
 netmap_get_ptnetmap(NetClientState *nc)
 {
@@ -498,6 +506,11 @@ int
 ptnetmap_get_mem(PTNetmapState *ptn)
 {
     NetmapState *s = ptn->netmap;
+
+    if (!(ptn->acked_features & NET_PTN_FEATURES_BASE)) {
+        error_report("ptnetmap features not acked");
+        return EFAULT;
+    }
 
     if (s->nmd == NULL)
         return EINVAL;
@@ -559,7 +572,7 @@ ptnetmap_init_ram_ptr(PTNetmapState *ptn)
         memory_region_init_alias(&ptn->mr, NULL, mem_name, parent_mr, 0, ptn->memsize);
         ptn->mr_alias = true;
     } else { /* init a new MemoryRegion */
-        /* maybe is better if the OWNER is the NIC. Now the owner is the vm */
+        /* XXX: maybe is better if the OWNER is the NIC. Now the owner is the vm */
         snprintf(mem_name, 256, "netmap-%s", ptn->netmap->ifname);
         memory_region_init_ram_ptr(&ptn->mr, NULL, mem_name, ptn->memsize, ptn->mem);
         vmstate_register_ram_global(&ptn->mr);
@@ -569,135 +582,26 @@ already_init:
     return &ptn->mr;
 }
 
-static int ptnetmap_can_send(void *opaque)
-{
-    return 1;
-}
-
-static void ptnetmap_update_fd_handler(NetmapState *s);
-static void ptnetmap_write_poll(NetmapState *s, bool enable)
-{
-    D("enable: %d", enable);
-    if (s->write_poll != enable) {
-        s->write_poll = enable;
-        ptnetmap_update_fd_handler(s);
-    }
-}
-
-static void ptnetmap_notify_tx(void *opaque)
-{
-    NetmapState *s = opaque;
-    PTNetmapState *ptn = &s->ptnetmap;
-
-    if (!ptn->started)
-        return;
-    if (s->nc.peer->info->notify_ptnetmap)
-        s->nc.peer->info->notify_ptnetmap(s->nc.peer, NETMAP_PT_TX);
-    ptnetmap_write_poll(s, nm_ring_empty(s->txr));
-}
-
-static void ptnetmap_notify_rx(void *opaque)
-{
-    NetmapState *s = opaque;
-    PTNetmapState *ptn = &s->ptnetmap;
-
-    if (!ptn->started)
-        return;
-    if (s->nc.peer->info->notify_ptnetmap)
-        s->nc.peer->info->notify_ptnetmap(s->nc.peer, NETMAP_PT_RX);
-    s->read_poll = false;
-    ptnetmap_update_fd_handler(s);
-}
-
-static void ptnetmap_update_fd_handler(NetmapState *s)
-{
-    D("read_poll: %d, write_poll: %d", s->read_poll, s->write_poll);
-    qemu_set_fd_handler2(s->nmd->fd,
-	    s->read_poll  ? ptnetmap_can_send  : NULL,
-	    s->read_poll  ? ptnetmap_notify_rx : NULL,
-	    s->write_poll ? ptnetmap_notify_tx : NULL,
-	    s);
-}
-
-int ptnetmap_start(PTNetmapState *ptn)
-{
-    NetmapState *s = ptn->netmap;
-
-    if (ptn->started)
-        return 0;
-
-    if (ptn->acked_features & NET_PTN_FEATURES_BASE) {
-        D("BASE");
-        qemu_set_fd_handler2(s->nmd->fd,
-                         ptnetmap_can_send,
-                         ptnetmap_notify_rx,
-                         NULL,
-                         s);
-    }
-
-    ptn->started = true;
-    return 0;
-}
-
-int ptnetmap_stop(PTNetmapState *ptn)
-{
-    NetmapState *s = ptn->netmap;
-
-    if (!ptn->started)
-        return 0;
-
-    if (ptn->acked_features & NET_PTN_FEATURES_BASE) {
-        netmap_update_fd_handler(s);
-    }
-
-    ptn->started = false;
-    return 0;
-}
-
 int
-ptnetmap_txsync(PTNetmapState *ptn)
-{
-    NetmapState *s = ptn->netmap;
-    int err = 0;
-
-    if (s->nmd == NULL)
-        return EINVAL;
-
-    if (s->write_poll) {
-        /* Already in the iothred */
-        qemu_notify_event();
-    } else {
-        err = ioctl(s->nmd->fd, NIOCTXSYNC, NULL);
-        /* After TXSYNC, no available slots in the netmap TX ring.
-         * Can happen with pipes.
-         */
-        ptnetmap_write_poll(s, nm_ring_empty(s->txr));
-    }
-    return err;
-}
-
-int
-ptnetmap_rxsync(PTNetmapState *ptn)
-{
-    NetmapState *s = ptn->netmap;
-
-    if (s->nmd == NULL)
-        return EINVAL;
-    qemu_set_fd_handler2(s->nmd->fd,
-                         ptnetmap_can_send,
-                         ptnetmap_notify_rx,
-                         NULL,
-                         s);
-    return 0;
-}
-
-int
-ptnetmap_full_create(PTNetmapState *ptn, struct ptn_cfg *conf)
+ptnetmap_create(PTNetmapState *ptn, struct ptn_cfg *conf)
 {
     NetmapState *s = ptn->netmap;
     int err;
     struct nmreq req;
 
+    if (!(ptn->acked_features & NET_PTN_FEATURES_BASE)) {
+        error_report("ptnetmap features not acked");
+        return EFAULT;
+    }
+
+    if (ptn->created)
+        return 0;
+
+    /* disable poll */
+    netmap_poll(&s->nc, false);
+    qemu_purge_queued_packets(&s->nc);
+
+    /* ioctl to create ptnetmap kthreads */
     memset(&req, 0, sizeof(req));
     pstrcpy(req.nr_name, sizeof(req.nr_name), s->ifname);
     req.nr_version = NETMAP_API;
@@ -705,36 +609,47 @@ ptnetmap_full_create(PTNetmapState *ptn, struct ptn_cfg *conf)
     nmr_write_buf(&req, conf, sizeof(*conf));
     err = ioctl(s->nmd->fd, NIOCREGIF, &req);
     if (err) {
-        error_report("Unable to execute NETMAP_PT_CREATE on %s: %s",
+        error_report("Unable to execute NETMAP_PT_HOST_CREATE on %s: %s",
                      s->ifname, strerror(errno));
     } else
-        ptn->full_configured = true;
+        ptn->created = true;
 
     return err;
 }
 
 int
-ptnetmap_full_delete(PTNetmapState *ptn)
+ptnetmap_delete(PTNetmapState *ptn)
 {
     NetmapState *s = ptn->netmap;
     int err;
     struct nmreq req;
 
-    D("");
+    if (!(ptn->acked_features & NET_PTN_FEATURES_BASE)) {
+        error_report("ptnetmap features not acked");
+        return EFAULT;
+    }
 
+    if (!ptn->created)
+        return 0;
+
+    /* ioctl to delete ptnetmap kthreads */
     memset(&req, 0, sizeof(req));
     pstrcpy(req.nr_name, sizeof(req.nr_name), s->ifname);
     req.nr_version = NETMAP_API;
     req.nr_cmd = NETMAP_PT_HOST_DELETE;
     err = ioctl(s->nmd->fd, NIOCREGIF, &req);
     if (err) {
-        error_report("Unable to execute NETMAP_PT_DELETE on %s: %s",
+        error_report("Unable to execute NETMAP_PT_HOST_DELETE on %s: %s",
                      s->ifname, strerror(errno));
-    } else
-        ptn->full_configured = false;
+    }
+
+    ptn->created = false;
+    /* enable poll to restore netmap port */
+    netmap_poll(&s->nc, true);
 
     return err;
 }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 
 /* NetClientInfo methods */
 static NetClientInfo net_netmap_info = {
@@ -757,7 +672,9 @@ static NetClientInfo net_netmap_info = {
     .set_vnet_hdr_len = netmap_set_vnet_hdr_len,
     .get_fd = netmap_get_fd,
     .get_vhost_net = netmap_get_vhost_net,
+#ifdef CONFIG_NETMAP_PASSTHROUGH
     .get_ptnetmap = netmap_get_ptnetmap,
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 };
 
 /*
@@ -820,10 +737,12 @@ int net_init_netmap(const NetClientOptions *opts,
     if (netmap_opts->rxslots) {
 	req.nr_rx_slots = netmap_opts->txslots;
     }
-    if (netmap_opts->pt_full) {
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    if (netmap_opts->passthrough) {
         req.nr_flags |= NR_PASSTHROUGH_HOST;
-        D("PT_FULL required");
+        D("ptnetmap required");
     }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 
     nmd = nm_open(netmap_opts->ifname, &req, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL | NM_OPEN_NO_MMAP, NULL);
     if (nmd == NULL) {
@@ -851,15 +770,18 @@ int net_init_netmap(const NetClientOptions *opts,
     s->txr = NETMAP_TXRING(nmd->nifp, 0);
     s->rxr = NETMAP_RXRING(nmd->nifp, 0);
     s->vnet_hdr_len = 0;
-    //netmap_read_poll(s, true); /* Initially only poll for reads. */
-    netmap_read_poll(s, false); /* Initially only poll for reads. */
+    netmap_read_poll(s, true); /* Initially only poll for reads. */
     pstrcpy(s->ifname, sizeof(s->ifname), netmap_opts->ifname);
     s->txsync_callback = s->txsync_callback_arg = NULL;
 
-    s->ptnetmap.netmap = s;
-    s->ptnetmap.features = NET_PTN_FEATURES_FULL;
-    s->ptnetmap.acked_features = 0;
-    s->ptnetmap.full_configured = false;
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    if (netmap_opts->passthrough) {
+        s->ptnetmap.netmap = s;
+        s->ptnetmap.features = NET_PTN_FEATURES_BASE;
+        s->ptnetmap.acked_features = 0;
+        s->ptnetmap.created = false;
+    }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 
     if (netmap_opts->has_vhost && netmap_opts->vhost) {
         VhostNetOptions options;

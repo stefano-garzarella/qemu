@@ -2189,7 +2189,7 @@
 #
 # @vhost: #optional vhost accelerator
 #
-# @pt_full: #optional passthrough full support
+# @passthrough: #optional passthrough support
 #
 # @rings: #optional number of ring pairs
 #
@@ -2210,7 +2210,7 @@
     'ifname':       'str',
     '*devname':     'str',
     '*vhost' :      'bool',
-    '*pt_full':     'bool',
+    '*passthrough':     'bool',
     '*rings' :      'int',
     '*slots' :      'int',
     '*txrings' :    'int',
