@@ -507,11 +507,6 @@ ptnetmap_get_mem(PTNetmapState *ptn)
 {
     NetmapState *s = ptn->netmap;
 
-    if (!(ptn->acked_features & NET_PTN_FEATURES_BASE)) {
-        error_report("ptnetmap features not acked");
-        return EFAULT;
-    }
-
     if (s->nmd == NULL)
         return EINVAL;
     ptn->memsize = s->nmd->memsize;

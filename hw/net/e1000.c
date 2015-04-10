@@ -2094,8 +2094,12 @@ set_ptfeat(E1000State *s, int index, uint32_t val)
 
     if (ptn == NULL)
         return;
-    ptn->acked_features &= val;
-    s->mac_reg[PTFEAT] = ptn->acked_features;
+
+    s->ptn_features &= val;
+    ptnetmap_ack_features(ptn, s->ptn_features);
+    D("ptnetmap acked features: %x", s->ptn_features);
+
+    s->mac_reg[PTFEAT] = s->ptn_features;
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
     /* ignore writes to ptfeat if passthrough is not compiled-in */
 }
@@ -2942,13 +2946,11 @@ static int pci_e1000_init(PCIDevice *pci_dev)
     }
     d->ptn_features = ptnetmap_get_features(d->ptn, NET_PTN_FEATURES_BASE);
 
+    /* backend require ptnetmap support */
     if (d->ptn_features & NET_PTN_FEATURES_BASE) {
         MemoryRegion *ptn_mr;
         uint64_t size;
         int ret;
-
-        ptnetmap_ack_features(d->ptn, d->ptn_features);
-        D("ptnetmap acked features: %x", d->ptn_features);
 
         ret = e1000_ptnetmap_get_mem(d);
         if (ret || d->ptn->mem == NULL) {
@@ -2962,6 +2964,8 @@ static int pci_e1000_init(PCIDevice *pci_dev)
         memory_region_init(&d->ptn_bar, OBJECT(d), "e1000-pt-bar", size);
         ptn_mr = ptnetmap_init_ram_ptr(d->ptn);
         D("ptn_mr: %p", ptn_mr);
+
+        /* add ptnetmap PCI_BAR */
         memory_region_add_subregion(&d->ptn_bar, 0, ptn_mr);
         pci_register_bar(pci_dev, NETMAP_PT_BAR,
                 PCI_BASE_ADDRESS_SPACE_MEMORY  |
