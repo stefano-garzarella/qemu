@@ -66,7 +66,7 @@ typedef struct NetmapState {
     QTAILQ_ENTRY(NetmapState) next;
 } NetmapState;
 
-static QTAILQ_HEAD(, NetmapState) netmap_clients;
+static QTAILQ_HEAD(, NetmapState) netmap_clients = QTAILQ_HEAD_INITIALIZER(netmap_clients);
 static bool netmap_clients_init = false;
 
 #ifndef __FreeBSD__
@@ -484,6 +484,9 @@ netmap_get_ptnetmap(NetClientState *nc)
 {
     NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
 
+
+    ptnetmap_memdev_create(s->nmd->mem, s->nmd->memsize, s->nmd->req.nr_arg2);
+
     return &s->ptnetmap;
 }
 
@@ -571,6 +574,7 @@ ptnetmap_init_ram_ptr(PTNetmapState *ptn)
         snprintf(mem_name, 256, "netmap-%s", ptn->netmap->ifname);
         memory_region_init_ram_ptr(&ptn->mr, NULL, mem_name, ptn->memsize, ptn->mem);
         vmstate_register_ram_global(&ptn->mr);
+        D("BAR mapped - name: %s size: %lu", mem_name, (long unsigned)ptn->memsize);
     }
     ptn->mr_init = true;
 already_init:

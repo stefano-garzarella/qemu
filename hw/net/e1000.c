@@ -2959,6 +2959,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
             d->ptn_features = 0;
             goto pt_end;
         }
+#ifdef MAP_PTNETMAP
         size = upper_pow2(d->ptn->memsize);
         D("BAR size %lx (%lu MiB)", size, size >> 20);
         memory_region_init(&d->ptn_bar, OBJECT(d), "e1000-pt-bar", size);
@@ -2971,6 +2972,7 @@ static int pci_e1000_init(PCIDevice *pci_dev)
                 PCI_BASE_ADDRESS_SPACE_MEMORY  |
                 PCI_BASE_ADDRESS_MEM_PREFETCH /*  |
                 PCI_BASE_ADDRESS_MEM_TYPE_64 */, &d->ptn_bar);
+#endif
     } else {
         D("ptnetmap not supported/required");
         d->ptn = NULL;

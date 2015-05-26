@@ -12,7 +12,7 @@ struct ptnetmap_state {
     struct NetmapState *netmap;
     unsigned long features;             /* ptnetmap features */
     unsigned long acked_features;       /* ptnetmap acked features */
-    size_t memsize;                     /* netmap memory info */
+    uint32_t memsize;                     /* netmap memory info */
     void *mem;
     uint32_t offset;
     uint16_t num_tx_rings;
@@ -31,5 +31,7 @@ int ptnetmap_get_hostmemid(PTNetmapState *pt);
 struct MemoryRegion *ptnetmap_init_ram_ptr(PTNetmapState *pt);
 int ptnetmap_create(PTNetmapState *nc, struct ptn_cfg *conf);
 int ptnetmap_delete(PTNetmapState *nc);
+
+int ptnetmap_memdev_create(void *mem_ptr, uint32_t mem_size, uint16_t mem_id);
 
 #endif /* PTNETMAP_H */
