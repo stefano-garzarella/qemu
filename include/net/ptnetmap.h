@@ -4,7 +4,6 @@
 #include "net/net.h"
 #include "exec/memory.h"
 #include <net/if.h>
-#include <net/netmap.h>
 #include "net/paravirt.h"
 
 struct ptnetmap_state {
@@ -29,7 +28,7 @@ void ptnetmap_ack_features(PTNetmapState *pt, uint32_t features);
 int ptnetmap_get_mem(PTNetmapState *pt);
 int ptnetmap_get_hostmemid(PTNetmapState *pt);
 struct MemoryRegion *ptnetmap_init_ram_ptr(PTNetmapState *pt);
-int ptnetmap_create(PTNetmapState *nc, struct ptn_cfg *conf);
+int ptnetmap_create(PTNetmapState *nc, struct ptnetmap_cfg *conf);
 int ptnetmap_delete(PTNetmapState *nc);
 
 int ptnetmap_memdev_create(void *mem_ptr, uint32_t mem_size, uint16_t mem_id);

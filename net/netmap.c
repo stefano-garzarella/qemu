@@ -512,8 +512,6 @@ ptnetmap_get_mem(PTNetmapState *ptn)
 
     if (s->nmd == NULL)
         return EINVAL;
-    ptn->memsize = s->nmd->memsize;
-    ptn->mem = s->nmd->mem;
     ptn->offset = s->nmd->req.nr_offset;
     ptn->num_tx_rings = s->nmd->req.nr_tx_rings;
     ptn->num_rx_rings = s->nmd->req.nr_rx_rings;
@@ -582,7 +580,7 @@ already_init:
 }
 
 int
-ptnetmap_create(PTNetmapState *ptn, struct ptn_cfg *conf)
+ptnetmap_create(PTNetmapState *ptn, struct ptnetmap_cfg *conf)
 {
     NetmapState *s = ptn->netmap;
     int err;
@@ -605,7 +603,7 @@ ptnetmap_create(PTNetmapState *ptn, struct ptn_cfg *conf)
     pstrcpy(req.nr_name, sizeof(req.nr_name), s->ifname);
     req.nr_version = NETMAP_API;
     req.nr_cmd = NETMAP_PT_HOST_CREATE;
-    nmr_write_buf(&req, conf, sizeof(*conf));
+    ptnetmap_write_cfg(&req, conf);
     err = ioctl(s->nmd->fd, NIOCREGIF, &req);
     if (err) {
         error_report("Unable to execute NETMAP_PT_HOST_CREATE on %s: %s",

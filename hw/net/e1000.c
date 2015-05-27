@@ -225,10 +225,9 @@ typedef struct E1000State_st {
     uint32_t ptn_features;	/* ptnetmap features */
     bool ptn_up;		/* ptnetmap up/down */
     PTNetmapState *ptn;		/* ptnetmap state (shared with backend) */
-    MemoryRegion ptn_bar;	/* netmap shared memory in passthrough mode */
     EventNotifier g2h_tx_notifier, g2h_rx_notifier;
     EventNotifier h2g_notifier;
-    struct ptn_cfg ptn_cfg;	/* ptnetmap configuration */
+    struct ptnetmap_cfg ptn_cfg;	/* ptnetmap configuration */
 #define NETMAP_PT_BAR 3
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 #endif /* CONFIG_E1000_PARAVIRT */
@@ -2130,10 +2129,6 @@ set_ptctl(E1000State *s, int index, uint32_t val)
         ret = e1000_ptnetmap_get_mem(s);
         if (ret)
             break;
-        if (ptn->mem == NULL) {
-            ret = EINVAL;
-            break;
-        }
         if (s->csb == NULL) {
             D("csb not initialized");
             goto out;
@@ -2302,10 +2297,7 @@ e1000_ptnetmap_get_mem(E1000State *s)
         D("csb not initialized");
         return ret;
     }
-    s->csb->memsize = ptn->memsize;
-    s->csb->pci_bar = NETMAP_PT_BAR;
     s->csb->nifp_offset = ptn->offset;
-    s->csb->nbuffers = 10000; //XXX-ste
     s->csb->num_tx_rings = ptn->num_tx_rings;
     s->csb->num_rx_rings = ptn->num_rx_rings;
     s->csb->num_tx_slots = ptn->num_tx_slots;
@@ -2858,20 +2850,6 @@ static NetClientInfo net_e1000_info = {
     .link_status_changed = e1000_set_link_status,
 };
 
-#ifdef CONFIG_NETMAP_PASSTHROUGH
-static uint64_t upper_pow2(uint32_t v) {
-    /* from bit-twiddling hacks */
-    v--;
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-    v++;
-    return v;
-}
-#endif /* CONFIG_NETMAP_PASSTHROUGH */
-
 static int pci_e1000_init(PCIDevice *pci_dev)
 {
     DeviceState *dev = DEVICE(pci_dev);
@@ -2948,31 +2926,15 @@ static int pci_e1000_init(PCIDevice *pci_dev)
 
     /* backend require ptnetmap support */
     if (d->ptn_features & NET_PTN_FEATURES_BASE) {
-        MemoryRegion *ptn_mr;
-        uint64_t size;
         int ret;
 
-        ret = e1000_ptnetmap_get_mem(d);
-        if (ret || d->ptn->mem == NULL) {
+        ret = e1000_ptnetmap_get_mem(d); /* TODO-ste : change func name */
+        if (ret) {
             D("ptnetmap shared memory not mapped");
             d->ptn = NULL;
             d->ptn_features = 0;
             goto pt_end;
         }
-#ifdef MAP_PTNETMAP
-        size = upper_pow2(d->ptn->memsize);
-        D("BAR size %lx (%lu MiB)", size, size >> 20);
-        memory_region_init(&d->ptn_bar, OBJECT(d), "e1000-pt-bar", size);
-        ptn_mr = ptnetmap_init_ram_ptr(d->ptn);
-        D("ptn_mr: %p", ptn_mr);
-
-        /* add ptnetmap PCI_BAR */
-        memory_region_add_subregion(&d->ptn_bar, 0, ptn_mr);
-        pci_register_bar(pci_dev, NETMAP_PT_BAR,
-                PCI_BASE_ADDRESS_SPACE_MEMORY  |
-                PCI_BASE_ADDRESS_MEM_PREFETCH /*  |
-                PCI_BASE_ADDRESS_MEM_TYPE_64 */, &d->ptn_bar);
-#endif
     } else {
         D("ptnetmap not supported/required");
         d->ptn = NULL;
