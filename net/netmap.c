@@ -602,8 +602,8 @@ ptnetmap_create(PTNetmapState *ptn, struct ptnetmap_cfg *conf)
     memset(&req, 0, sizeof(req));
     pstrcpy(req.nr_name, sizeof(req.nr_name), s->ifname);
     req.nr_version = NETMAP_API;
-    req.nr_cmd = NETMAP_PT_HOST_CREATE;
     ptnetmap_write_cfg(&req, conf);
+    req.nr_cmd = NETMAP_PT_HOST_CREATE;
     err = ioctl(s->nmd->fd, NIOCREGIF, &req);
     if (err) {
         error_report("Unable to execute NETMAP_PT_HOST_CREATE on %s: %s",

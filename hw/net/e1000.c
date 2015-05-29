@@ -2235,6 +2235,8 @@ e1000_ptnetmap_up(E1000State *s)
 
     s->ptn_cfg.csb = s->csb;
 
+    s->ptn_cfg.features = PTNETMAP_CFG_FEAT_CSB | PTNETMAP_CFG_FEAT_EVENTFD;
+
     /* Initialize CSB */
     s->csb->host_need_txkick = 1;
     s->csb->guest_need_txkick = 0;
