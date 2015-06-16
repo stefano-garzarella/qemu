@@ -54,6 +54,7 @@
                                          * Steering */
 
 #define VIRTIO_NET_F_CTRL_MAC_ADDR   23 /* Set MAC address */
+#define VIRTIO_NET_F_PTNETMAP        24 /* ptnetmap available */
 
 #define VIRTIO_NET_S_LINK_UP    1       /* Link is up */
 #define VIRTIO_NET_S_ANNOUNCE   2       /* Announcement is needed */
@@ -86,6 +87,22 @@ struct virtio_net_config
     /* Max virtqueue pairs supported by the device */
     uint16_t max_virtqueue_pairs;
 } QEMU_PACKED;
+
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+struct virtio_net_ptnetmap
+{
+    struct paravirt_csb *csb;           /* Communication Status Block. */
+    uint32_t features;                  /* ptnetmap features */
+    bool up;                            /* ptnetmap up/down */
+    PTNetmapState *state;               /* ptnetmap state (shared with backend) */
+    EventNotifier g2h_tx_notifier, g2h_rx_notifier;
+    EventNotifier h2g_notifier;
+    struct ptnetmap_cfg cfg;            /* ptnetmap configuration */
+
+    /* ptnetmap register */
+    uint32_t reg[PTNEMTAP_VIRTIO_IO_SIZE_32];
+}
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 
 /*
  * Control virtqueue data structures
@@ -198,6 +215,9 @@ typedef struct VirtIONet {
     uint64_t curr_guest_offloads;
     QEMUTimer *announce_timer;
     int announce_counter;
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    struct virtio_net_ptnetmap ptn;
+#endif
 } VirtIONet;
 
 #define VIRTIO_NET_CTRL_MAC    1

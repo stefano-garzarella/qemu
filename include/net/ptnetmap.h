@@ -6,6 +6,22 @@
 #include <net/if.h>
 #include "net/paravirt.h"
 
+/* ptnetmap virtio register */
+#define PTNETMAP_VIRTIO_IO_BASE         sizeof(struct virtio_net_config)
+/* 32 bit r/w */
+#define PTNETMAP_VIRTIO_IO_PTFEAT       0 /* passthrough features */
+/* 32 bit w/o */
+#define PTNETMAP_VIRTIO_IO_PTCTL        4 /* passthrough control */
+/* 32 bit r/o */
+#define PTNETMAP_VIRTIO_IO_PTSTS        8 /* passthrough status */
+/* 32 bit w/o */
+#define PTNETMAP_VIRTIO_IO_CSBBAH       12 /* CSB Base Address High */
+/* 32 bit w/o */
+#define PTNETMAP_VIRTIO_IO_CSBBAL       16 /* CSB Base Address Low */
+
+#define PTNEMTAP_VIRTIO_IO_SIZE         20
+#define PTNEMTAP_VIRTIO_IO_SIZE_32      5
+
 struct ptnetmap_state {
     bool created;                       /* ptnetmap kthreads created */
     struct NetmapState *netmap;

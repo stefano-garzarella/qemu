@@ -45,13 +45,21 @@ void paravirt_configure_csb(struct paravirt_csb** csb, uint32_t csbbal,
      * The CSB is then remapped if the new pointer is != 0
      */
     if (*csb) {
-	qemu_bh_cancel(tx_bh);
-	address_space_unmap(as, *csb, len, 1, len);
+        if (tx_bh)
+	    qemu_bh_cancel(tx_bh);
+	if (as)
+	    address_space_unmap(as, *csb, len, 1, len);
+	else
+	    cpu_physical_memory_unmap(*csb, len, 1, len);
 	*csb = NULL;
 	printf("TXBH canc + CSB release\n");
     }
     if (base) {
-	*csb = address_space_map(as, base, &len, 1 /* is_write */);
+        if (as)
+	    *csb = address_space_map(as, base, &len, 1 /* is_write */);
+	else
+	    *csb = cpu_physical_memory_map(base, &len, 1 /* is_write */);
+
 	// printf("CSB (re)mapping\n");
     }
 }

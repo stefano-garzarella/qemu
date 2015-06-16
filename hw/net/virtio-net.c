@@ -20,6 +20,7 @@
 #include "qemu/timer.h"
 #include "hw/virtio/virtio-net.h"
 #include "net/vhost_net.h"
+#include "net/ptnetmap.h"
 #include "hw/virtio/virtio-bus.h"
 #include "qapi/qmp/qjson.h"
 #include "qapi-event.h"
@@ -100,6 +101,10 @@ static VirtIOFeature feature_sizes[] = {
      .end = endof(struct virtio_net_config, status)},
     {.flags = 1 << VIRTIO_NET_F_MQ,
      .end = endof(struct virtio_net_config, max_virtqueue_pairs)},
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    {.flags = 1 << VIRTIO_NET_F_PTNETMAP,
+     .end = sizeof(struct virtio_net_config) + PTNEMTAP_VIRTIO_IO_SIZE},
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
     {}
 };
 
@@ -115,11 +120,299 @@ static int vq2q(int queue_index)
     return queue_index / 2;
 }
 
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+static int virtio_net_ptnetmap_up(VirtIODevice *vdev)
+{
+    BusState *qbus = BUS(qdev_get_parent_bus(DEVICE(vdev)));
+    VirtioBusState *vbus = VIRTIO_BUS(qbus);
+    VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(vbus);
+    VirtIONet *n = VIRTIO_NET(vdev);
+    VirtIONetQueue *q;
+    PTNetmapState *ptns = n->ptn.state;
+    int i, ret, nvqs = 0, error = 0;
+
+    if (ptns == NULL) {
+        D("ptnetmap not supported by backend");
+        return -1;
+    }
+
+    if (n->ptn.up) {
+        printf("Unable to use passthrough: ptnetmap already UP\n");
+        return -1;
+    }
+
+    if (n->ptn.csb == NULL) {
+        printf("Unable to use passthrough: CSB undefined\n");
+        return -1;
+    }
+
+    if (!k->set_host_notifier) {
+        printf("binding does not support host notifiers\n");
+        return -ENOSYS;
+    }
+
+    /* XXX check msix */
+
+
+    D("max_queues: %d", n->max_queues);
+    //for (i = 0; i < n->max_queues; i++) {
+    i = 0;
+    q = &n->vqs[i];
+
+    /* Configure the RX ring */
+    s->ptn_cfg.rx_ring.ioeventfd = event_notifier_get_fd(virtio_queue_get_host_notifier(q->rx_vq));
+    s->ptn_cfg.rx_ring.irqfd = event_notifier_get_fd(virtio_queue_get_guest_notifier(q->rx_vq));
+
+    /* Configure the TX ring */
+    s->ptn_cfg.tx_ring.ioeventfd = event_notifier_get_fd(virtio_queue_get_host_notifier(q->tx_vq));
+    s->ptn_cfg.tx_ring.irqfd = event_notifier_get_fd(virtio_queue_get_guest_notifier(q->tx_vq));
+
+    nvqs += 2;
+
+    /* Stop processing guest IO notifications in qemu.
+     * Start processing them in ptnetmap.
+     */
+
+    for (i = 0; i < nvqs; i++) {
+        if (!virtio_queue_get_num(vdev, i)) {
+            break;
+        }
+        ret = k->set_host_notifier(qbus->parent, i, true);
+        if (ret < 0) {
+            printf("ptnetmap VQ %d notifier binding failed: %d\n", i, -r);
+            while (--i >= 0) {
+                k->set_host_notifier(qbus->parent, i, false);
+            }
+            return -1;
+        }
+    }
+
+    ret = k->set_guest_notifiers(qbus->parent, nvqs, true);
+    if (ret < 0) {
+        printf("Error binding guest notifier: %d", -r);
+        return -1;
+    }
+
+    n->ptn.cfg.csb = n->ptn.csb;
+
+    n->ptn.cfg.features = PTNETMAP_CFG_FEAT_CSB | PTNETMAP_CFG_FEAT_EVENTFD;
+
+    /* Initialize CSB */
+    n->ptn.csb->host_need_txkick = 1;
+    n->ptn.csb->guest_need_txkick = 0;
+    n->ptn.csb->guest_need_rxkick = 1;
+    n->ptn.csb->host_need_rxkick = 1;
+
+    /* Configure the net backend. */
+    error = ptnetmap_create(ptn, &s->ptn_cfg);
+    if (error)
+        return error;
+
+    s->ptn_up = true;
+    return 0;
+}
+
+static int virtio_net_ptnetmap_down(VirtIODevice *vdev)
+{
+    BusState *qbus = BUS(qdev_get_parent_bus(DEVICE(vdev)));
+    VirtioBusState *vbus = VIRTIO_BUS(qbus);
+    VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(vbus);
+    VirtIONet *n = VIRTIO_NET(vdev);
+    VirtIONetQueue *q;
+    PTNetmapState *ptns = n->ptn.state;
+    int i, ret, nvqs = 0, error = 0;
+
+    if (!n->ptn.state || !s->ptn.up) {
+        return 0;
+    }
+    s->ptn_up = false;
+
+    /* clean up guest to host (TX and RX) ioeventfd */
+
+    D("max_queues: %d", n->max_queues);
+    //for (i = 0; i < n->max_queues; i++) {
+    i = 0;
+    nvqs += 2;
+
+    /* Start processing guest IO notifications in qemu.
+     */
+    for (i = 0; i < nvqs; i++) {
+        if (!virtio_queue_get_num(vdev, i)) {
+            break;
+        }
+        ret = k->set_host_notifier(qbus->parent, i, false);
+        if (ret < 0) {
+            printf("ptnetmap VQ %d notifier binding failed: %d\n", i, -r);
+        }
+    }
+    ret = k->set_guest_notifiers(qbus->parent, nvqs, false);
+    if (ret < 0) {
+        printf("Error binding guest notifier: %d", -r);
+        return -1;
+    }
+
+    return ptnetmap_delete(n->ptn.state);
+}
+
+static int virtio_net_ptnetmap_get_mem(VirtIODevice *vdev)
+{
+    VirtIONet *n = VIRTIO_NET(vdev);
+    PTNetmapState *ptns = n->ptn.state;
+    struct paravirt_csb *csb = n->ptn.csb;
+    int ret;
+
+    if (ptns == NULL) {
+        D("ptnetmap not supported by backend");
+        return;
+    }
+
+    ret = ptnetmap_get_mem(ptns);
+    if (ret)
+        return ret;
+    if (csb == NULL) {
+        D("csb not initialized");
+        return ret;
+    }
+    csb->nifp_offset = ptns->offset;
+    csb->num_tx_rings = ptns->num_tx_rings;
+    csb->num_rx_rings = ptns->num_rx_rings;
+    csb->num_tx_slots = ptns->num_tx_slots;
+    csb->num_rx_slots = ptns->num_rx_slots;
+    D("txr %u rxr %u txd %u rxd %u",
+            csb->num_tx_rings,
+            csb->num_rx_rings,
+            csb->num_tx_slots,
+            csb->num_rx_slots);
+
+    return ret;
+}
+
+static void virtio_net_ptnetmap_get_reg(VirtIODevice *vdev, uint8_t *config, uint32_t addr)
+{
+    VirtIONet *n = VIRTIO_NET(vdev);
+    config += sizeof(virtio_net_config);
+    addr -= sizeof(virtio_net_config);
+
+    switch (addr) {
+        case PTNETMAP_VIRTIO_IO_PTFEAT:
+        case PTNETMAP_VIRTIO_IO_PTSTS:
+            memcpy(config + addr, &n->ptn.reg[addr], sizeof(uint32_t));
+            break;
+        default:
+            break;
+    }
+}
+
+static void virtio_net_ptnetmap_set_reg(VirtIODevice *vdev, const uint8_t *config, uint32_t addr)
+{
+    VirtIONet *n = VIRTIO_NET(vdev);
+    uint32_t val, ret;
+
+    if (n->ptn.state == NULL) {
+        D("ptnetmap not supported by backend");
+        return;
+    }
+
+    config += sizeof(virtio_net_config);
+    addr -= sizeof(virtio_net_config);
+
+
+    switch (addr) {
+        case PTNETMAP_VIRTIO_IO_PTFEAT:
+            memcpy(&n->ptn.reg[addr], config + addr, sizeof(val));
+            val = n->ptn.reg[addr];
+
+            ret = (n->ptn.features &= val);
+            ptnetmap_ack_features(ptn, n->ptn.features);
+            D("ptnetmap acked features: %x", n->ptn.features);
+
+            n->ptn.reg[PTNETMAP_VIRTIO_IO_PTFEAT] = ret;
+            break;
+        case PTNETMAP_VIRTIO_IO_PTCTL:
+            memcpy(&n->ptn.reg[addr], config + addr, sizeof(val));
+            val = n->ptn.reg[addr];
+
+            ret = EINVAL;
+
+            switch(val) {
+                case NET_PARAVIRT_PTCTL_CONFIG:
+                    ret = virtio_net_ptnetmap_get_mem(vdev);
+                    if (ret)
+                        break;
+                    if (s->csb == NULL) {
+                        D("Error: csb not initialized");
+                    }
+                    break;
+                case NET_PARAVIRT_PTCTL_REGIF:
+                    D("REGIF - virtio_net_ptnetmap_UP");
+                    ret = virtio_net_ptnetmap_up(vdev);
+                    if(ret) {
+                        printf("Error: Unable to use passthrough\n");
+                    }
+                    break;
+                case NET_PARAVIRT_PTCTL_UNREGIF:
+                    ret = virtio_net_ptnetmap_down(s);
+                    break;
+                case NET_PARAVIRT_PTCTL_HOSTMEMID:
+                    ret = ptnetmap_get_hostmemid(ptn);
+                    break;
+                case NET_PARAVIRT_PTCTL_IFNEW:
+                case NET_PARAVIRT_PTCTL_IFDELETE:
+                case NET_PARAVIRT_PTCTL_FINALIZE:
+                case NET_PARAVIRT_PTCTL_DEREF:
+                    ret = 0;
+                    break;
+            }
+            D("ret %d", ret);
+            n->ptn.reg[PTNETMAP_VIRTIO_IO_PTSTS] = ret;
+
+            break;
+        case PTNEMTAP_VIRTIO_IO_CSBAH:
+            memcpy(&n->ptn.reg[addr], config + addr, sizeof(val));
+            val = n->ptn.reg[addr];
+            break;
+        case PTNEMTAP_VIRTIO_IO_CSBAL:
+            memcpy(&n->ptn.reg[addr], config + addr, sizeof(val));
+            val = n->ptn.reg[addr];
+            paravirt_configure_csb(&n->ptn.csb, n->ptn.reg[PTNETMAP_VIRTIO_IO_CSBAL],
+                    n->ptn.reg[PTNETMAP_VIRTIO_IO_CSBAH], NULL, NULL);
+            break;
+        default:
+            break;
+    }
+}
+
+static int virtio_net_ptnetmap_init(VirtIODevice *vdev)
+{
+    VirtIONet *n = VIRTIO_NET(vdev);
+
+    n->ptn.up = false;
+    n->ptn.state = peer_get_ptnetmap(d);
+    if (n->ptn.state == NULL) {
+        D("ptnetmap not supported by backend");
+        n->ptn.features = 0;
+        return -1;
+    }
+    n->ptn.features = ptnetmap_get_features(n->ptn.state, NET_PTN_FEATURES_BASE);
+
+    /* backend require ptnetmap support */
+    if (!(n->ptn.features & NET_PTN_FEATURES_BASE)) {
+        D("ptnetmap not supported/required");
+        n->ptn.state = NULL;
+        n->ptn.features = 0;
+        return -1;
+    }
+
+    return 0;
+}
+
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
+
 /* TODO
  * - we could suppress RX interrupt if we were so inclined.
  */
 
-static void virtio_net_get_config(VirtIODevice *vdev, uint8_t *config)
+static void virtio_net_get_config(VirtIODevice *vdev, uint8_t *config, uint32_t addr)
 {
     VirtIONet *n = VIRTIO_NET(vdev);
     struct virtio_net_config netcfg;
@@ -127,21 +420,31 @@ static void virtio_net_get_config(VirtIODevice *vdev, uint8_t *config)
     virtio_stw_p(vdev, &netcfg.status, n->status);
     virtio_stw_p(vdev, &netcfg.max_virtqueue_pairs, n->max_queues);
     memcpy(netcfg.mac, n->mac, ETH_ALEN);
-    memcpy(config, &netcfg, n->config_size);
+    memcpy(config, &netcfg, sizeof(netcfg));
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    if (addr > sizeof(netcfg)) {
+        virtio_net_ptnetmap_get_reg(vdev, config, addr);
+    }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 }
 
-static void virtio_net_set_config(VirtIODevice *vdev, const uint8_t *config)
+static void virtio_net_set_config(VirtIODevice *vdev, const uint8_t *config, uint32_t addr)
 {
     VirtIONet *n = VIRTIO_NET(vdev);
     struct virtio_net_config netcfg = {};
 
-    memcpy(&netcfg, config, n->config_size);
+    memcpy(&netcfg, config, sizeof(netcfg));
 
     if (!(vdev->guest_features >> VIRTIO_NET_F_CTRL_MAC_ADDR & 1) &&
         memcmp(netcfg.mac, n->mac, ETH_ALEN)) {
         memcpy(n->mac, netcfg.mac, ETH_ALEN);
         qemu_format_nic_info_str(qemu_get_queue(n->nic), n->mac);
     }
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    if (addr > sizeof(netcfg)) {
+        virtio_net_ptnetmap_set_reg(vdev, config, addr);
+    }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 }
 
 static bool virtio_net_started(VirtIONet *n, uint8_t status)
@@ -504,6 +807,11 @@ static uint32_t virtio_net_get_features(VirtIODevice *vdev, uint32_t features)
         features &= ~(0x1 << VIRTIO_NET_F_GUEST_UFO);
         features &= ~(0x1 << VIRTIO_NET_F_HOST_UFO);
     }
+
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    if (n->ptn.state != NULL)
+        features &= ~(0x1 << VIRTIO_NET_F_PTNETMAP);
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 
     if (!get_vhost_net(nc->peer)) {
         return features;
@@ -1706,6 +2014,9 @@ static void virtio_net_device_realize(DeviceState *dev, Error **errp)
 
     add_boot_device_path(n->nic_conf.bootindex, dev, "/ethernet-phy@0");
     IFRATE(n->rate_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, &rate_callback, n));
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    virtio_net_ptnetmap_init(vdev);
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 }
 
 static void virtio_net_device_unrealize(DeviceState *dev, Error **errp)
@@ -1760,6 +2071,7 @@ static void virtio_net_instance_init(Object *obj)
      * Can be overriden with virtio_net_set_config_size.
      */
     n->config_size = sizeof(struct virtio_net_config);
+    /* TODO-ste: sum reg for ptnetmap */
 }
 
 static Property virtio_net_properties[] = {
