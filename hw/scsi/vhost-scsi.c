@@ -158,7 +158,7 @@ static uint32_t vhost_scsi_get_features(VirtIODevice *vdev,
 }
 
 static void vhost_scsi_set_config(VirtIODevice *vdev,
-                                  const uint8_t *config)
+                                  const uint8_t *config, uint32_t addr)
 {
     VirtIOSCSIConfig *scsiconf = (VirtIOSCSIConfig *)config;
     VirtIOSCSICommon *vs = VIRTIO_SCSI_COMMON(vdev);
