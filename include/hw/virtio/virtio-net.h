@@ -96,8 +96,6 @@ struct virtio_net_ptnetmap
     uint32_t features;                  /* ptnetmap features */
     bool up;                            /* ptnetmap up/down */
     PTNetmapState *state;               /* ptnetmap state (shared with backend) */
-    EventNotifier g2h_tx_notifier, g2h_rx_notifier;
-    EventNotifier h2g_notifier;
     struct ptnetmap_cfg cfg;            /* ptnetmap configuration */
 
     /* ptnetmap register */
