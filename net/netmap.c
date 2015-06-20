@@ -110,7 +110,7 @@ static void netmap_writable(void *opaque);
 /* Set the event-loop handlers for the netmap backend. */
 static void netmap_update_fd_handler(NetmapState *s)
 {
-    D("read_poll: %d, write_poll: %d", s->read_poll, s->write_poll);
+    ND("read_poll: %d, write_poll: %d", s->read_poll, s->write_poll);
     qemu_set_fd_handler2(s->nmd->fd,
                          s->read_poll  ? netmap_can_send : NULL,
                          s->read_poll  ? netmap_send     : NULL,
@@ -121,7 +121,7 @@ static void netmap_update_fd_handler(NetmapState *s)
 /* Update the read handler. */
 static void netmap_read_poll(NetmapState *s, bool enable)
 {
-    D("enable:%d", enable);
+    ND("enable:%d", enable);
     if (s->read_poll != enable) { /* Do nothing if not changed. */
         s->read_poll = enable;
         netmap_update_fd_handler(s);
@@ -131,7 +131,7 @@ static void netmap_read_poll(NetmapState *s, bool enable)
 /* Update the write handler. */
 static void netmap_write_poll(NetmapState *s, bool enable)
 {
-    D("enable:%d", enable);
+    ND("enable:%d", enable);
     if (s->write_poll != enable) {
         s->write_poll = enable;
         netmap_update_fd_handler(s);
@@ -142,7 +142,7 @@ static void netmap_poll(NetClientState *nc, bool enable)
 {
     NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
 
-    D("enable:%d", enable);
+    ND("enable:%d", enable);
     if (s->read_poll != enable || s->write_poll != enable) {
         s->write_poll = enable;
         s->read_poll  = enable;
@@ -406,16 +406,34 @@ static void netmap_cleanup(NetClientState *nc)
 /* Offloading manipulation support callbacks. */
 static bool netmap_has_ufo(NetClientState *nc)
 {
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
+    if (s->ptnetmap.required) {
+        return false;
+    }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
     return true;
 }
 
 static bool netmap_has_vnet_hdr(NetClientState *nc)
 {
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
+    if (s->ptnetmap.required) {
+        return false;
+    }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
     return true;
 }
 
 static bool netmap_has_vnet_hdr_len(NetClientState *nc, int len)
 {
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
+    if (s->ptnetmap.required) {
+        return false;
+    }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
     return len == 0 || len == sizeof(struct virtio_net_hdr) ||
                 len == sizeof(struct virtio_net_hdr_mrg_rxbuf);
 }
@@ -429,6 +447,12 @@ static void netmap_set_vnet_hdr_len(NetClientState *nc, int len)
     NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
     int err;
     struct nmreq req;
+
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    if (s->ptnetmap.required) {
+        return;
+    }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 
     /* Issue a NETMAP_BDG_VNET_HDR command to change the virtio-net header
      * length for the netmap adapter associated to 'ifname'.
@@ -452,6 +476,12 @@ static void netmap_set_offload(NetClientState *nc, int csum, int tso4, int tso6,
                                int ecn, int ufo)
 {
     NetmapState *s = DO_UPCAST(NetmapState, nc, nc);
+
+#ifdef CONFIG_NETMAP_PASSTHROUGH
+    if (s->ptnetmap.required) {
+        return;
+    }
+#endif /* CONFIG_NETMAP_PASSTHROUGH */
 
     /* Setting a virtio-net header length greater than zero automatically
      * enables the offloadings.
@@ -772,7 +802,9 @@ int net_init_netmap(const NetClientOptions *opts,
     s->txsync_callback = s->txsync_callback_arg = NULL;
 
 #ifdef CONFIG_NETMAP_PASSTHROUGH
+    s->ptnetmap.required = false;
     if (netmap_opts->passthrough) {
+        s->ptnetmap.required = true;
         s->ptnetmap.netmap = s;
         s->ptnetmap.features = NET_PTN_FEATURES_BASE;
         s->ptnetmap.acked_features = 0;

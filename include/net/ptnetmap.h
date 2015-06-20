@@ -7,6 +7,7 @@
 #include "net/paravirt.h"
 
 struct ptnetmap_state {
+    bool required;                      /* ptnetmap required on this port */
     bool created;                       /* ptnetmap kthreads created */
     struct NetmapState *netmap;
     unsigned long features;             /* ptnetmap features */
