@@ -89,6 +89,7 @@ struct virtio_net_config
 } QEMU_PACKED;
 
 #ifdef CONFIG_NETMAP_PASSTHROUGH
+#include "net/paravirt.h"
 struct virtio_net_ptnetmap
 {
     struct paravirt_csb *csb;           /* Communication Status Block. */
@@ -100,8 +101,8 @@ struct virtio_net_ptnetmap
     struct ptnetmap_cfg cfg;            /* ptnetmap configuration */
 
     /* ptnetmap register */
-    uint32_t reg[PTNEMTAP_VIRTIO_IO_SIZE_32];
-}
+    uint8_t reg[PTNEMTAP_VIRTIO_IO_SIZE];
+};
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 
 /*
