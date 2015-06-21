@@ -76,10 +76,12 @@ static int virtio_net_ptnetmap_up(VirtIODevice *vdev)
     printf("rx [id: %d] - ioeventfd %d irqfd %d\n", virtio_get_queue_index(q->rx_vq), n->ptn.cfg.rx_ring.ioeventfd, n->ptn.cfg.rx_ring.irqfd);
     printf("tx [id: %d] - ioeventfd %d irqfd %d\n", virtio_get_queue_index(q->tx_vq), n->ptn.cfg.tx_ring.ioeventfd, n->ptn.cfg.tx_ring.irqfd);
 
-    /* push fake-elem in the rx queue to enable RX interrupts */
+    /* push fake-elem in the tx/rx queue to enable interrupts */
     if (virtqueue_pop(q->rx_vq, &elem)) {
-        virtqueue_fill(q->rx_vq, &elem, 0, 0);
-        virtqueue_flush(q->rx_vq, 1);
+        virtqueue_push(q->rx_vq, &elem, 0);
+    }
+    if((virtqueue_pop(q->tx_vq, &elem))) {
+        virtqueue_push(q->tx_vq, &elem, 0);
     }
 
     /* Initialize CSB */
