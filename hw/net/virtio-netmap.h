@@ -64,7 +64,13 @@ static int virtio_net_ptnetmap_up(VirtIODevice *vdev)
     /* TODO for (i = 0; i < n->max_queues; i++) { */
     i = 0;
     q = &n->vqs[i];
-
+#if 0
+    if (q->tx_timer) {
+        timer_del(q->tx_timer);
+    } else {
+        qemu_bh_cancel(q->tx_bh);
+    }
+#endif
     /* Configure the RX ring */
     n->ptn.cfg.rx_ring.ioeventfd = event_notifier_get_fd(virtio_queue_get_host_notifier(q->rx_vq));
     n->ptn.cfg.rx_ring.irqfd = event_notifier_get_fd(virtio_queue_get_guest_notifier(q->rx_vq));
@@ -80,9 +86,11 @@ static int virtio_net_ptnetmap_up(VirtIODevice *vdev)
     if (virtqueue_pop(q->rx_vq, &elem)) {
         virtqueue_push(q->rx_vq, &elem, 0);
     }
-    if((virtqueue_pop(q->tx_vq, &elem))) {
+    virtio_queue_set_notification(q->rx_vq, 1);
+    if (virtqueue_pop(q->tx_vq, &elem)) {
         virtqueue_push(q->tx_vq, &elem, 0);
     }
+    virtio_queue_set_notification(q->tx_vq, 1);
 
     /* Initialize CSB */
     n->ptn.cfg.csb = n->ptn.csb;
@@ -167,11 +175,12 @@ static int virtio_net_ptnetmap_get_mem(VirtIODevice *vdev)
     csb->num_rx_rings = ptns->num_rx_rings;
     csb->num_tx_slots = ptns->num_tx_slots;
     csb->num_rx_slots = ptns->num_rx_slots;
-    printf("txr %u rxr %u txd %u rxd %u\n",
+    printf("txr %u rxr %u txd %u rxd %u nifp_offset %u\n",
             csb->num_tx_rings,
             csb->num_rx_rings,
             csb->num_tx_slots,
-            csb->num_rx_slots);
+            csb->num_rx_slots,
+            csb->nifp_offset);
 
     return ret;
 }
