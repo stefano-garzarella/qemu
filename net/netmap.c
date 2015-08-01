@@ -766,7 +766,7 @@ int net_init_netmap(const NetClientOptions *opts,
     }
 #ifdef CONFIG_NETMAP_PASSTHROUGH
     if (netmap_opts->passthrough) {
-        req.nr_flags |= NR_PASSTHROUGH_HOST;
+        req.nr_flags |= NR_PTNETMAP_HOST;
         D("ptnetmap required");
     }
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
