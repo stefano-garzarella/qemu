@@ -460,7 +460,7 @@ static uint32_t get_features(VirtIODevice *vdev, uint32_t features)
 }
 
 /* Guest requested config info */
-static void get_config(VirtIODevice *vdev, uint8_t *config_data)
+static void get_config(VirtIODevice *vdev, uint8_t *config_data, uint32_t addr)
 {
     VirtIOSerial *vser;
 

@@ -512,7 +512,8 @@ static void virtio_blk_reset(VirtIODevice *vdev)
 
 /* coalesce internal state, copy to pci i/o region 0
  */
-static void virtio_blk_update_config(VirtIODevice *vdev, uint8_t *config)
+static void virtio_blk_update_config(VirtIODevice *vdev, uint8_t *config,
+        uint32_t addr)
 {
     VirtIOBlock *s = VIRTIO_BLK(vdev);
     struct virtio_blk_config blkcfg;
@@ -551,7 +552,8 @@ static void virtio_blk_update_config(VirtIODevice *vdev, uint8_t *config)
     memcpy(config, &blkcfg, sizeof(struct virtio_blk_config));
 }
 
-static void virtio_blk_set_config(VirtIODevice *vdev, const uint8_t *config)
+static void virtio_blk_set_config(VirtIODevice *vdev, const uint8_t *config,
+        uint32_t addr)
 {
     VirtIOBlock *s = VIRTIO_BLK(vdev);
     struct virtio_blk_config blkcfg;

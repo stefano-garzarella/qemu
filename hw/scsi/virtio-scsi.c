@@ -484,7 +484,7 @@ static void virtio_scsi_handle_cmd(VirtIODevice *vdev, VirtQueue *vq)
 }
 
 static void virtio_scsi_get_config(VirtIODevice *vdev,
-                                   uint8_t *config)
+                                   uint8_t *config, uint32_t addr)
 {
     VirtIOSCSIConfig *scsiconf = (VirtIOSCSIConfig *)config;
     VirtIOSCSICommon *s = VIRTIO_SCSI_COMMON(vdev);
@@ -502,7 +502,7 @@ static void virtio_scsi_get_config(VirtIODevice *vdev,
 }
 
 static void virtio_scsi_set_config(VirtIODevice *vdev,
-                                   const uint8_t *config)
+                                   const uint8_t *config, uint32_t addr)
 {
     VirtIOSCSIConfig *scsiconf = (VirtIOSCSIConfig *)config;
     VirtIOSCSICommon *vs = VIRTIO_SCSI_COMMON(vdev);

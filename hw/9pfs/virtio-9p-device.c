@@ -27,7 +27,8 @@ static uint32_t virtio_9p_get_features(VirtIODevice *vdev, uint32_t features)
     return features;
 }
 
-static void virtio_9p_get_config(VirtIODevice *vdev, uint8_t *config)
+static void virtio_9p_get_config(VirtIODevice *vdev, uint8_t *config,
+        uint32_t addr)
 {
     int len;
     struct virtio_9p_config *cfg;

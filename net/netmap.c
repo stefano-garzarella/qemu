@@ -595,14 +595,17 @@ ptnetmap_init_ram_ptr(PTNetmapState *ptn)
     if (parent_mr) { /* create an alias of parent MemoryRegion */
         D("mapped with alias");
         snprintf(mem_name, 256, "netmap-%s-alias", ptn->netmap->ifname);
-        memory_region_init_alias(&ptn->mr, NULL, mem_name, parent_mr, 0, ptn->memsize);
+        memory_region_init_alias(&ptn->mr, NULL, mem_name, parent_mr, 0,
+                ptn->memsize);
         ptn->mr_alias = true;
     } else { /* init a new MemoryRegion */
         /* XXX: maybe is better if the OWNER is the NIC. Now the owner is the vm */
         snprintf(mem_name, 256, "netmap-%s", ptn->netmap->ifname);
-        memory_region_init_ram_ptr(&ptn->mr, NULL, mem_name, ptn->memsize, ptn->mem);
+        memory_region_init_ram_ptr(&ptn->mr, NULL, mem_name, ptn->memsize,
+                ptn->mem);
         vmstate_register_ram_global(&ptn->mr);
-        D("BAR mapped - name: %s size: %lu", mem_name, (long unsigned)ptn->memsize);
+        D("BAR mapped - name: %s size: %lu", mem_name,
+                (long unsigned)ptn->memsize);
     }
     ptn->mr_init = true;
 already_init:
@@ -714,7 +717,8 @@ netmap_find_parent(struct nm_desc *nmd)
 
     QTAILQ_FOREACH(s, &netmap_clients, next) {
         if (nmd->req.nr_arg2 == s->nmd->req.nr_arg2) {
-            D("found parent - ifname: %s mem_id: %d", s->ifname, s->nmd->req.nr_arg2);
+            D("found parent - ifname: %s mem_id: %d", s->ifname,
+                    s->nmd->req.nr_arg2);
             return s->nmd;
         }
     }
@@ -771,16 +775,19 @@ int net_init_netmap(const NetClientOptions *opts,
     }
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 
-    nmd = nm_open(netmap_opts->ifname, &req, NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL | NM_OPEN_NO_MMAP, NULL);
+    nmd = nm_open(netmap_opts->ifname, &req,
+            NETMAP_NO_TX_POLL | NETMAP_DO_RX_POLL | NM_OPEN_NO_MMAP, NULL);
     if (nmd == NULL) {
-        error_report("Failed to open %ss: %s", netmap_opts->ifname, strerror(errno));
+        error_report("Failed to open %ss: %s", netmap_opts->ifname,
+                strerror(errno));
         return -1;
     }
     /* check parent (nm_desc with the same allocator already mapped) */
     parent_nmd = netmap_find_parent(nmd);
     /* mmap or inherit from parent */
     if (nm_mmap(nmd, parent_nmd)) {
-        error_report("failed to mmap %s: %s", netmap_opts->ifname, strerror(errno));
+        error_report("failed to mmap %s: %s", netmap_opts->ifname,
+                strerror(errno));
         nm_close(nmd);
         return -1;
     }

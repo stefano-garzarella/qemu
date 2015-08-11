@@ -272,7 +272,8 @@ out:
     }
 }
 
-static void virtio_balloon_get_config(VirtIODevice *vdev, uint8_t *config_data)
+static void virtio_balloon_get_config(VirtIODevice *vdev, uint8_t *config_data,
+        uint32_t addr)
 {
     VirtIOBalloon *dev = VIRTIO_BALLOON(vdev);
     struct virtio_balloon_config config;
@@ -284,7 +285,7 @@ static void virtio_balloon_get_config(VirtIODevice *vdev, uint8_t *config_data)
 }
 
 static void virtio_balloon_set_config(VirtIODevice *vdev,
-                                      const uint8_t *config_data)
+                                      const uint8_t *config_data, uint32_t addr)
 {
     VirtIOBalloon *dev = VIRTIO_BALLOON(vdev);
     struct virtio_balloon_config config;

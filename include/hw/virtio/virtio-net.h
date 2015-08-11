@@ -89,6 +89,7 @@ struct virtio_net_config
 } QEMU_PACKED;
 
 #ifdef CONFIG_NETMAP_PASSTHROUGH
+#include "net/ptnetmap.h"
 #include "net/paravirt.h"
 struct virtio_net_ptnetmap
 {

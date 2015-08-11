@@ -96,15 +96,16 @@ static int virtio_net_ptnetmap_up(VirtIODevice *vdev)
     }
 #endif
     /* Configure the RX ring */
-    n->ptn.cfg.rx_ring.ioeventfd = event_notifier_get_fd(virtio_queue_get_host_notifier(q->rx_vq));
-    n->ptn.cfg.rx_ring.irqfd = event_notifier_get_fd(virtio_queue_get_guest_notifier(q->rx_vq));
+    n->ptn.cfg.rx_ring.ioeventfd =
+        event_notifier_get_fd(virtio_queue_get_host_notifier(q->rx_vq));
+    n->ptn.cfg.rx_ring.irqfd =
+        event_notifier_get_fd(virtio_queue_get_guest_notifier(q->rx_vq));
 
     /* Configure the TX ring */
-    n->ptn.cfg.tx_ring.ioeventfd = event_notifier_get_fd(virtio_queue_get_host_notifier(q->tx_vq));
-    n->ptn.cfg.tx_ring.irqfd = event_notifier_get_fd(virtio_queue_get_guest_notifier(q->tx_vq));
-
-    printf("rx [id: %d] - ioeventfd %d irqfd %d\n", virtio_get_queue_index(q->rx_vq), n->ptn.cfg.rx_ring.ioeventfd, n->ptn.cfg.rx_ring.irqfd);
-    printf("tx [id: %d] - ioeventfd %d irqfd %d\n", virtio_get_queue_index(q->tx_vq), n->ptn.cfg.tx_ring.ioeventfd, n->ptn.cfg.tx_ring.irqfd);
+    n->ptn.cfg.tx_ring.ioeventfd =
+        event_notifier_get_fd(virtio_queue_get_host_notifier(q->tx_vq));
+    n->ptn.cfg.tx_ring.irqfd =
+        event_notifier_get_fd(virtio_queue_get_guest_notifier(q->tx_vq));
 
     /* push fake-elem in the tx/rx queue to enable interrupts */
     if (virtqueue_pop(q->rx_vq, &elem)) {
@@ -209,7 +210,8 @@ static int virtio_net_ptnetmap_get_mem(VirtIODevice *vdev)
     return ret;
 }
 
-static void virtio_net_ptnetmap_get_reg(VirtIODevice *vdev, uint8_t *config, uint32_t addr)
+static void virtio_net_ptnetmap_get_reg(VirtIODevice *vdev, uint8_t *config,
+        uint32_t addr)
 {
     VirtIONet *n = VIRTIO_NET(vdev);
     config += PTNETMAP_VIRTIO_IO_BASE;
@@ -225,7 +227,8 @@ static void virtio_net_ptnetmap_get_reg(VirtIODevice *vdev, uint8_t *config, uin
     }
 }
 
-static void virtio_net_ptnetmap_set_reg(VirtIODevice *vdev, const uint8_t *config, uint32_t addr)
+static void virtio_net_ptnetmap_set_reg(VirtIODevice *vdev,
+        const uint8_t *config, uint32_t addr)
 {
     VirtIONet *n = VIRTIO_NET(vdev);
     uint32_t *val, ret;
@@ -283,8 +286,10 @@ static void virtio_net_ptnetmap_set_reg(VirtIODevice *vdev, const uint8_t *confi
             break;
         case PTNETMAP_VIRTIO_IO_CSBBAL:
             memcpy(&n->ptn.reg[addr], config + addr, 4);
-            paravirt_configure_csb(&n->ptn.csb, *((uint32_t *)(n->ptn.reg + PTNETMAP_VIRTIO_IO_CSBBAL)),
-                    *((uint32_t *)(n->ptn.reg + PTNETMAP_VIRTIO_IO_CSBBAH)), NULL, NULL);
+            paravirt_configure_csb(&n->ptn.csb,
+                    *((uint32_t *)(n->ptn.reg + PTNETMAP_VIRTIO_IO_CSBBAL)),
+                    *((uint32_t *)(n->ptn.reg + PTNETMAP_VIRTIO_IO_CSBBAH)),
+                    NULL, NULL);
             break;
         default:
             break;

@@ -22,9 +22,10 @@
 #ifndef PTNETMAP_H
 #define PTNETMAP_H
 
+#include <net/if.h>
+#include "net/netmap.h"
 #include "net/net.h"
 #include "exec/memory.h"
-#include <net/if.h>
 #include "net/paravirt.h"
 
 struct ptnetmap_state {
