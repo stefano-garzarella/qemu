@@ -526,8 +526,11 @@ static uint32_t virtio_net_get_features(VirtIODevice *vdev, uint32_t features)
 #ifdef CONFIG_NETMAP_PASSTHROUGH
     if (n->ptn.state == NULL)
         features &= ~(0x1 << VIRTIO_NET_F_PTNETMAP);
-    else
+    else {
+        features |= (0x1 << VIRTIO_NET_F_PTNETMAP);
         features &= ~(0x1 << VIRTIO_RING_F_EVENT_IDX);
+    }
+
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 
     if (!get_vhost_net(nc->peer)) {

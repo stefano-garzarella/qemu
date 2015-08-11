@@ -324,8 +324,6 @@ static void virtio_net_ptnetmap_init(VirtIODevice *vdev)
         n->ptn.features = 0;
         return;
     }
-
-    printf("ptnetmap-virtio init END\n");
 }
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 
