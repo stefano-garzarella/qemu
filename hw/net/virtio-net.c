@@ -26,7 +26,7 @@
 #include "qapi-event.h"
 #include "hw/virtio/virtio-access.h"
 #ifdef CONFIG_NETMAP_PASSTHROUGH
-#include "virtio-netmap.h"
+#include "virtio-ptnetmap.h"
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 
 /* Rate monitor: shows the communication statistics. */
