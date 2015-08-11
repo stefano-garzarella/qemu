@@ -1,3 +1,27 @@
+/*
+ * ptnetmap-memdev PCI device
+ *
+ * Copyright (c) 2015 Stefano Garzarella
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
 #include "hw/hw.h"
 #include "hw/pci/pci.h"
 #include "qemu/event_notifier.h"
@@ -5,37 +29,6 @@
 #include "net/ptnetmap.h"
 
 #define DEBUG
-
-#ifdef DEBUG
-#include <execinfo.h>
-
-static void btrace(void)
-{
-    int j, nptrs;
-#define SIZE 100
-    void *buffer[SIZE];
-    char **strings;
-
-    nptrs = backtrace(buffer, SIZE);
-    printf("backtrace() returned %d addresses\n", nptrs);
-
-    /* The call backtrace_symbols_fd(buffer, nptrs, STDOUT_FILENO)
-       would produce similar output to the following: */
-
-    strings = backtrace_symbols(buffer, nptrs);
-    if (strings == NULL) {
-        perror("backtrace_symbols");
-        exit(EXIT_FAILURE);
-    }
-
-    for (j = 0; j < nptrs; j++)
-        printf("%s\n", strings[j]);
-
-    free(strings);
-}
-#else
-#define btrace()
-#endif
 
 static uint64_t upper_pow2(uint32_t v) {
     /* from bit-twiddling hacks */
@@ -179,7 +172,6 @@ static int ptnetmap_memdev_init(PCIDevice *dev)
 
     QTAILQ_INSERT_TAIL(&ptn_memdevs, ptn_state, next);
     printf("ptnetmap_memdev: loaded\n");
-    btrace();
     return 0;
 }
 
