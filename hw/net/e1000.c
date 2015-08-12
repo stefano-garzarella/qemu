@@ -2924,20 +2924,11 @@ static int pci_e1000_init(PCIDevice *pci_dev)
         d->ptn_features = 0;
         goto pt_end;
     }
+
     d->ptn_features = ptnetmap_get_features(d->ptn, NET_PTN_FEATURES_BASE);
 
     /* backend require ptnetmap support */
-    if (d->ptn_features & NET_PTN_FEATURES_BASE) {
-        int ret;
-
-        ret = e1000_ptnetmap_get_mem(d); /* TODO-ste : change func name */
-        if (ret) {
-            D("ptnetmap shared memory not mapped");
-            d->ptn = NULL;
-            d->ptn_features = 0;
-            goto pt_end;
-        }
-    } else {
+    if (!(d->ptn_features & NET_PTN_FEATURES_BASE)) {
         D("ptnetmap not supported/required");
         d->ptn = NULL;
         d->ptn_features = 0;
