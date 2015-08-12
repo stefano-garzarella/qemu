@@ -2304,7 +2304,7 @@ e1000_ptnetmap_get_mem(E1000State *s)
     s->csb->num_rx_rings = ptn->num_rx_rings;
     s->csb->num_tx_slots = ptn->num_tx_slots;
     s->csb->num_rx_slots = ptn->num_rx_slots;
-    D("txr %u rxr %u txd %u rxd %u",
+    ND("txr %u rxr %u txd %u rxd %u",
             s->csb->num_tx_rings,
             s->csb->num_rx_rings,
             s->csb->num_tx_slots,

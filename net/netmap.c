@@ -563,56 +563,6 @@ ptnetmap_get_hostmemid(PTNetmapState *ptn)
     return s->nmd->req.nr_arg2;
 }
 
-/* find parent MemoryRegion */
-static MemoryRegion*
-ptnetmap_find_parent_mr(PTNetmapState *ptn)
-{
-    NetmapState *s;
-
-    QTAILQ_FOREACH(s, &netmap_clients, next) {
-        ptnetmap_get_mem(&s->ptnetmap);
-        if ((s->ptnetmap.mem == ptn->mem) && (s->ptnetmap.memsize == ptn->memsize)
-                && s->ptnetmap.mr_init && !s->ptnetmap.mr_alias) {
-            return &s->ptnetmap.mr;
-        }
-    }
-
-    return NULL;
-}
-
-/* init ram ptr to netmap allocator */
-struct MemoryRegion *
-ptnetmap_init_ram_ptr(PTNetmapState *ptn)
-{
-    MemoryRegion *parent_mr;
-    char mem_name[256]; //XXX
-
-    if (ptn->mr_init) {
-        goto already_init;
-    }
-
-    ptnetmap_get_mem(ptn);
-
-    parent_mr = ptnetmap_find_parent_mr(ptn);
-    if (parent_mr) { /* create an alias of parent MemoryRegion */
-        D("mapped with alias");
-        snprintf(mem_name, 256, "netmap-%s-alias", ptn->netmap->ifname);
-        memory_region_init_alias(&ptn->mr, NULL, mem_name, parent_mr, 0,
-                ptn->memsize);
-        ptn->mr_alias = true;
-    } else { /* init a new MemoryRegion */
-        /* XXX: maybe is better if the OWNER is the NIC. Now the owner is the vm */
-        snprintf(mem_name, 256, "netmap-%s", ptn->netmap->ifname);
-        memory_region_init_ram_ptr(&ptn->mr, NULL, mem_name, ptn->memsize,
-                ptn->mem);
-        vmstate_register_ram_global(&ptn->mr);
-        D("BAR mapped - name: %s size: %lu", mem_name,
-                (long unsigned)ptn->memsize);
-    }
-    ptn->mr_init = true;
-already_init:
-    return &ptn->mr;
-}
 
 int
 ptnetmap_create(PTNetmapState *ptn, struct ptnetmap_cfg *conf)
