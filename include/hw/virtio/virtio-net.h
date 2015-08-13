@@ -100,7 +100,7 @@ struct virtio_net_ptnetmap
     struct ptnetmap_cfg cfg;            /* ptnetmap configuration */
 
     /* ptnetmap register */
-    uint8_t reg[PTNEMTAP_VIRTIO_IO_SIZE];
+    uint8_t reg[PTNETMAP_VIRTIO_IO_SIZE];
 };
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
 

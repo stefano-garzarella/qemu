@@ -106,7 +106,7 @@ static VirtIOFeature feature_sizes[] = {
      .end = endof(struct virtio_net_config, max_virtqueue_pairs)},
 #ifdef CONFIG_NETMAP_PASSTHROUGH
     {.flags = 1 << VIRTIO_NET_F_PTNETMAP,
-     .end = sizeof(struct virtio_net_config) + PTNEMTAP_VIRTIO_IO_SIZE},
+     .end = sizeof(struct virtio_net_config) + PTNETMAP_VIRTIO_IO_SIZE},
 #endif /* CONFIG_NETMAP_PASSTHROUGH */
     {}
 };
@@ -1800,7 +1800,7 @@ static void virtio_net_instance_init(Object *obj)
      */
     n->config_size = sizeof(struct virtio_net_config);
 #ifdef CONFIG_NETMAP_PASSTHROUGH
-    n->config_size += PTNEMTAP_VIRTIO_IO_SIZE;
+    n->config_size += PTNETMAP_VIRTIO_IO_SIZE;
 #endif /*CONFIG_NETMAP_PASSTHROUGH */
 }
 

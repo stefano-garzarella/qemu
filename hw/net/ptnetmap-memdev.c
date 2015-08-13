@@ -83,7 +83,7 @@ static QTAILQ_HEAD(, PTNetmapMemDevState) ptn_memdevs = QTAILQ_HEAD_INITIALIZER(
 /* 16 bit r/o */
 #define PTNETMAP_IO_PCI_HOSTID          8
 
-#define PTNEMTAP_IO_SIZE                10
+#define PTNETMAP_IO_SIZE                10
 
 static void
 ptnetmap_memdev_io_write(void *opaque, hwaddr addr, uint64_t val,
@@ -147,7 +147,7 @@ static int ptnetmap_memdev_init(PCIDevice *dev)
     pci_conf[PCI_INTERRUPT_PIN] = 0; /* no interrupt pin */
 
     /* init register PCI_BAR */
-    size = upper_pow2(PTNEMTAP_IO_SIZE);
+    size = upper_pow2(PTNETMAP_IO_SIZE);
     memory_region_init_io(&ptn_state->io_bar, OBJECT(ptn_state),
             &ptnetmap_memdev_io_ops, ptn_state, "ptnetmap-io-bar", size);
     pci_register_bar(dev, PTNETMAP_IO_PCI_BAR, PCI_BASE_ADDRESS_SPACE_IO,
