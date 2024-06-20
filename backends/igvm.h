@@ -18,6 +18,6 @@
 #include "qapi/error.h"
 
 int qigvm_process_file(IgvmCfg *igvm, ConfidentialGuestSupport *cgs,
-                      Error **errp);
+                      bool onlyVpContext, Error **errp);
 
 #endif

@@ -870,7 +870,7 @@ static IgvmHandle qigvm_file_init(char *filename, Error **errp)
 }
 
 int qigvm_process_file(IgvmCfg *cfg, ConfidentialGuestSupport *cgs,
-                       Error **errp)
+                       bool onlyVpContext, Error **errp)
 {
     int32_t header_count;
     QIgvmParameterData *parameter;
@@ -914,11 +914,22 @@ int qigvm_process_file(IgvmCfg *cfg, ConfidentialGuestSupport *cgs,
          ctx.current_header_index++) {
         IgvmVariableHeaderType type = igvm_get_header_type(
             ctx.file, IGVM_HEADER_SECTION_DIRECTIVE, ctx.current_header_index);
-        if (qigvm_handler(&ctx, type, errp) < 0) {
-            goto cleanup_parameters;
+        if (!onlyVpContext || (type == IGVM_VHT_VP_CONTEXT)) {
+            if (qigvm_handler(&ctx, type, errp) < 0) {
+                goto cleanup_parameters;
+            }
         }
     }
 
+    /*
+     * If only processing the VP context then we don't need to process
+     * any more of the file.
+     */
+    if (onlyVpContext) {
+        retval = 0;
+        goto cleanup_parameters;
+    }
+    
     header_count =
         igvm_header_count(ctx.file, IGVM_HEADER_SECTION_INITIALIZATION);
     if (header_count < 0) {
