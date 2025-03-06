@@ -1893,14 +1893,14 @@ static int sev_common_kvm_init(ConfidentialGuestSupport *cgs, Error **errp)
          * each vcpu.
          *
          * The IGVM file is normally processed after initialization. Therefore
-         * we need to pre-process it here to extract sev_features in order to
-         * provide it to KVM_SEV_INIT2. Each cgs_* function that is called by
-         * the IGVM processor detects this pre-process by observing the state
-         * as SEV_STATE_UNINIT.
+         * we need to pre-process it here, just looking for the vp_context to
+         * extract sev_features in order to provide it to KVM_SEV_INIT2. Each
+         * cgs_* function that is called by the IGVM processor detects this
+         * pre-process by observing the state as SEV_STATE_UNINIT.
          */
         if (x86machine->igvm) {
             if (IGVM_CFG_GET_CLASS(x86machine->igvm)
-                    ->process(x86machine->igvm, machine->cgs, errp) == -1) {
+                    ->process_vp_context(x86machine->igvm, machine->cgs, errp) == -1) {
                 return -1;
             }
             /*

@@ -41,6 +41,7 @@ static void igvm_cfg_class_init(ObjectClass *oc, void *data)
                                           "Set the IGVM filename to use");
 
     igvmc->process = qigvm_process_file;
+    igvmc->process_vp_context = qigvm_process_vp_context;
 }
 
 static void igvm_cfg_init(Object *obj)

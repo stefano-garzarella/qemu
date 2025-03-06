@@ -965,3 +965,54 @@ cleanup:
 
     return retval;
 }
+
+int qigvm_process_vp_context(IgvmCfg *cfg, ConfidentialGuestSupport *cgs,
+                             Error **errp)
+{
+    int32_t header_count;
+    int retval = -1;
+    QIgvm ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.file = qigvm_file_init(cfg->filename, errp);
+    if (ctx.file < 0) {
+        return -1;
+    }
+
+    ctx.cgs = cgs;
+    ctx.cgsc = cgs ? CONFIDENTIAL_GUEST_SUPPORT_GET_CLASS(cgs) : NULL;
+
+    /*
+     * Check that the IGVM file provides configuration for the current
+     * platform
+     */
+    if (qigvm_supported_platform_compat_mask(&ctx, errp) < 0) {
+        goto cleanup;
+    }
+
+    header_count = igvm_header_count(ctx.file, IGVM_HEADER_SECTION_DIRECTIVE);
+    if (header_count <= 0) {
+        error_setg(
+            errp, "Invalid directive header count in IGVM file. Error code: %X",
+            header_count);
+        goto cleanup;
+    }
+
+    for (ctx.current_header_index = 0;
+         ctx.current_header_index < (unsigned)header_count;
+         ctx.current_header_index++) {
+        IgvmVariableHeaderType type = igvm_get_header_type(
+            ctx.file, IGVM_HEADER_SECTION_DIRECTIVE, ctx.current_header_index);
+        if (type == IGVM_VHT_VP_CONTEXT) {
+            if (qigvm_handler(&ctx, type, errp) < 0) {
+                goto cleanup;
+            }
+        }
+    }
+    retval = 0;
+
+cleanup:
+    igvm_free(ctx.file);
+   
+    return retval;
+}

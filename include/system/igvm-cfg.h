@@ -38,6 +38,16 @@ typedef struct IgvmCfgClass {
     int (*process)(IgvmCfg *cfg, ConfidentialGuestSupport *cgs,
                    Error **errp);
 
+    /*
+     * If an IGVM filename has been specified then only process
+     * the VMSA sections in the IGVM file.
+     * Performs a no-op if no filename has been specified.
+     *
+     * Returns 0 for ok and -1 on error.
+     */
+    int (*process_vp_context)(IgvmCfg *cfg, ConfidentialGuestSupport *cgs,
+        Error **errp);
+
 } IgvmCfgClass;
 
 #define TYPE_IGVM_CFG "igvm-cfg"

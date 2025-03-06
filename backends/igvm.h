@@ -20,4 +20,7 @@
 int qigvm_process_file(IgvmCfg *igvm, ConfidentialGuestSupport *cgs,
                       Error **errp);
 
+int qigvm_process_vp_context(IgvmCfg *igvm, ConfidentialGuestSupport *cgs,
+                             Error **errp);
+
 #endif
